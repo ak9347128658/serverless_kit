@@ -156,7 +156,7 @@ def to_cloud_event(ce: Any, fn: str = "") -> Optional[Event]:
             id=str(data.get("generation") or _ce_attr(ce, "id") or ""),
             bucket=data.get("bucket"),
             key=key,
-            size=int(size) if size not in (None, "") else None,
+            size=int(size) if size is not None and size != "" else None,
             action=action_from(ce_type.rsplit(".", 1)[-1]),
             attributes={"content_type": data.get("contentType"), "event_type": ce_type},
             source=source,

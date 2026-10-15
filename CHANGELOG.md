@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-15
+
+### Fixed
+- GCP adapter: the storage object `size` check now narrows `None` explicitly, so mypy passes on Python 3.9 CI. Runtime behavior is unchanged.
+
+No runtime behavior changes: functions deployed with 0.1.1 don't need to be redeployed.
+
 ## [0.1.1] - 2026-10-15
 
 ### Changed
