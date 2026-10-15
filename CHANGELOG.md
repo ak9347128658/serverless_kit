@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [0.1.2] - 2026-10-15
 
 ### Fixed
+- Python 3.9 support: `pskit package`/`deploy` (and the Cloudflare provider) crashed with `TypeError: write_text() got an unexpected keyword argument 'newline'`, because `Path.write_text(newline=...)` only exists on Python 3.10+. Generated files are now written as UTF-8 bytes with `\n` line endings on every Python version.
 - GCP adapter: the storage object `size` check now narrows `None` explicitly, so mypy passes on Python 3.9 CI. Runtime behavior is unchanged.
 
 No runtime behavior changes: functions deployed with 0.1.1 don't need to be redeployed.

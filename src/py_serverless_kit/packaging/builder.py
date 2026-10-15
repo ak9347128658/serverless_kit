@@ -228,7 +228,7 @@ def build_artifact(project: Project, *, skip_deps: bool = False, log=print) -> A
     for rel, content in provider.shim_files(cfg).items():
         dest = build_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, "utf-8", newline="\n")
+        dest.write_bytes(content.encode("utf-8"))
 
     req_path = (project.root / cfg.package.requirements) if cfg.package.requirements else None
     user_reqs = read_requirements(req_path)

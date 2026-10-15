@@ -204,7 +204,7 @@ class CloudflareProvider(Provider):
             schedules = {sched.to_cron5(ev): ev.input for ev in fn.events_of("schedule") if ev.enabled}
             source = worker_source(files, name, ctx.environment(name, fn), schedules)
             path = out_dir / f"{name}.py"
-            path.write_text(source, "utf-8", newline="\n")
+            path.write_bytes(source.encode("utf-8"))
             opts = dict(fn.options)
             route = opts.pop("route", None)
             body: Dict[str, Any] = {
