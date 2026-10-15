@@ -1,5 +1,9 @@
 # py-serverless-kit
 
+[![CI](https://github.com/ak9347128658/serverless_kit/actions/workflows/ci.yml/badge.svg)](https://github.com/ak9347128658/serverless_kit/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/py-serverless-kit.svg)](https://pypi.org/project/py-serverless-kit/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/ak9347128658/serverless_kit/blob/main/LICENSE)
+
 **Write your Python functions once. Deploy them to any of 10 clouds by changing one line of YAML.**
 
 `py-serverless-kit` (CLI: `pskit`) is a Serverless-Framework-style toolkit built on **Terraform**. Your handlers use one small, provider-neutral API (`Event`, `Context`, `Response`). A `pskit.yml` file says which cloud they run on and what triggers them: HTTP, schedules, queues, storage, topics. The same file can also define workflows in the style of Step Functions. `pskit deploy` generates Terraform for the chosen cloud, applies it, and builds an HTML dashboard of everything you deployed.
@@ -75,7 +79,7 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 
 Run `pskit providers` for the live matrix. If a config uses a trigger the target cloud can't support, **`pskit validate` fails with a clear message instead of deploying something half-working.**
 
-> **Maturity, honestly stated:** the Terraform generated for every provider is checked with `terraform validate` against the real provider plugins (in CI, too). The *stable* providers cover the most surface area. *beta* and *experimental* providers follow vendor docs for event payloads that `validate` can't check, so try them on a non-production account first. See [docs/providers.md](docs/providers.md) for each provider's details and limits.
+> **Maturity, honestly stated:** the Terraform generated for every provider is checked with `terraform validate` against the real provider plugins (in CI, too). The *stable* providers cover the most surface area. *beta* and *experimental* providers follow vendor docs for event payloads that `validate` can't check, so try them on a non-production account first. See [docs/providers.md](https://github.com/ak9347128658/serverless_kit/blob/main/docs/providers.md) for each provider's details and limits.
 
 ## Install
 
@@ -83,7 +87,7 @@ Run `pskit providers` for the live matrix. If a config uses a trigger the target
 pip install py-serverless-kit
 ```
 
-You also need **Terraform ≥ 1.5** (or OpenTofu) on your `PATH`, plus credentials for your cloud. See [Getting started](docs/getting-started.md#cloud-credentials).
+You also need **Terraform ≥ 1.5** (or OpenTofu) on your `PATH`, plus credentials for your cloud. See [Getting started](https://github.com/ak9347128658/serverless_kit/blob/main/docs/getting-started.md#cloud-credentials).
 
 ## Quick start
 
@@ -199,57 +203,60 @@ The same definition becomes **AWS Step Functions** on AWS, **Google Cloud Workfl
               your result ──► Response / raw value ──► adapter ──► native cloud response
 ```
 
-More: [docs/architecture.md](docs/architecture.md).
+More: [docs/architecture.md](https://github.com/ak9347128658/serverless_kit/blob/main/docs/architecture.md).
 
 ## Examples
 
-Fifteen runnable scenarios live in [`examples/`](examples/). They are tested in CI.
+Fifteen runnable scenarios live in [`examples/`](https://github.com/ak9347128658/serverless_kit/tree/main/examples/). They are tested in CI.
 
 | | |
 |---|---|
-| [01-hello-http](examples/01-hello-http) | Minimal HTTP function |
-| [02-rest-api](examples/02-rest-api) | CRUD, path params, validation errors, CORS, cookies, binary, JWT |
-| [03-scheduled-jobs](examples/03-scheduled-jobs) | rate/cron schedules with input and time zones |
-| [04-queue-worker](examples/04-queue-worker) | Queue consumer, partial batch failures, dead-letter queue |
-| [05-storage-events](examples/05-storage-events) | Object created/deleted with filters |
-| [06-pubsub-topic](examples/06-pubsub-topic) | Topic fan-out and filters |
-| [07-workflow-orders](examples/07-workflow-orders) | Every workflow state type, retry/catch |
-| [08-multi-cloud](examples/08-multi-cloud) | Same code, all 10 providers |
-| [09-function-invoke](examples/09-function-invoke) | Function-to-function `invoke()` |
-| [10-stages-and-config](examples/10-stages-and-config) | Stages, variables, secrets |
-| [11-custom-terraform](examples/11-custom-terraform) | `terraform.extra`, `${tf:...}`, remote state, hooks |
-| [12-async-and-context](examples/12-async-and-context) | async handlers, logging, deadlines |
-| [13-migrate-from-aws-lambda](examples/13-migrate-from-aws-lambda) | Before/after migration of Lambda + Step Functions |
-| [14-testing](examples/14-testing) | Unit-testing handlers and workflows with pytest |
-| [15-ci-cd-deploy](examples/15-ci-cd-deploy) | GitHub Actions deploys per stage |
+| [01-hello-http](https://github.com/ak9347128658/serverless_kit/tree/main/examples/01-hello-http) | Minimal HTTP function |
+| [02-rest-api](https://github.com/ak9347128658/serverless_kit/tree/main/examples/02-rest-api) | CRUD, path params, validation errors, CORS, cookies, binary, JWT |
+| [03-scheduled-jobs](https://github.com/ak9347128658/serverless_kit/tree/main/examples/03-scheduled-jobs) | rate/cron schedules with input and time zones |
+| [04-queue-worker](https://github.com/ak9347128658/serverless_kit/tree/main/examples/04-queue-worker) | Queue consumer, partial batch failures, dead-letter queue |
+| [05-storage-events](https://github.com/ak9347128658/serverless_kit/tree/main/examples/05-storage-events) | Object created/deleted with filters |
+| [06-pubsub-topic](https://github.com/ak9347128658/serverless_kit/tree/main/examples/06-pubsub-topic) | Topic fan-out and filters |
+| [07-workflow-orders](https://github.com/ak9347128658/serverless_kit/tree/main/examples/07-workflow-orders) | Every workflow state type, retry/catch |
+| [08-multi-cloud](https://github.com/ak9347128658/serverless_kit/tree/main/examples/08-multi-cloud) | Same code, all 10 providers |
+| [09-function-invoke](https://github.com/ak9347128658/serverless_kit/tree/main/examples/09-function-invoke) | Function-to-function `invoke()` |
+| [10-stages-and-config](https://github.com/ak9347128658/serverless_kit/tree/main/examples/10-stages-and-config) | Stages, variables, secrets |
+| [11-custom-terraform](https://github.com/ak9347128658/serverless_kit/tree/main/examples/11-custom-terraform) | `terraform.extra`, `${tf:...}`, remote state, hooks |
+| [12-async-and-context](https://github.com/ak9347128658/serverless_kit/tree/main/examples/12-async-and-context) | async handlers, logging, deadlines |
+| [13-migrate-from-aws-lambda](https://github.com/ak9347128658/serverless_kit/tree/main/examples/13-migrate-from-aws-lambda) | Before/after migration of Lambda + Step Functions |
+| [14-testing](https://github.com/ak9347128658/serverless_kit/tree/main/examples/14-testing) | Unit-testing handlers and workflows with pytest |
+| [15-ci-cd-deploy](https://github.com/ak9347128658/serverless_kit/tree/main/examples/15-ci-cd-deploy) | GitHub Actions deploys per stage |
 
 ## Documentation
 
 | | |
 |---|---|
-| [Getting started](docs/getting-started.md) | Install, credentials, first deploy |
-| [Configuration reference](docs/configuration.md) | Every `pskit.yml` key, variables, `extends`, stages |
-| [Events](docs/events.md) | HTTP, schedule, queue, storage, topic, with a per-provider matrix |
-| [Handler API](docs/handlers.md) | `Event`, `Context`, `Response`, errors, `BatchResult`, `invoke()` |
-| [Workflows](docs/workflows.md) | State machine reference, engines, limitations |
-| [Providers](docs/providers.md) | Options, credentials, resources and limits per cloud |
-| [CLI](docs/cli.md) | Every command and flag |
-| [Local development](docs/local-development.md) | `pskit dev`, `invoke`, testing |
-| [Dashboard](docs/dashboard.md) | The deployment UI |
-| [Architecture](docs/architecture.md) | Internals and third-party providers |
-| [Migrating from AWS](docs/migrating-from-aws.md) | Lambda + Step Functions → pskit |
-| [Troubleshooting](docs/troubleshooting.md) | Common errors and fixes |
+| [Getting started](https://github.com/ak9347128658/serverless_kit/blob/main/docs/getting-started.md) | Install, credentials, first deploy |
+| [Configuration reference](https://github.com/ak9347128658/serverless_kit/blob/main/docs/configuration.md) | Every `pskit.yml` key, variables, `extends`, stages |
+| [Events](https://github.com/ak9347128658/serverless_kit/blob/main/docs/events.md) | HTTP, schedule, queue, storage, topic, with a per-provider matrix |
+| [Handler API](https://github.com/ak9347128658/serverless_kit/blob/main/docs/handlers.md) | `Event`, `Context`, `Response`, errors, `BatchResult`, `invoke()` |
+| [Workflows](https://github.com/ak9347128658/serverless_kit/blob/main/docs/workflows.md) | State machine reference, engines, limitations |
+| [Providers](https://github.com/ak9347128658/serverless_kit/blob/main/docs/providers.md) | Options, credentials, resources and limits per cloud |
+| [CLI](https://github.com/ak9347128658/serverless_kit/blob/main/docs/cli.md) | Every command and flag |
+| [Local development](https://github.com/ak9347128658/serverless_kit/blob/main/docs/local-development.md) | `pskit dev`, `invoke`, testing |
+| [Dashboard](https://github.com/ak9347128658/serverless_kit/blob/main/docs/dashboard.md) | The deployment UI |
+| [Architecture](https://github.com/ak9347128658/serverless_kit/blob/main/docs/architecture.md) | Internals and third-party providers |
+| [Migrating from AWS](https://github.com/ak9347128658/serverless_kit/blob/main/docs/migrating-from-aws.md) | Lambda + Step Functions → pskit |
+| [Troubleshooting](https://github.com/ak9347128658/serverless_kit/blob/main/docs/troubleshooting.md) | Common errors and fixes |
 
 ## Contributing & releasing
 
-- Contributor guide: [deploy_docs/CONTRIBUTING.md](deploy_docs/CONTRIBUTING.md)
-- Publishing to PyPI (step by step): [deploy_docs/PUBLISHING_TO_PYPI.md](deploy_docs/PUBLISHING_TO_PYPI.md)
-- Security policy: [SECURITY.md](SECURITY.md)
+- Contributor guide: [deploy_docs/CONTRIBUTING.md](https://github.com/ak9347128658/serverless_kit/blob/main/deploy_docs/CONTRIBUTING.md)
+- Quick PyPI release guide: [deploy_docs/How_to_deploy.md](https://github.com/ak9347128658/serverless_kit/blob/main/deploy_docs/How_to_deploy.md)
+- Publishing to PyPI (step by step): [deploy_docs/PUBLISHING_TO_PYPI.md](https://github.com/ak9347128658/serverless_kit/blob/main/deploy_docs/PUBLISHING_TO_PYPI.md)
+- Security policy: [SECURITY.md](https://github.com/ak9347128658/serverless_kit/blob/main/SECURITY.md)
 
 ## Author
 
 Created and maintained by **Asif Khan @ [Kavion.ai](https://kavion.ai)**.
 
+Source code, issues and releases: <https://github.com/ak9347128658/serverless_kit>
+
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](https://github.com/ak9347128658/serverless_kit/blob/main/LICENSE).

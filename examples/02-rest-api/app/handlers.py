@@ -93,7 +93,7 @@ def cover(event: Event, ctx: Context):
 
 
 def docs(event: Event, ctx: Context):
-    return Response.redirect("https://github.com/kavion-ai/py-serverless-kit/tree/main/docs")
+    return Response.redirect("https://github.com/ak9347128658/serverless_kit/tree/main/docs")
 
 
 def create_session(event: Event, ctx: Context):

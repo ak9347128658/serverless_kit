@@ -34,8 +34,8 @@ PyPI trusts a specific GitHub workflow through OIDC, so no API token is stored a
 1. Push the repository to GitHub.
 2. On PyPI go to **Your account → Publishing → Add a new pending publisher** and fill in:
    - PyPI project name: `py-serverless-kit`
-   - Owner: your GitHub org or user (e.g. `kavion-ai`)
-   - Repository name: e.g. `py-serverless-kit`
+   - Owner: `ak9347128658`
+   - Repository name: `serverless_kit`
    - Workflow name: `release.yml`
    - Environment name: `pypi`
 3. Do the same on TestPyPI with environment name `testpypi`.

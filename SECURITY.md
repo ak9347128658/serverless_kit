@@ -8,7 +8,7 @@ Security fixes go into the latest minor release line. Because the function runti
 
 Please **do not** open a public GitHub issue for security problems.
 
-Report them privately through GitHub's **Security → Report a vulnerability** (private advisory) on this repository. Include:
+Report them privately through GitHub's **Security → Report a vulnerability** (private advisory) at <https://github.com/ak9347128658/serverless_kit/security/advisories/new>. Include:
 
 - affected version (`pskit --version`) and provider;
 - a description of the issue and its impact;

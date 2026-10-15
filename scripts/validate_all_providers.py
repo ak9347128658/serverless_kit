@@ -25,7 +25,7 @@ from pathlib import Path
 from py_serverless_kit.core.deployer import Deployer
 from py_serverless_kit.core.project import Project
 from py_serverless_kit.providers.registry import available, get_provider
-from py_serverless_kit.terraform.runner import find_binary
+from py_serverless_kit.terraform.runner import TerraformError, find_binary
 
 # Placeholder values for options a provider requires. `terraform validate`
 # checks types and references only, so fake ids are fine.
@@ -143,6 +143,11 @@ def main() -> int:
     parser.add_argument("--provider", action="append", help="provider(s) to validate (default: all)")
     parser.add_argument("--keep", action="store_true", help="keep generated directories")
     args = parser.parse_args()
+    try:
+        find_binary()
+    except TerraformError as exc:
+        print(f"{exc}\n\nThis check is optional: it needs Terraform locally. CI runs it for you.", file=sys.stderr)
+        return 2
     names = args.provider or available()
     results = {n: validate(n, args.keep) for n in names}
     failed = [n for n, ok in results.items() if not ok]

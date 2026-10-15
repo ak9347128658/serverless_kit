@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-15
+
+### Changed
+- Author and maintainer set to Asif Khan @ Kavion.ai (`py_serverless_kit.__author__`, package metadata, LICENSE).
+- Project URLs (homepage, docs, issues, changelog) now point to https://github.com/ak9347128658/serverless_kit.
+- README links are absolute so they work on the PyPI project page; added CI/PyPI/license badges.
+- `scripts/validate_all_providers.py` explains that Terraform is optional instead of printing a traceback when it isn't installed.
+
+### Added
+- `deploy_docs/How_to_deploy.md`: short PyPI release guide with PowerShell commands and troubleshooting (e.g. TestPyPI `403`).
+- `deploy_docs/HOW_TO_INSTALL_TERRAFORM.md`: installing Terraform on Windows.
+
+No runtime changes: functions deployed with 0.1.0 don't need to be redeployed.
+
 ## [0.1.0] - 2026-10-15
 
 ### Added

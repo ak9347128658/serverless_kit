@@ -60,8 +60,8 @@ platform -> shim (e.g. pskit_entry.handler) -> runtime.adapters.<cloud> -> runti
 ## Development setup
 
 ```bash
-git clone https://github.com/kavion-ai/py-serverless-kit.git
-cd py-serverless-kit
+git clone https://github.com/ak9347128658/serverless_kit.git
+cd serverless_kit
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"

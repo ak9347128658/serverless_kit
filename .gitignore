@@ -11,7 +11,7 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
-
+.pypirc
 # py-serverless-kit working dirs (local terraform state, artifacts)
 .pskit/
 .terraform/
