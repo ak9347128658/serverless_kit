@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-15
+
+### Fixed
+- AWS: `pskit deploy` failed with `creating Lambda Function ...: decomposing request: bufio.Scanner: token too long` once the bundle (e.g. with vendored dependencies) got large, because the zip was sent inline in every `CreateFunction` request. The artifact is now uploaded once to S3 (`aws_s3_object`) and each Lambda function references it via `s3_bucket`/`s3_key`. This also lifts the 50 MB inline upload limit.
+
+### Added
+- AWS options `artifact_bucket` (use an existing bucket for code uploads instead of the private `<service>-<stage>-code-*` bucket pskit creates) and `artifact_upload: s3 | direct` (`direct` restores the old inline upload).
+
+No runtime changes. Existing AWS deployments get a new code bucket on the next `pskit deploy`; Lambda functions are updated in place.
+
 ## [0.1.2] - 2026-10-15
 
 ### Fixed

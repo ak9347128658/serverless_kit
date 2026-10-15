@@ -76,7 +76,7 @@ def test_existing_resources_and_iam(make_project, render):
         )
     )
     assert "aws_sqs_queue" not in tf["resource"]
-    assert "aws_s3_bucket" not in tf["resource"]
+    assert set(tf["resource"]["aws_s3_bucket"]) == {"pskit_artifacts"}  # only the code bucket, not existing-b
     assert set(tf["data"]) == {"aws_sqs_queue", "aws_s3_bucket", "aws_sns_topic"}
     fn = tf["resource"]["aws_lambda_function"]["a"]
     assert fn["role"] == "${aws_iam_role.fn-a.arn}".replace("fn-a", "fn_a")
@@ -180,3 +180,39 @@ def test_default_runtime_follows_provider(make_project):
     assert get_provider("tencent").default_runtime == "python3.10"
     pinned = make_project(yaml % ("tencent", ", runtime: python3.12"))
     assert any(i.where == "provider.runtime" and i.level == "error" for i in pinned.validate())
+
+
+def test_artifact_uploaded_to_s3_by_default(make_project, render):
+    tf = render(make_project(full_config("aws", "eu-west-1")))
+    res = tf["resource"]
+    bucket = res["aws_s3_bucket"]["pskit_artifacts"]
+    assert bucket["bucket_prefix"] == "demo-dev-code-" and bucket["force_destroy"] is True
+    assert res["aws_s3_bucket_public_access_block"]["pskit_artifacts"]["block_public_acls"] is True
+    obj = res["aws_s3_object"]["artifact"]
+    assert obj["bucket"] == "${aws_s3_bucket.pskit_artifacts.id}"
+    assert obj["source"] == "${path.module}/artifact.zip"
+    assert obj["key"].startswith("demo-dev/artifact-") and obj["key"].endswith(".zip")
+    for lam in res["aws_lambda_function"].values():
+        assert "filename" not in lam  # inline upload breaks on large zips ("bufio.Scanner: token too long")
+        assert lam["s3_bucket"] == "${aws_s3_object.artifact.bucket}"
+        assert lam["s3_key"] == "${aws_s3_object.artifact.key}"
+        assert lam["source_code_hash"]
+
+
+def test_artifact_bucket_and_direct_upload_options(make_project, render):
+    yaml = """
+        service: svc
+        provider: {name: aws, options: {%s}}
+        functions:
+          a: {handler: app.handlers.hello}
+        """
+    res = render(make_project(yaml % "artifact_bucket: my-deploys"))["resource"]
+    assert "pskit_artifacts" not in res.get("aws_s3_bucket", {})
+    assert res["aws_s3_object"]["artifact"]["bucket"] == "my-deploys"
+
+    res = render(make_project(yaml % "artifact_upload: direct"))["resource"]
+    assert "aws_s3_object" not in res
+    assert res["aws_lambda_function"]["a"]["filename"] == "${path.module}/artifact.zip"
+
+    project = make_project(yaml % "artifact_upload: ftp")
+    assert any(i.where == "provider.options.artifact_upload" for i in project.validate() if i.level == "error")

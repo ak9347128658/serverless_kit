@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config.schema import FunctionConfig, ServiceConfig
@@ -66,6 +67,10 @@ class AwsProvider(Provider):
 
     def extra_validation(self, config: ServiceConfig) -> List[Issue]:
         issues = []
+        if config.provider.options.get("artifact_upload", "s3") not in ("s3", "direct"):
+            issues.append(
+                Issue("error", "artifact_upload must be 's3' or 'direct'", "provider.options.artifact_upload")
+            )
         for name, fn in config.functions.items():
             for ev in fn.events_of("http"):
                 if ev.auth == "key":
@@ -87,6 +92,7 @@ class AwsProvider(Provider):
         cfg = ctx.config
         has = {e.type for fn in cfg.functions.values() for e in fn.events}
         shared_role = self._role(doc, ctx, "lambda", cfg.provider.iam.statements, "queue" in has, cfg.provider.iam.role)
+        code = self._code_source(doc, ctx)
 
         fn_out: Dict[str, Dict[str, Any]] = {}
         arns: Dict[str, str] = {}
@@ -104,7 +110,7 @@ class AwsProvider(Provider):
                     bool(fn.events_of("queue")),
                     fn.iam.role,
                 )
-            lam = self._function(doc, ctx, name, fn, role)
+            lam = self._function(doc, ctx, name, fn, role, code)
             arns[name] = ref(lam, "arn")
             out: Dict[str, Any] = {
                 "id": ref(lam, "function_name"),
@@ -181,7 +187,60 @@ class AwsProvider(Provider):
             )
         return ref(role, "arn")
 
-    def _function(self, doc: TerraformDoc, ctx: RenderContext, name: str, fn: FunctionConfig, role_arn: str) -> str:
+    def _code_source(self, doc: TerraformDoc, ctx: RenderContext) -> Dict[str, Any]:
+        """Where Lambda gets its code from.
+
+        By default the artifact is uploaded once to S3 and every function points at it. Sending the zip inline
+        (``filename``) puts the whole base64 payload in the CreateFunction request, which fails for larger
+        bundles with ``decomposing request: bufio.Scanner: token too long`` in the AWS provider and is capped
+        at 50 MB by Lambda. ``options.artifact_upload: direct`` restores the inline upload.
+        """
+        if ctx.opt("artifact_upload", "s3") == "direct":
+            return {"filename": "${path.module}/artifact.zip"}
+        existing = ctx.opt("artifact_bucket")
+        if existing:
+            bucket = escape(str(existing))
+        else:
+            label = "pskit-artifacts"
+            prefix = re.sub(r"[^a-z0-9-]", "-", ctx.prefix.lower()).strip("-")[:30].rstrip("-") or "pskit"
+            b = doc.resource(
+                "aws_s3_bucket",
+                label,
+                {"bucket_prefix": f"{prefix}-code-", "force_destroy": True, "tags": ctx.tags()},
+            )
+            doc.resource(
+                "aws_s3_bucket_public_access_block",
+                label,
+                {
+                    "bucket": ref(b, "id"),
+                    "block_public_acls": True,
+                    "block_public_policy": True,
+                    "ignore_public_acls": True,
+                    "restrict_public_buckets": True,
+                },
+            )
+            bucket = ref(b, "id")
+        obj = doc.resource(
+            "aws_s3_object",
+            "artifact",
+            {
+                "bucket": bucket,
+                "key": f"{ctx.prefix}/artifact-{ctx.artifact.sha256[:16]}.zip",
+                "source": "${path.module}/artifact.zip",
+                "source_hash": ctx.artifact.sha256,
+            },
+        )
+        return {"s3_bucket": ref(obj, "bucket"), "s3_key": ref(obj, "key")}
+
+    def _function(
+        self,
+        doc: TerraformDoc,
+        ctx: RenderContext,
+        name: str,
+        fn: FunctionConfig,
+        role_arn: str,
+        code: Dict[str, Any],
+    ) -> str:
         cfg = ctx.config
         phys = ctx.physical_name(name)
         depends: List[str] = []
@@ -198,7 +257,7 @@ class AwsProvider(Provider):
             "role": role_arn,
             "handler": "pskit_entry.handler",
             "runtime": self.runtime_id(cfg.runtime_of(fn)),
-            "filename": "${path.module}/artifact.zip",
+            **code,
             "source_code_hash": ctx.artifact.sha256_b64,
             "memory_size": cfg.memory_of(fn),
             "timeout": cfg.timeout_of(fn),
