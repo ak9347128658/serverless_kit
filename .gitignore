@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# py-serverless-kit working dirs (local terraform state, artifacts)
+.pskit/
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Secrets
+.env
+.pypirc
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

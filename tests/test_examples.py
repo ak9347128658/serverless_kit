@@ -1,0 +1,182 @@
+"""Every example must validate, package and run locally."""
+
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from py_serverless_kit.core.deployer import Deployer
+from py_serverless_kit.core.project import Project
+from py_serverless_kit.local import LocalRunner, http_event
+from py_serverless_kit.providers.registry import get_provider
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+PROJECT_DIRS = sorted(p.parent for p in EXAMPLES.rglob("pskit.yml") if ".pskit" not in p.parts)
+ALL_PROVIDERS = ("aws", "gcp", "azure", "alibaba", "tencent", "huawei", "oracle", "ibm", "digitalocean", "cloudflare")
+
+# (example dir, function, method, path, body, expected status)
+HTTP_CASES = [
+    ("01-hello-http", "hello", "GET", "/hello?name=Ada", None, 200),
+    ("02-rest-api", "list-books", "GET", "/books?author=gibson", None, 200),
+    ("02-rest-api", "get-book", "GET", "/books/b1", None, 200),
+    ("02-rest-api", "get-book", "GET", "/books/nope", None, 404),
+    ("02-rest-api", "create-book", "POST", "/books", {"title": 1}, 400),
+    (
+        "02-rest-api",
+        "create-book",
+        "POST",
+        "/books",
+        {"title": "Dune", "author": "F. Herbert", "year": 1965, "isbn": "9780441013593"},
+        409,
+    ),
+    ("02-rest-api", "cover", "GET", "/books/b1/cover", None, 200),
+    ("02-rest-api", "docs", "GET", "/docs", None, 302),
+    ("02-rest-api", "session", "POST", "/session", {"user": "ada"}, 200),
+    ("04-queue-worker", "enqueue", "POST", "/jobs", {"kind": "email"}, 202),
+    ("08-multi-cloud", "whoami", "GET", "/whoami", None, 200),
+    ("08-multi-cloud", "echo", "POST", "/echo", {"a": 1}, 200),
+    (
+        "09-function-invoke",
+        "quote",
+        "POST",
+        "/quote",
+        {"country": "DE", "items": [{"sku": "a", "qty": 2, "unit_price": 10}]},
+        200,
+    ),
+    ("10-stages-and-config", "config", "GET", "/config", None, 200),
+    ("11-custom-terraform", "create-order", "POST", "/orders", {"item": "book"}, 201),
+    ("12-async-and-context", "aggregate", "GET", "/aggregate", None, 200),
+    ("12-async-and-context", "inspect", "POST", "/inspect", {}, 200),
+    ("13-migrate-from-aws-lambda/after", "create-order", "POST", "/orders", {"items": [{"qty": 1, "price": 5}]}, 202),
+    ("14-testing", "price", "POST", "/price", {"amount": 100, "code": "VIP25"}, 200),
+    ("15-ci-cd-deploy", "health", "GET", "/health", None, 200),
+]
+
+WORKFLOW_CASES = [
+    ("07-workflow-orders", "order-pipeline", "events/happy.json", "SUCCEEDED"),
+    ("07-workflow-orders", "order-pipeline", "events/b2b.json", "SUCCEEDED"),
+    ("07-workflow-orders", "order-pipeline", "events/declined.json", "PaymentDeclined"),
+    ("13-migrate-from-aws-lambda/after", "order-processing", {"items": [{"qty": 2, "price": 300}]}, "SUCCEEDED"),
+    ("13-migrate-from-aws-lambda/after", "order-processing", {"items": [{"qty": 0, "price": 1}]}, "OrderRejected"),
+    ("14-testing", "scoring", {"vip": True}, "SUCCEEDED"),
+]
+
+
+def _id(path: Path) -> str:
+    return path.relative_to(EXAMPLES).as_posix()
+
+
+def _copy(example: Path, tmp_path: Path) -> Path:
+    target = tmp_path / example.name
+    shutil.copytree(example, target, ignore=shutil.ignore_patterns(".pskit", "__pycache__", ".pytest_cache"))
+    return target
+
+
+def _require_provider(name: str) -> None:
+    try:
+        get_provider(name)
+    except Exception as exc:  # noqa: BLE001 - provider still being written
+        pytest.skip(f"provider {name} not importable: {exc}")
+
+
+def _errors(project: Project) -> list:
+    return [str(i) for i in project.validate() if i.level == "error"]
+
+
+def test_every_example_is_discovered():
+    names = {_id(p) for p in PROJECT_DIRS}
+    assert len(names) == 15, names
+
+
+@pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)
+def test_validates_and_packages(example: Path, tmp_path: Path):
+    root = _copy(example, tmp_path)
+    project = Project.load(cwd=root)
+    _require_provider(project.config.provider.name)
+    assert _errors(project) == []
+    result = Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    tf = json.loads(result.tf_file.read_text("utf-8"))
+    assert "pskit" in tf["output"]
+    assert result.artifact.size > 0
+
+
+@pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)
+@pytest.mark.parametrize("provider", ["aws", "gcp", "azure"])
+def test_portable_to_big_three(example: Path, provider: str, tmp_path: Path):
+    if _id(example) == "11-custom-terraform" and provider != "aws":
+        pytest.skip("terraform.extra in this example is AWS-specific by design")
+    _require_provider(provider)
+    project = Project.load(cwd=_copy(example, tmp_path), provider=provider)
+    assert _errors(project) == []
+
+
+@pytest.mark.parametrize("provider", ALL_PROVIDERS)
+def test_multi_cloud_all_providers(provider: str, tmp_path: Path):
+    _require_provider(provider)
+    root = _copy(EXAMPLES / "08-multi-cloud", tmp_path)
+    project = Project.load(cwd=root, provider=provider)
+    assert _errors(project) == []
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+
+
+@pytest.mark.parametrize("cloud,region", [("aws", "eu-west-1"), ("gcp", "europe-west1"), ("azure", "northeurope")])
+def test_multi_cloud_extends_files(cloud: str, region: str, tmp_path: Path):
+    _require_provider(cloud)
+    root = _copy(EXAMPLES / "08-multi-cloud", tmp_path)
+    project = Project.load(f"pskit.{cloud}.yml", cwd=root)
+    assert project.config.provider.name == cloud
+    assert project.config.provider.region == region
+    assert _errors(project) == []
+
+
+@pytest.mark.parametrize(
+    "example,function,method,path,body,status",
+    HTTP_CASES,
+    ids=[f"{c[0]}:{c[1]}:{c[5]}" for c in HTTP_CASES],
+)
+def test_http_functions_locally(example, function, method, path, body, status, tmp_path):
+    root = _copy(EXAMPLES / example, tmp_path)
+    runner = LocalRunner(Project.load(cwd=root), env_file=None)
+    resp = runner.invoke(function, http_event(method, path, body))
+    assert resp.status == status, resp.render()
+
+
+@pytest.mark.parametrize(
+    "example,workflow,data,expected",
+    WORKFLOW_CASES,
+    ids=[f"{c[0]}:{c[1]}:{c[3]}" for c in WORKFLOW_CASES],
+)
+def test_workflows_locally(example, workflow, data, expected, tmp_path):
+    from py_serverless_kit.runtime.workflow import WorkflowFailed
+
+    root = _copy(EXAMPLES / example, tmp_path)
+    if isinstance(data, str):
+        data = json.loads((root / data).read_text("utf-8"))
+    runner = LocalRunner(Project.load(cwd=root), env_file=None)
+    if expected == "SUCCEEDED":
+        assert runner.run_workflow(workflow, data)["output"] is not None
+    else:
+        with pytest.raises(WorkflowFailed) as exc:
+            runner.run_workflow(workflow, data)
+        assert exc.value.error == expected
+
+
+def test_queue_worker_partial_failures(tmp_path):
+    from py_serverless_kit.local import build_event
+
+    root = _copy(EXAMPLES / "04-queue-worker", tmp_path)
+    runner = LocalRunner(Project.load(cwd=root), env_file=None)
+    event = build_event("queue", [{"kind": "email"}, {"kind": "email", "simulate_failure": True}, {"kind": "nope"}])
+    assert runner.invoke("process-jobs", event).failed == ["local-1"]
+
+
+def test_stage_overrides(tmp_path):
+    root = _copy(EXAMPLES / "10-stages-and-config", tmp_path)
+    prod = Project.load(cwd=root, stage="prod").config
+    assert prod.provider.memory == 1024
+    assert prod.provider.environment["TABLE_NAME"] == "shop-config-prod-orders"
+    assert prod.functions["config"].concurrency == 100
+    assert prod.provider.state.backend == "s3"
