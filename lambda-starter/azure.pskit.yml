@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# lambda-starter on Azure Functions
+#
+# Use it as is:          pskit deploy -c azure.pskit.yml
+# Or make it the default: rename this file to pskit.yml, then plain `pskit deploy`
+#
+# CHANGE THESE before the first deploy (under custom: below):
+#   custom.prefix   your team / company / project prefix, e.g. "acme"
+#   custom.app      short app name, e.g. "orders"
+#   custom.region   Azure Functions region
+# and every line marked "<-- change me" under provider.options.
+#
+# Every function is named <prefix>-<app>-<stage>-<function>, e.g. acme-orders-dev-hello.
+# Values can also come from the environment without editing this file:
+#   PSKIT_PREFIX=acme PSKIT_APP=orders DEPLOY_REGION=eastus pskit deploy -c azure.pskit.yml
+#
+# Credentials: az login + ARM_SUBSCRIPTION_ID (or service principal ARM_CLIENT_ID / _SECRET / ARM_TENANT_ID).
+# One Linux Consumption Function App hosts all three functions. Paths have no /api prefix.
+# ---------------------------------------------------------------------------
+
+custom:
+  prefix: ${env:PSKIT_PREFIX, myco}           # <-- change me (lowercase letters, digits, -)
+  app: ${env:PSKIT_APP, lambda-starter}       # <-- change me
+  region: ${env:DEPLOY_REGION, eastus}        # <-- change me
+
+# service = <prefix>-<app>: lowercase, starts with a letter, 2-32 characters
+service: ${self:custom.prefix}-${self:custom.app}
+
+provider:
+  name: azure
+  region: ${self:custom.region}
+  stage: dev                     # override with: --stage prod
+  runtime: python3.12
+  memory: 256
+  timeout: 15
+  environment:
+    LOG_LEVEL: INFO
+    APP_PREFIX: ${self:custom.prefix}
+  tags:
+    project: ${self:service}
+  options:
+    subscription_id: ${env:ARM_SUBSCRIPTION_ID, 00000000-0000-0000-0000-000000000000}   # <-- change me (required)
+    # resource_group: existing-rg   # optional: deploy into an existing resource group
+    # plan_sku: Y1                  # Consumption plan (default)
+
+package:
+  # Keep the per-cloud config files and docs out of the deployment bundle.
+  exclude: ["*.pskit.yml", "*.md"]
+
+functions:
+  # 1) HTTP function: GET /hello?name=Ada
+  hello:
+    handler: app.handlers.hello
+    description: Says hello over HTTP
+    events:
+      - http: GET /hello
+
+  # 2) Invoke-only function (no trigger).
+  #    On Azure it is exposed as POST /_pskit/invoke/processor (needs the function key):
+  #      curl -X POST "<app URL>/_pskit/invoke/processor?code=<function key>" -d '{"numbers":[1,2,3]}'
+  processor:
+    handler: app.handlers.processor
+    description: Invoke-only function
+
+  # 3) One function serving GET / POST / PUT
+  items:
+    handler: app.handlers.items
+    description: Items API (GET, POST, PUT)
+    events:
+      - http: GET /items
+      - http: GET /items/{id}
+      - http: {method: POST, path: /items, cors: true}
+      - http: {method: PUT, path: "/items/{id}", cors: true}
+
+# Per-stage overrides, used by: --stage prod
+stages:
+  prod:
+    provider:
+      memory: 512

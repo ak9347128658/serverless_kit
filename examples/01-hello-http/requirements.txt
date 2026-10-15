@@ -1,1 +1,0 @@
-# No third-party dependencies. The pskit runtime is vendored into the bundle automatically.

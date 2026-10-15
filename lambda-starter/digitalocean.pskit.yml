@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------------
+# lambda-starter on DigitalOcean Functions
+#
+# Use it as is:          pskit deploy -c digitalocean.pskit.yml
+# Or make it the default: rename this file to pskit.yml, then plain `pskit deploy`
+#
+# CHANGE THESE before the first deploy (under custom: below):
+#   custom.prefix   your team / company / project prefix, e.g. "acme"
+#   custom.app      short app name, e.g. "orders"
+#   custom.region   DigitalOcean Functions region
+# and every line marked "<-- change me" under provider.options.
+#
+# Every function is named <prefix>-<app>-<stage>-<function>, e.g. acme-orders-dev-hello.
+# Values can also come from the environment without editing this file:
+#   PSKIT_PREFIX=acme PSKIT_APP=orders DEPLOY_REGION=nyc1 pskit deploy -c digitalocean.pskit.yml
+#
+# Credentials: doctl auth init (doctl must be on PATH).
+# Runtime: python3.11. Memory 128-1024 MB. On Windows keep the project path short.
+# ---------------------------------------------------------------------------
+
+custom:
+  prefix: ${env:PSKIT_PREFIX, myco}           # <-- change me (lowercase letters, digits, -)
+  app: ${env:PSKIT_APP, lambda-starter}       # <-- change me
+  region: ${env:DEPLOY_REGION, nyc1}          # <-- change me
+
+# service = <prefix>-<app>: lowercase, starts with a letter, 2-32 characters
+service: ${self:custom.prefix}-${self:custom.app}
+
+provider:
+  name: digitalocean
+  region: ${self:custom.region}
+  stage: dev                     # override with: --stage prod
+  # runtime: default = newest Python this cloud supports
+  memory: 256
+  timeout: 15
+  environment:
+    LOG_LEVEL: INFO
+    APP_PREFIX: ${self:custom.prefix}
+  tags:
+    project: ${self:service}
+  options:
+    namespace: ${env:DO_FUNCTIONS_NAMESPACE, fn-00000000-0000-0000-0000-000000000000}   # <-- change me (required): doctl serverless namespaces list
+    # api_host: https://faas-nyc1-2ef2e6cc.doserverless.co   # optional: shows URLs in pskit info
+
+package:
+  # Keep the per-cloud config files and docs out of the deployment bundle.
+  exclude: ["*.pskit.yml", "*.md"]
+
+functions:
+  # 1) HTTP function: GET /hello?name=Ada
+  hello:
+    handler: app.handlers.hello
+    description: Says hello over HTTP
+    events:
+      - http: GET /hello
+
+  # 2) Invoke-only function (no trigger).
+  #    Call it with: doctl serverless functions invoke <name> -p numbers:[1,2,3]
+  processor:
+    handler: app.handlers.processor
+    description: Invoke-only function
+
+  # 3) One function serving GET / POST / PUT
+  items:
+    handler: app.handlers.items
+    description: Items API (GET, POST, PUT)
+    events:
+      - http: GET /items
+      - http: GET /items/{id}
+      - http: {method: POST, path: /items, cors: true}
+      - http: {method: PUT, path: "/items/{id}", cors: true}
+
+# Per-stage overrides, used by: --stage prod
+stages:
+  prod:
+    provider:
+      memory: 512

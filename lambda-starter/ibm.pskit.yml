@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------------
+# lambda-starter on IBM Cloud Code Engine functions
+#
+# Use it as is:          pskit deploy -c ibm.pskit.yml
+# Or make it the default: rename this file to pskit.yml, then plain `pskit deploy`
+#
+# CHANGE THESE before the first deploy (under custom: below):
+#   custom.prefix   your team / company / project prefix, e.g. "acme"
+#   custom.app      short app name, e.g. "orders"
+#   custom.region   IBM Cloud Code Engine functions region
+# and every line marked "<-- change me" under provider.options.
+#
+# Every function is named <prefix>-<app>-<stage>-<function>, e.g. acme-orders-dev-hello.
+# Values can also come from the environment without editing this file:
+#   PSKIT_PREFIX=acme PSKIT_APP=orders DEPLOY_REGION=us-south pskit deploy -c ibm.pskit.yml
+#
+# Credentials: IC_API_KEY.
+# Runtime: python3.11 only. Max timeout 120 s. Every function gets its own public HTTPS URL.
+# ---------------------------------------------------------------------------
+
+custom:
+  prefix: ${env:PSKIT_PREFIX, myco}           # <-- change me (lowercase letters, digits, -)
+  app: ${env:PSKIT_APP, lambda-starter}       # <-- change me
+  region: ${env:DEPLOY_REGION, us-south}      # <-- change me
+
+# service = <prefix>-<app>: lowercase, starts with a letter, 2-32 characters
+service: ${self:custom.prefix}-${self:custom.app}
+
+provider:
+  name: ibm
+  region: ${self:custom.region}
+  stage: dev                     # override with: --stage prod
+  # runtime: default = newest Python this cloud supports
+  memory: 256
+  timeout: 15
+  environment:
+    LOG_LEVEL: INFO
+    APP_PREFIX: ${self:custom.prefix}
+  tags:
+    project: ${self:service}
+  # options:
+  #   resource_group: default
+  #   project_id: 1234abcd-...   # use an existing Code Engine project (otherwise one is created)
+
+package:
+  # Keep the per-cloud config files and docs out of the deployment bundle.
+  exclude: ["*.pskit.yml", "*.md"]
+
+functions:
+  # 1) HTTP function: GET /hello?name=Ada
+  hello:
+    handler: app.handlers.hello
+    description: Says hello over HTTP
+    events:
+      - http: GET /hello
+
+  # 2) Invoke-only function (no trigger).
+  #    Every IBM function has an HTTPS URL; POST the JSON payload to it (see pskit info).
+  processor:
+    handler: app.handlers.processor
+    description: Invoke-only function
+
+  # 3) One function serving GET / POST / PUT
+  items:
+    handler: app.handlers.items
+    description: Items API (GET, POST, PUT)
+    events:
+      - http: GET /items
+      - http: GET /items/{id}
+      - http: {method: POST, path: /items, cors: true}
+      - http: {method: PUT, path: "/items/{id}", cors: true}
+
+# Per-stage overrides, used by: --stage prod
+stages:
+  prod:
+    provider:
+      memory: 512

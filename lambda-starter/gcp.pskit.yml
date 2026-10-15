@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# lambda-starter on Google Cloud Functions (2nd gen)
+#
+# Use it as is:          pskit deploy -c gcp.pskit.yml
+# Or make it the default: rename this file to pskit.yml, then plain `pskit deploy`
+#
+# CHANGE THESE before the first deploy (under custom: below):
+#   custom.prefix   your team / company / project prefix, e.g. "acme"
+#   custom.app      short app name, e.g. "orders"
+#   custom.region   Google Cloud Functions (2nd gen) region
+# and every line marked "<-- change me" under provider.options.
+#
+# Every function is named <prefix>-<app>-<stage>-<function>, e.g. acme-orders-dev-hello.
+# Values can also come from the environment without editing this file:
+#   PSKIT_PREFIX=acme PSKIT_APP=orders DEPLOY_REGION=us-central1 pskit deploy -c gcp.pskit.yml
+#
+# Credentials: gcloud auth application-default login (or GOOGLE_APPLICATION_CREDENTIALS).
+# Enable APIs: cloudfunctions, run, cloudbuild, artifactregistry, iam.
+# Each function gets its own HTTPS URL (see pskit info).
+# Don't add a main.py at the project root: pskit generates it.
+# ---------------------------------------------------------------------------
+
+custom:
+  prefix: ${env:PSKIT_PREFIX, myco}           # <-- change me (lowercase letters, digits, -)
+  app: ${env:PSKIT_APP, lambda-starter}       # <-- change me
+  region: ${env:DEPLOY_REGION, us-central1}   # <-- change me
+
+# service = <prefix>-<app>: lowercase, starts with a letter, 2-32 characters
+service: ${self:custom.prefix}-${self:custom.app}
+
+provider:
+  name: gcp
+  region: ${self:custom.region}
+  stage: dev                     # override with: --stage prod
+  runtime: python3.12
+  memory: 256
+  timeout: 15
+  environment:
+    LOG_LEVEL: INFO
+    APP_PREFIX: ${self:custom.prefix}
+  tags:
+    project: ${self:service}
+  options:
+    project: ${env:GOOGLE_CLOUD_PROJECT, my-gcp-project}   # <-- change me (required)
+    # service_account: runtime@my-gcp-project.iam.gserviceaccount.com   # optional runtime identity
+
+package:
+  # Keep the per-cloud config files and docs out of the deployment bundle.
+  exclude: ["*.pskit.yml", "*.md"]
+
+functions:
+  # 1) HTTP function: GET /hello?name=Ada
+  hello:
+    handler: app.handlers.hello
+    description: Says hello over HTTP
+    events:
+      - http: GET /hello
+
+  # 2) Invoke-only function (no trigger).
+  #    Call it over authenticated HTTPS: curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  #      -H "content-type: application/json" -d '{"numbers":[1,2,3]}' <processor URL from pskit info>
+  processor:
+    handler: app.handlers.processor
+    description: Invoke-only function
+
+  # 3) One function serving GET / POST / PUT
+  items:
+    handler: app.handlers.items
+    description: Items API (GET, POST, PUT)
+    events:
+      - http: GET /items
+      - http: GET /items/{id}
+      - http: {method: POST, path: /items, cors: true}
+      - http: {method: PUT, path: "/items/{id}", cors: true}
+
+# Per-stage overrides, used by: --stage prod
+stages:
+  prod:
+    provider:
+      memory: 512
