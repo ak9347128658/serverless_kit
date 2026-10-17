@@ -33,7 +33,7 @@ extends: base.yml               # inherit another file (see below)
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `name` | `aws` \| `azure` \| `gcp` \| `alibaba` \| `oracle` \| `ibm` \| `digitalocean` \| `tencent` \| `huawei` \| `cloudflare` | — | required (or `--provider`) |
+| `name` | `aws` \| `azure` \| `gcp` \| `alibaba` \| `oracle` \| `ibm` \| `digitalocean` \| `tencent` \| `huawei` \| `cloudflare` \| `onprem` | — | required (or `--provider`) |
 | `region` | string | provider default | e.g. `us-east-1`, `europe-west1`, `eastus` |
 | `stage` | string | `dev` | `[a-z][a-z0-9-]{0,15}`; overridden by `--stage` |
 | `runtime` | `python3.9` … `python3.14` | see [default runtime](#default-runtime) | provider support varies |
@@ -189,7 +189,8 @@ Relative paths resolve from the extending file. Circular `extends` is an error.
 
    So a child file's explicit values beat its parent's per-provider overrides.
 2. `stages.<active stage>` (merged across all files; the child wins).
-3. CLI flags: `--provider`, `--stage`, `--region`.
+3. `stages.<active stage>.providers.<active provider>`, when that stage must differ for one target (for example a cloud state backend on `prod` and local state for `onprem`).
+4. CLI flags: `--provider`, `--stage`, `--region`.
 
 Dicts are deep-merged; lists are replaced, not appended.
 

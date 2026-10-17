@@ -14,7 +14,7 @@ by changing only the provider (`pskit deploy --provider gcp`).
 | 05 | [storage-events](05-storage-events) | object created/deleted, prefix/suffix filters, existing buckets | AWS, GCP, Azure* |
 | 06 | [pubsub-topic](06-pubsub-topic) | topic fan-out to two subscribers, filter policies | AWS, GCP, Azure |
 | 07 | [workflow-orders](07-workflow-orders) | Step Functions-style workflow with every state type, retry/catch, native vs embedded engine | AWS, GCP, Azure |
-| 08 | [multi-cloud](08-multi-cloud) | one codebase, **all 10 clouds**: `providers:` overrides and `extends:` files | all 10 |
+| 08 | [multi-cloud](08-multi-cloud) | one codebase, **all 11 providers**: `providers:` overrides and `extends:` files | all 11 |
 | 09 | [function-invoke](09-function-invoke) | `invoke()` between functions, per-cloud resolution | AWS, GCP, Azure |
 | 10 | [stages-and-config](10-stages-and-config) | dev/staging/prod, `${env:}`, `${opt:}`, `${self:}`, `${file()}`, `.env`, secrets | AWS, GCP, Azure |
 | 11 | [custom-terraform](11-custom-terraform) | `terraform.extra` (DynamoDB), `${tf:...}` references, remote state, hooks | AWS |
@@ -22,6 +22,7 @@ by changing only the provider (`pskit deploy --provider gcp`).
 | 13 | [migrate-from-aws-lambda](13-migrate-from-aws-lambda) | step-by-step migration of raw Lambdas + Step Functions (before/after) | AWS, GCP, Azure |
 | 14 | [testing](14-testing) | pytest with `LocalRunner`, synthetic events, workflow tests, CI validation | AWS, GCP, Azure |
 | 15 | [ci-cd-deploy](15-ci-cd-deploy) | GitHub Actions per-stage deploys with OIDC, remote state, dashboard artifact | AWS, GCP, Azure |
+| 16 | [on-premises](16-on-premises) | one process on this machine: HTTP, schedule, queue, directory storage, topic, embedded workflow | on-premises |
 
 \* Azure blob triggers can't fire on deletions; the example's `providers.azure` block
 handles that explicitly.

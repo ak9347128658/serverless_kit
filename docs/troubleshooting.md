@@ -82,6 +82,7 @@ Add `-v` to any command to see the full traceback. Start with `pskit validate`, 
 | digitalocean | `doctl` must be installed and authenticated (`doctl auth init`); `options.namespace` required; set `options.api_host` to get URLs |
 | ibm | HTTP only, python3.11 only, 120 s / 4 GB max; large bundles → `options.code_reference` |
 | cloudflare | Pyodide: only stdlib and Pyodide packages; `options.account_id` and `CLOUDFLARE_API_TOKEN` required; non-`.py` files aren't uploaded |
+| onprem | one process per service, so give each service its own `options.port`. `pskit remove` stops it and leaves `data_dir`. `auth` must be `none`. A cloud `terraform.extra` resource is omitted. Set `state.backend` empty when the file points at S3, GCS or Azure Storage |
 | alibaba / tencent / huawei | `iam.statements` aren't translated; set `iam.role` |
 
 ## FAQ

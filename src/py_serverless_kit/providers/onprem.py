@@ -71,7 +71,7 @@ def _quote(value: str) -> str:
 def _endpoint(host: str, port: int, advertise: Optional[str]) -> str:
     if advertise:
         return str(advertise).rstrip("/")
-    shown = "127.0.0.1" if host in ("0.0.0.0", "::", "[::]") else host
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::", "[::]") else host  # noqa: S104
     if ":" in shown and not shown.startswith("["):
         shown = "[" + shown + "]"
     return f"http://{shown}:{port}"

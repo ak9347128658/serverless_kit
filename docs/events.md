@@ -18,13 +18,13 @@ A function with no events is *invoke-only*: it can be called by workflows, by `i
 
 Support at a glance (the full detail is below and in [providers.md](providers.md)):
 
-| Trigger | aws | gcp | azure | alibaba | oracle | ibm | digitalocean | tencent | huawei | cloudflare |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `http` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓¹ | ✓ |
-| `schedule` | ✓ | ✓ | ✓ | ✓ | – | – | ✓ | ✓ | ✓ | ✓ |
-| `queue` | ✓ SQS | ✓ Pub/Sub | ✓ Storage Queue | – | – | – | – | – | – | – |
-| `storage` | ✓ S3 | ✓ GCS | ✓ Blob (created only) | ✓ OSS | ✓ Object Storage | – | – | ✓ COS | ✓ OBS | – |
-| `topic` | ✓ SNS | ✓ Pub/Sub | ✓ Service Bus | ✓ MNS | – | – | – | – | ✓ SMN | – |
+| Trigger | aws | gcp | azure | alibaba | oracle | ibm | digitalocean | tencent | huawei | cloudflare | onprem |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `http` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓¹ | ✓ | ✓ |
+| `schedule` | ✓ | ✓ | ✓ | ✓ | – | – | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `queue` | ✓ SQS | ✓ Pub/Sub | ✓ Storage Queue | – | – | – | – | – | – | – | ✓ files |
+| `storage` | ✓ S3 | ✓ GCS | ✓ Blob (created only) | ✓ OSS | ✓ Object Storage | – | – | ✓ COS | ✓ OBS | – | ✓ directory |
+| `topic` | ✓ SNS | ✓ Pub/Sub | ✓ Service Bus | ✓ MNS | – | – | – | – | ✓ SMN | – | ✓ files |
 
 ¹ Huawei HTTP needs `provider.options.apig_instance_id`.
 
@@ -110,6 +110,7 @@ pskit converts the portable syntax to each cloud's dialect:
 | huawei | timer trigger | `Rate` (`5m`) or 6-field cron with `?` |
 | digitalocean | `project.yml` scheduler trigger | 5-field cron |
 | cloudflare | Cron Triggers | 5-field cron |
+| onprem | in-process scheduler | rate in seconds, or 5-field cron. A rate such as `7 minutes` is valid here |
 
 A rate that can't be expressed as cron on cron-only clouds (e.g. `7 minutes`) fails validation; use a divisor of 60 minutes or 24 hours. `timezone` is honoured by AWS, GCP and Alibaba (cron form); Azure ignores it with a warning.
 
@@ -139,6 +140,8 @@ The handler gets `event.type == "queue"` and `event.records`, one `Record` per m
 | `fifo` | ✓ (`.fifo` suffix, content-based dedup) | ignored (warning) | ignored (warning) |
 | partial batch failure | ✓ `batchItemFailures` | whole delivery retried | whole delivery retried |
 
+On premises the same options are implemented by a file broker (`batch_size`, `batch_window`, visibility, dead-letter, `max_receive`, `fifo`). `BatchResult` retries only the failed message ids, as on AWS. Set `provider.options.services.queue` to `builtin` (created at start) or `{use: directory, path: ...}`. `existing: true` waits for that directory. Example: [`examples/04-queue-worker`](../examples/04-queue-worker) and [`examples/16-on-premises`](../examples/16-on-premises).
+
 On GCP a "queue" is a Pub/Sub topic with a push trigger, because GCP has no SQS-style pull trigger. Azure queue names must be 3–63 lowercase letters, digits and dashes. Example: [`examples/04-queue-worker`](../examples/04-queue-worker).
 
 ---
@@ -166,6 +169,7 @@ Each record has `bucket`, `key`, `size` and `action` (`"created"` / `"deleted"`)
 | oracle | Events rule | not supported (warning) – filter in your handler | bucket must have "Emit Object Events" enabled |
 | tencent | COS trigger | native | bucket name must be `<name>-<APPID>`, e.g. `uploads-1250000000` |
 | huawei | OBS trigger | native | |
+| onprem | a directory of files | prefix/suffix in the host | `created` and `deleted`. `builtin` creates the directory; `{use: directory, path}` uses one you already have. The first start records current files and does not emit them |
 
 Example: [`examples/05-storage-events`](../examples/05-storage-events).
 
@@ -188,6 +192,7 @@ Example: [`examples/05-storage-events`](../examples/05-storage-events).
 | azure | Service Bus topic + subscription | not applied (warning); `existing` needs `options.servicebus_namespace_id` and `options.servicebus_connection` |
 | alibaba | MNS topic | `filter.tag` (string) only |
 | huawei | SMN topic | – |
+| onprem | file topic, fan-out | exact match on attributes, then on JSON body fields |
 
 Example: [`examples/06-pubsub-topic`](../examples/06-pubsub-topic).
 

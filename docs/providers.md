@@ -14,12 +14,13 @@ Run `pskit providers` (or `pskit providers --json`) to print this matrix from th
 | [`digitalocean`](#digitalocean-functions) | beta | ✓ | ✓ | – | – | – | embedded | 3.9, 3.11 | 900 s |
 | [`oracle`](#oracle-oci-functions) | experimental | ✓ | – | – | ✓ | – | embedded | 3.9, 3.11 | 300 s |
 | [`cloudflare`](#cloudflare-python-workers) | experimental | ✓ | ✓ | – | – | – | embedded | 3.11–3.13 | 900 s |
+| [`onprem`](#onprem-on-premises) | experimental | ✓ | ✓ | ✓ | ✓ | ✓ | embedded | 3.9–3.14 | 3600 s |
 
 **Tiers**
 
 - **stable:** the generated Terraform is validated against the real provider plugin, and the full trigger set is supported.
 - **beta:** validated with `terraform validate`; event payload formats follow vendor documentation.
-- **experimental:** works with notable constraints (container images, Pyodide), so read the section below first.
+- **experimental:** works with notable constraints (container images, Pyodide, or a process on your own machine), so read the section below first.
 
 **Common to all providers**
 
@@ -27,7 +28,7 @@ Run `pskit providers` (or `pskit providers --json`) to print this matrix from th
 - Resources are tagged or labelled with `pskit-service`, `pskit-stage` and `managed-by: py-serverless-kit` where the cloud supports tags.
 - With no pinned `runtime`, pskit picks python3.12 or the newest version below it that the cloud supports (see [configuration.md](configuration.md#default-runtime)).
 
-Every generated configuration (all 10 providers) passes `terraform validate`. The repository's `scripts/validate_all_providers.py` re-checks this in CI.
+Every generated configuration (all 11 providers) passes `terraform validate`. The repository's `scripts/validate_all_providers.py` re-checks this in CI. On-premises uses Terraform's built-in provider, so that check does not download a plugin for it.
 
 ---
 
@@ -350,6 +351,66 @@ One Worker script per function. pskit generates a single Python module per Worke
 **Resources:** `cloudflare_workers_script`, `cloudflare_workers_script_subdomain`, `cloudflare_workers_cron_trigger`, `cloudflare_workers_route`.
 
 **Limits:** HTTP and schedule only. `auth` must be `none` (validate tokens in your handler). Third-party packages beyond Pyodide's aren't available.
+
+---
+
+## onprem (On-premises)
+
+- **Terraform:** built-in `terraform_data` (no plugin download)
+- **Credentials:** none. The host is the same Python that runs `pskit deploy`
+- **Dependencies:** pip wheels for this machine and interpreter, not a Linux cloud image. `tzdata` is vendored so cron timezones work on Windows
+
+```yaml
+provider:
+  name: onprem
+  region: local
+  options:
+    host: 127.0.0.1          # bind address. 0.0.0.0 is advertised as 127.0.0.1 unless advertise is set
+    port: 8080               # 1-65535. Give each service its own port
+    advertise: https://fn.internal.example   # optional URL written into outputs
+    data_dir: .pskit/onprem-data             # default .pskit/onprem-data/<service>-<stage>
+    poll_seconds: 0.5
+    admin_token: "${env:PSKIT_ADMIN_TOKEN, }"  # header x-pskit-token on /__pskit/* except health
+    services:
+      schedule: builtin                        # the only schedule implementation
+      queue: builtin                           # or {use: directory, path: /var/pskit/queues}
+      storage: {use: directory, path: .onprem/buckets}
+      topic: builtin
+      workflow: embedded                       # builtin is an alias of embedded
+```
+
+`pskit deploy` writes the bundle under `.pskit/onprem-<stage>/onprem_app/` and starts `onprem_ctl.py`. The process serves your HTTP routes and polls the service directories. `pskit remove` stops the process and does not delete `data_dir`.
+
+Omitted services default to `builtin` and are created at start. `existing: true` on one queue, bucket or topic skips that create and waits until the directory appears. Names are a single path segment (`..`, slashes and NUL are rejected).
+
+| Trigger | Implementation |
+|---|---|
+| http | the host process. `auth` must be `none` (check tokens in the handler) |
+| schedule | in-process rate (any positive number of minutes, hours or days, including values that are not cron) and 5-field cron. A missing IANA timezone warns and is evaluated in UTC |
+| queue | one JSON file per message. `batch_size`, `batch_window`, `visibility_timeout` (default `max(30, 6 x timeout)`), `dead_letter`, `max_receive` and `fifo` are honoured. `BatchResult` retries only the failed ids |
+| storage | files under `<bucket>/<key>`. `prefix`, `suffix`, `created` and `deleted`. The first start records the current files and does not emit them |
+| topic | fan-out. `filter` is an exact match on message attributes, then on JSON body fields |
+| workflows | embedded engine inside the host, so a workflow is not cut off by a function timeout |
+
+Publish from outside the process:
+
+| Request | Effect |
+|---|---|
+| `GET /__pskit/health` | status, no token |
+| `POST /__pskit/queues/<name>` | enqueue one JSON value, a list, or `{"messages": [...]}`. `202 {"queued": [ids]}` |
+| `GET /__pskit/queues/<name>` | `{"depth": n}` |
+| `POST /__pskit/topics/<name>` | publish, then deliver. `{"message", "attributes"}` sets attributes when those are the only keys |
+| `PUT` / `DELETE /__pskit/storage/<bucket>/<key>` | write or remove an object, then deliver |
+| `POST /__pskit/invoke/<function>` | in-process invoke |
+| `POST /__pskit/workflows/<name>` | run the embedded workflow |
+
+From a handler in that process (`PSKIT_ONPREM_ROOT` is set), call `submit_queue`, `submit_topic`, `put_object` or `delete_object` in `py_serverless_kit.runtime.onprem_host`.
+
+**Resources:** `terraform_data.host` with create and destroy `local-exec` provisioners.
+
+**Limits:** no cloud authorizer and no IAM mapping. A `terraform.extra` resource from another cloud (`aws_*`, `google_*`, `azurerm_*`, and the other cloud prefixes) is omitted with a warning. A state backend of `s3`, `gcs` or `azurerm` warns; set `provider.state.backend` empty (see `providers.onprem` in examples 11 and 15) to keep state on this machine. Delivery is at-least-once. A missed schedule fires once on the next poll, not as a burst. The host does not kill a handler at `timeout`; `ctx.remaining_time_ms()` still counts down. If `provider.runtime` is not the interpreter running `pskit`, validation warns and the host still uses that interpreter.
+
+Example: [`examples/16-on-premises`](../examples/16-on-premises).
 
 ---
 

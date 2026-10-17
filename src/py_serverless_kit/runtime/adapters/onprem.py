@@ -85,10 +85,13 @@ def to_event(event: Dict[str, Any], fn: str) -> Event:
                 raw=event,
             )
         return Event(type=kind, provider=PROVIDER, function=fn, data=data, source=meta.get("source"), raw=event)
-    kind = event.get("type")
-    if kind in (EventType.QUEUE, EventType.TOPIC, EventType.STORAGE):
-        records = _records(kind, event.get("records") or event.get("Records") or [])
-        return Event(type=kind, provider=PROVIDER, function=fn, records=records or [], source="onprem", raw=event)
+    native = event.get("type")
+    if native in (EventType.QUEUE, EventType.TOPIC, EventType.STORAGE):
+        native_kind = str(native)
+        records = _records(native_kind, event.get("records") or event.get("Records") or [])
+        return Event(
+            type=native_kind, provider=PROVIDER, function=fn, records=records or [], source="onprem", raw=event
+        )
     if event.get("method") and event.get("path"):
         # Flat HTTP shape, same fields ``to_request`` reads under ``http``.
         return to_event({"http": event}, fn)

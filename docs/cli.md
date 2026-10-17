@@ -13,7 +13,7 @@ Every command that loads a project accepts:
 | Flag | Meaning |
 |---|---|
 | `-c, --config FILE` | config file (default: `pskit.yml`, `pskit.yaml`, `serverless_kit.yml`, `serverless_kit.yaml`) |
-| `-p, --provider NAME` | override `provider.name` (`aws`, `azure`, `gcp`, `alibaba`, `oracle`, `ibm`, `digitalocean`, `tencent`, `huawei`, `cloudflare`) |
+| `-p, --provider NAME` | override `provider.name` (`aws`, `azure`, `gcp`, `alibaba`, `oracle`, `ibm`, `digitalocean`, `tencent`, `huawei`, `cloudflare`, `onprem`) |
 | `-s, --stage NAME` | stage, e.g. `dev`, `staging`, `prod` |
 | `-r, --region NAME` | override `provider.region` |
 | `-v, --verbose` | print tracebacks on errors |

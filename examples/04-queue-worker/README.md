@@ -20,6 +20,7 @@ return result
 | Cloud | What `BatchResult` does |
 | --- | --- |
 | AWS SQS | partial batch response: only failed messages are retried |
+| On-premises | partial batch response: only failed messages are retried, then dead-lettered |
 | GCP Pub/Sub, Azure Storage Queues, others | any failure fails the invocation, so the whole batch is redelivered |
 
 Make processing **idempotent**: on most clouds a message can be delivered more than once.
@@ -33,6 +34,8 @@ Make processing **idempotent**: on most clouds a message can be delivered more t
 | `dead_letter` / `max_receive` | SQS redrive policy | warning, not configured | poison queue `<name>-poison` (built in) |
 | `fifo` | SQS FIFO | warning | not supported |
 | `existing: true` | look up instead of create | yes | yes |
+
+On premises every option in the YAML is implemented by a directory of message files. `builtin` (the default) creates that directory at start. `{use: directory, path: ...}` under `provider.options.services.queue` uses a directory you already have.
 
 `pskit validate --provider <cloud>` prints the warnings for your configuration.
 
@@ -53,7 +56,7 @@ def send_job(job: dict) -> None:
     ...
 ```
 
-The example's `enqueue` handler only logs, so it runs anywhere without credentials.
+The example's `enqueue` handler logs on a cloud, so it runs anywhere without credentials. On premises (`PSKIT_ONPREM_ROOT`) it writes the job into the file queue with `submit_queue`.
 
 ## Run locally
 
@@ -77,4 +80,5 @@ pskit invoke -f enqueue -d '{"kind": "invoice", "id": 7}'    # 202
 pskit deploy                    # SQS queues + DLQ + event source mappings
 pskit deploy --provider gcp     # Pub/Sub topics + Eventarc triggers
 pskit deploy --provider azure   # Storage queues + queue triggers
+pskit deploy --provider onprem  # file queues on this machine, http://127.0.0.1:8084
 ```

@@ -45,6 +45,7 @@ artifact.zip
 ├── <shim>                        pskit_entry.py (aws) · main.py (gcp) · function_app.py + host.json (azure)
 │                                 index.py (alibaba/tencent/huawei) · __main__.py (ibm/do)
 │                                 func.py + func.yaml + Dockerfile (oracle) · generated worker module (cloudflare)
+│                                 onprem_handler.py (onprem; the host process is started beside the zip)
 └── dependencies or requirements.txt
 ```
 

@@ -31,7 +31,7 @@ cd C:\Users\asif.khan\Documents\github\common_python_services\serverless_kit
 .venv\Scripts\Activate.ps1
 python scripts/validate_all_providers.py
 
-The first run downloads the Terraform plugin for each of the 10 clouds, which is a few hundred MB and takes a few minutes. You don't need cloud credentials for this check. The end of the output should say 10/10 providers valid.
+The first run downloads the Terraform plugin for each cloud, which is a few hundred MB and takes a few minutes. On-premises uses Terraform's built-in provider and does not download one. You don't need cloud credentials for this check. The end of the output should say 11/11 providers valid.
 
 To make later runs faster by reusing the downloaded plugins:
 

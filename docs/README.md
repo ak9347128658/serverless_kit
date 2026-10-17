@@ -1,6 +1,6 @@
 # py-serverless-kit documentation
 
-Write a Python function once, describe its triggers in `pskit.yml`, and deploy it to any of 10 clouds with Terraform. Moving to another cloud means changing `provider.name`. The handler code stays the same.
+Write a Python function once, describe its triggers in `pskit.yml`, and deploy it to any of 10 clouds or to an on-premises host with Terraform. Moving to another target means changing `provider.name`. The handler code stays the same.
 
 | Page | What it covers |
 |---|---|

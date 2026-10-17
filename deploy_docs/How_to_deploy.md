@@ -150,7 +150,7 @@ rm -rf dist
 python -m build
 ```
 
-Optional, and only if Terraform ≥ 1.5 is installed: check the generated Terraform for all 10 clouds. Without Terraform the script exits with a hint; CI runs this check on every push anyway.
+Optional, and only if Terraform ≥ 1.5 is installed: check the generated Terraform for every provider. Without Terraform the script exits with a hint; CI runs this check on every push anyway. On-premises uses Terraform's built-in provider, so it does not download a plugin.
 
 ```bash
 python scripts/validate_all_providers.py

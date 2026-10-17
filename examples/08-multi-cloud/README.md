@@ -1,7 +1,7 @@
-# 08 · Multi-cloud: same code, ten clouds
+# 08 · Multi-cloud: same code, every provider
 
-`app/handlers.py` deploys unchanged to all ten supported clouds. Only the configuration
-differs, and you can organise it in either of two ways.
+`app/handlers.py` deploys unchanged to all eleven providers, including an on-premises
+host. Only the configuration differs, and you can organise it in either of two ways.
 
 ## Option A: one file with `providers:` overrides
 
@@ -18,6 +18,7 @@ pskit deploy --provider oracle
 pskit deploy --provider ibm
 pskit deploy --provider digitalocean
 pskit deploy --provider cloudflare
+pskit deploy --provider onprem
 ```
 
 ## Option B: one small file per cloud with `extends:`
@@ -49,6 +50,7 @@ of them on one page.
 | ibm | beta | `IC_API_KEY` | Code Engine functions; HTTP only, Python 3.11, max 120 s |
 | digitalocean | beta | `options.namespace`, `doctl` on PATH | deployed with `doctl serverless` |
 | cloudflare | experimental | `options.account_id` | Python Workers (stdlib + Pyodide packages only) |
+| onprem | experimental | nothing (optional `options.port`) | a Python process on this machine; queues, storage and topics are directories |
 
 Where a cloud lacks a feature, the override says so explicitly. For example
 `functions.ticker.events: []` on IBM and Oracle deploys `ticker` without a schedule

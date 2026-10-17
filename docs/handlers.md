@@ -156,6 +156,7 @@ def worker(event, ctx):
 | Provider | Behaviour |
 |---|---|
 | aws (SQS) | becomes `batchItemFailures`, so only the failed messages are retried |
+| onprem | the host retries only the failed message ids, and moves a message to `dead_letter` after `max_receive` |
 | local | printed as `batchItemFailures` |
 | everyone else | any failure raises `BatchFailure`, so the whole delivery is retried |
 
@@ -173,7 +174,7 @@ invoke("audit", {"order_id": 42}, asynchronous=True)          # fire and forget 
 How the target is resolved:
 
 1. If `PSKIT_ENDPOINT_<NAME>` is set (`billing` → `PSKIT_ENDPOINT_BILLING`, non-alphanumerics become `_`), pskit POSTs to that http(s) URL. This works on any provider.
-2. `local` (CLI, tests): calls the handler in-process.
+2. `local` (CLI, tests) and `onprem`: call the handler in-process. `asynchronous=True` still finishes before `invoke()` returns.
 3. `aws`: `lambda:InvokeFunction` via boto3 (`pip install py-serverless-kit[aws]`, and add `boto3` to requirements). Grant `lambda:InvokeFunction` in `iam.statements`.
 4. `gcp`: authenticated HTTPS call to `https://<region>-<project>.cloudfunctions.net/<service>-<stage>-<name>` with an ID token from the metadata server.
 5. Other providers raise `InvokeError` unless `PSKIT_ENDPOINT_<NAME>` is set. Point it at the target's HTTP URL from `pskit info`. On Azure, invoke-only functions expose `POST /_pskit/invoke/<name>` (function key required).
@@ -186,7 +187,8 @@ pskit injects:
 
 | Variable | Value |
 |---|---|
-| `PSKIT_PROVIDER` | `aws`, `gcp`, … (`local` under the CLI) |
+| `PSKIT_PROVIDER` | `aws`, `gcp`, `onprem`, … (`local` under the CLI) |
+| `PSKIT_ONPREM_ROOT` | on-premises only: directory of the running host. Handlers use it to publish into the file broker |
 | `PSKIT_SERVICE`, `PSKIT_STAGE`, `PSKIT_REGION` | deployment identity |
 | `PSKIT_FUNCTION`, `PSKIT_HANDLER` | the logical function and its handler (not app settings on Azure, where they're passed explicitly) |
 | `PSKIT_GCP_PROJECT` | GCP only |

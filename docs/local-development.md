@@ -92,6 +92,10 @@ def test_workflow():
 | `LocalRunner(project, env_file=".env")` | in-process runner |
 | `runner.invoke(function, event)` | run a handler; HTTP returns a `Response` |
 | `runner.run_workflow(name, data, sleep=False)` | returns `{"output", "history"}`; raises `WorkflowFailed` |
+
+## On-premises is a deploy, not `pskit dev`
+
+`pskit dev` reloads HTTP handlers and drops the process when you stop it. `provider.name: onprem` is the durable run: `pskit deploy` starts a process that keeps schedules, file queues, directory storage, topics and embedded workflows after the command returns. See [providers.md](providers.md#onprem-on-premises) and [`examples/16-on-premises`](../examples/16-on-premises).
 | `http_event(method, path, body=None, headers=None, query=None)` | dict/list bodies are JSON-encoded; `?query` in `path` is parsed |
 | `build_event(type, data, **http)` | `queue`/`topic` (list → records), `storage` (`{"bucket", "key", "size", "action"}`), `schedule`, `invoke`, `workflow`, `http` |
 

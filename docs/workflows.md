@@ -3,7 +3,7 @@
 A workflow chains functions with branching, retries, error handling, waits, parallel branches and fan-out. You define it once in `pskit.yml`, and pskit runs it:
 
 - **natively**, as AWS Step Functions (ASL) or Google Cloud Workflows;
-- on the **embedded engine** on every other cloud, inside an auto-generated orchestrator function;
+- on the **embedded engine** on every other target, inside an auto-generated orchestrator function (on premises that function runs inside the long-lived host, so the workflow is not cut off by a function timeout);
 - **locally** with `pskit workflow run`, using the same engine.
 
 ```yaml

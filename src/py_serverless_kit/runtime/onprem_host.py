@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.error import URLError
 from urllib.parse import parse_qsl, unquote, urlsplit
 from urllib.request import urlopen
 
@@ -41,16 +42,16 @@ from .manifest import load_manifest, set_manifest
 from .response import Response, dumps
 from .routing import match_path, method_matches
 
-_BROKER: Optional["Broker"] = None
+_BROKER: Optional[Broker] = None
 _MAX_BODY = 64 * 1024 * 1024
 
 
-def install_broker(broker: Optional["Broker"]) -> None:
+def install_broker(broker: Optional[Broker]) -> None:
     global _BROKER
     _BROKER = broker
 
 
-def current_broker() -> "Broker":
+def current_broker() -> Broker:
     if _BROKER is not None:
         return _BROKER
     root = os.environ.get("PSKIT_ONPREM_ROOT")
@@ -611,7 +612,7 @@ class Host:
             visibility = ev.get("visibility_timeout")
             if visibility is None:
                 ev = dict(ev)
-                ev["visibility_timeout"] = max(30, 6 * int((self.spec["functions"][function].get("timeout") or 30)))
+                ev["visibility_timeout"] = max(30, 6 * int(self.spec["functions"][function].get("timeout") or 30))
             claimed = self.broker.claim_queue(ev, now)
             if not claimed:
                 continue
@@ -1010,7 +1011,7 @@ def stop(root: Path) -> int:
                     break
                 time.sleep(0.1)
             if _pid_alive(pid):
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     pidfile.unlink(missing_ok=True)
     return 0
 
@@ -1022,7 +1023,7 @@ def _wait_healthy(url: str, timeout: float) -> bool:
             with urlopen(url, timeout=1) as resp:  # noqa: S310 - local host URL from our own spec
                 if resp.status == 200:
                     return True
-        except Exception:
+        except (URLError, OSError, TimeoutError, ValueError):
             time.sleep(0.2)
     return False
 

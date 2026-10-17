@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from py_serverless_kit.core.deployer import Deployer
@@ -225,9 +226,9 @@ def test_admin_token_gates_the_broker(make_project, tmp_path):
         try:
             _json("POST", base + "/__pskit/queues/jobs", {"a": 1})
             raised = False
-        except Exception as exc:  # HTTPError
+        except HTTPError as exc:
             raised = True
-            assert getattr(exc, "code", None) == 401
+            assert exc.code == 401
         assert raised
         status, _body = _json("POST", base + "/__pskit/queues/jobs", {"a": 1}, token="secret")
         assert status == 202

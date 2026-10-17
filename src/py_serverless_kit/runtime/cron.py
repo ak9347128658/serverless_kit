@@ -49,10 +49,10 @@ def resolve_zone(name: str):
     if not name or name.upper() == "UTC":
         return timezone.utc
     try:
-        from zoneinfo import ZoneInfo
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
         return ZoneInfo(name)
-    except Exception:
+    except (ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
         return None
 
 

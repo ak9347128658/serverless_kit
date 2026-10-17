@@ -4,12 +4,12 @@
 [![PyPI](https://img.shields.io/pypi/v/py-serverless-kit.svg)](https://pypi.org/project/py-serverless-kit/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/ak9347128658/serverless_kit/blob/main/LICENSE)
 
-**Write your Python functions once. Deploy them to any of 10 clouds by changing one line of YAML.**
+**Write your Python functions once. Deploy them to any of 10 clouds, or to your own machine, by changing one line of YAML.**
 
 `py-serverless-kit` (CLI: `pskit`) is a Serverless-Framework-style toolkit built on **Terraform**. Your handlers use one small, provider-neutral API (`Event`, `Context`, `Response`). A `pskit.yml` file says which cloud they run on and what triggers them: HTTP, schedules, queues, storage, topics. The same file can also define workflows in the style of Step Functions. `pskit deploy` generates Terraform for the chosen cloud, applies it, and builds an HTML dashboard of everything you deployed.
 
 ```python
-# app/handlers.py - identical on AWS, Azure, GCP, Alibaba, Oracle, IBM, DigitalOcean, Tencent, Huawei, Cloudflare
+# app/handlers.py - identical on AWS, Azure, GCP, Alibaba, Oracle, IBM, DigitalOcean, Tencent, Huawei, Cloudflare, and on premises
 from py_serverless_kit import Event, Context, NotFound
 
 def get_order(event: Event, ctx: Context):
@@ -23,7 +23,7 @@ def get_order(event: Event, ctx: Context):
 # pskit.yml
 service: orders
 provider:
-  name: aws          # <- change to gcp, azure, alibaba, ... and redeploy. That's the migration.
+  name: aws          # <- change to gcp, azure, onprem, ... and redeploy. That's the migration.
   region: us-east-1
 functions:
   get-order:
@@ -53,7 +53,7 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 
 ## Features
 
-- **10 providers:** AWS Lambda, Azure Functions, Google Cloud Functions (gen2), Alibaba Function Compute, Oracle Functions, IBM Code Engine, DigitalOcean Functions, Tencent SCF, Huawei FunctionGraph, Cloudflare Workers.
+- **10 clouds and an on-premises host:** AWS Lambda, Azure Functions, Google Cloud Functions (gen2), Alibaba Function Compute, Oracle Functions, IBM Code Engine, DigitalOcean Functions, Tencent SCF, Huawei FunctionGraph, Cloudflare Workers, plus a process on your own machine (`onprem`).
 - **Triggers:** HTTP (path params, CORS, auth), schedules (rate/cron, translated into each cloud's cron dialect), queues, object storage, pub/sub topics, and direct function-to-function `invoke()`.
 - **Workflows:** task / choice / wait / pass / parallel / map / succeed / fail with retry and catch. Native on AWS and GCP; an embedded engine on the other clouds; runnable locally with `pskit workflow run`.
 - **Terraform underneath:** real, reviewable `main.tf.json`, any backend (S3, GCS, azurerm, ...), works with OpenTofu. Escape hatches: `terraform.extra`, `${tf:...}` references, per-function `options`.
@@ -76,6 +76,7 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 | IBM Code Engine | beta | ✅ | – | – | – | – | embedded |
 | Oracle Cloud Functions | experimental | ✅ | – | – | ✅ | – | embedded |
 | Cloudflare Workers (Python) | experimental | ✅ | ✅ | – | – | – | embedded |
+| On-premises | experimental | ✅ | ✅ | ✅ files | ✅ directory | ✅ files | embedded (in the host) |
 
 Run `pskit providers` for the live matrix. If a config uses a trigger the target cloud can't support, **`pskit validate` fails with a clear message instead of deploying something half-working.**
 
@@ -207,7 +208,7 @@ More: [docs/architecture.md](https://github.com/ak9347128658/serverless_kit/blob
 
 ## Examples
 
-Fifteen runnable scenarios live in [`examples/`](https://github.com/ak9347128658/serverless_kit/tree/main/examples/). They are tested in CI.
+Sixteen runnable scenarios live in [`examples/`](https://github.com/ak9347128658/serverless_kit/tree/main/examples/). They are tested in CI.
 
 | | |
 |---|---|
@@ -218,7 +219,8 @@ Fifteen runnable scenarios live in [`examples/`](https://github.com/ak9347128658
 | [05-storage-events](https://github.com/ak9347128658/serverless_kit/tree/main/examples/05-storage-events) | Object created/deleted with filters |
 | [06-pubsub-topic](https://github.com/ak9347128658/serverless_kit/tree/main/examples/06-pubsub-topic) | Topic fan-out and filters |
 | [07-workflow-orders](https://github.com/ak9347128658/serverless_kit/tree/main/examples/07-workflow-orders) | Every workflow state type, retry/catch |
-| [08-multi-cloud](https://github.com/ak9347128658/serverless_kit/tree/main/examples/08-multi-cloud) | Same code, all 10 providers |
+| [08-multi-cloud](https://github.com/ak9347128658/serverless_kit/tree/main/examples/08-multi-cloud) | Same code, all 11 providers |
+| [16-on-premises](https://github.com/ak9347128658/serverless_kit/tree/main/examples/16-on-premises) | HTTP, schedule, queue, storage, topic and a workflow on one machine |
 | [09-function-invoke](https://github.com/ak9347128658/serverless_kit/tree/main/examples/09-function-invoke) | Function-to-function `invoke()` |
 | [10-stages-and-config](https://github.com/ak9347128658/serverless_kit/tree/main/examples/10-stages-and-config) | Stages, variables, secrets |
 | [11-custom-terraform](https://github.com/ak9347128658/serverless_kit/tree/main/examples/11-custom-terraform) | `terraform.extra`, `${tf:...}`, remote state, hooks |
