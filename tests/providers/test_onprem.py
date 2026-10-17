@@ -53,9 +53,10 @@ def test_render_deploys_builtin_services(make_project, render):
     assert "provider" not in tf
     host = tf["resource"]["terraform_data"]["host"]
     create, destroy = host["provisioner"]
-    assert "onprem_ctl.py start" in create["local-exec"]["command"]
+    assert create["local-exec"]["command"] == "apply"
+    assert create["local-exec"]["interpreter"][-1] == "onprem_deploy.py"
     assert destroy["local-exec"]["when"] == "destroy"
-    assert "onprem_ctl.py stop" in destroy["local-exec"]["command"]
+    assert destroy["local-exec"]["command"] == "destroy"
 
     root = project.work_dir / "onprem_app"
     spec = json.loads((root / "pskit_host.json").read_text("utf-8"))
@@ -71,6 +72,8 @@ def test_render_deploys_builtin_services(make_project, render):
     assert queue["dead_letter"] == "jobs-dlq"
     assert queue["visibility_timeout"] >= 30
     assert (root / "onprem_ctl.py").is_file()
+    assert (root / "onprem_deploy.py").is_file()
+    assert spec["deploy"]["method"] == "local"
     assert (root / "staging" / "pskit_manifest.json").is_file()
     assert (root / "staging" / "onprem_handler.py").is_file()
     assert not (root / "app").exists()
@@ -125,3 +128,127 @@ def test_foreign_terraform_is_omitted(make_project, render):
     assert "note" in tf["resource"]["terraform_data"]
     assert "orders_table_arn" not in tf["output"]
     assert tf["output"]["kept"]["value"] == "yes"
+
+
+SSH_CONFIG = """
+service: demo
+provider:
+  name: onprem
+  architecture: x86_64
+  options:
+    host: 0.0.0.0
+    port: 9090
+    deploy:
+      method: ssh
+      host: 10.0.1.12
+      user: pskit
+      path: /opt/pskit/demo
+      python: bundle
+      target_os: linux
+      install: systemd
+      sudo: true
+functions:
+  hello:
+    handler: app.handlers.hello
+    events:
+      - http: GET /hello
+"""
+
+DOCKER_CONFIG = """
+service: demo
+provider:
+  name: onprem
+  options:
+    host: 0.0.0.0
+    port: 9090
+    deploy:
+      method: docker
+      image: pskit-demo:dev
+      docker_host: ssh://pskit@10.0.1.12
+functions:
+  hello:
+    handler: app.handlers.hello
+    events:
+      - http: GET /hello
+"""
+
+
+def test_ssh_bundle_systemd_renders(make_project, render):
+    project = make_project(SSH_CONFIG)
+    assert _errors(project) == []
+    tf = render(project)
+    root = project.work_dir / "onprem_app"
+    spec = json.loads((root / "pskit_host.json").read_text("utf-8"))
+    assert spec["deploy"]["method"] == "ssh"
+    assert spec["deploy"]["python"] == "bundle"
+    assert spec["deploy"]["ssh"]["host"] == "10.0.1.12"
+    assert spec["deploy"]["ssh"]["path"] == "/opt/pskit/demo"
+    assert spec["endpoint"] == "http://10.0.1.12:9090"
+    assert spec["data_dir"] == "/opt/pskit/demo/data"
+    assert (root / "pskit.service").is_file()
+    unit = (root / "pskit.service").read_text("utf-8")
+    assert "ExecStart=" in unit and "/opt/pskit/demo/python/bin/python3" in unit
+    assert tf["output"]["pskit"]["value"]["deploy"] == "ssh"
+    flags = project.provider.pip_platform_for(project.config)
+    assert "--platform" in flags and "manylinux2014_x86_64" in flags
+
+
+def test_ssh_url_shorthand(make_project, render):
+    text = """
+service: demo
+provider:
+  name: onprem
+  options:
+    host: 0.0.0.0
+    port: 9090
+    deploy: ssh://ops@factory.internal:2222/opt/pskit/demo
+functions:
+  hello:
+    handler: app.handlers.hello
+    events:
+      - http: GET /hello
+"""
+    project = make_project(text)
+    assert _errors(project) == []
+    render(project)
+    spec = json.loads((project.work_dir / "onprem_app" / "pskit_host.json").read_text("utf-8"))
+    assert spec["deploy"]["method"] == "ssh"
+    assert spec["deploy"]["ssh"]["user"] == "ops"
+    assert spec["deploy"]["ssh"]["host"] == "factory.internal"
+    assert spec["deploy"]["ssh"]["port"] == 2222
+    assert spec["deploy"]["ssh"]["path"] == "/opt/pskit/demo"
+
+
+def test_ssh_requires_host(make_project):
+    text = SSH_CONFIG.replace("      host: 10.0.1.12\n", "")
+    assert any("host is required" in err for err in _errors(make_project(text)))
+
+
+def test_unknown_deploy_method(make_project):
+    text = CONFIG.replace("port: 9090\n", "port: 9090\n    deploy: {method: ftp}\n")
+    assert any("method must be one of" in err for err in _errors(make_project(text)))
+
+
+def test_systemd_rejected_on_windows_target(make_project):
+    text = SSH_CONFIG.replace("target_os: linux", "target_os: windows")
+    assert any("systemd is only valid" in err for err in _errors(make_project(text)))
+
+
+def test_docker_writes_dockerfile(make_project, render):
+    project = make_project(DOCKER_CONFIG)
+    assert _errors(project) == []
+    render(project)
+    root = project.work_dir / "onprem_app"
+    spec = json.loads((root / "pskit_host.json").read_text("utf-8"))
+    assert spec["deploy"]["method"] == "docker"
+    assert spec["host"] == "0.0.0.0"
+    assert spec["data_dir"] == "/var/pskit/data"
+    docker = (root / "Dockerfile").read_text("utf-8")
+    assert docker.startswith("FROM python:3.12-slim-bookworm")
+    assert "onprem_ctl.py" in docker
+    assert spec["endpoint"] == "http://10.0.1.12:9090"
+
+
+def test_local_pip_platform_stays_native(make_project):
+    project = make_project(CONFIG)
+    assert project.provider.pip_platform_for(project.config) == []

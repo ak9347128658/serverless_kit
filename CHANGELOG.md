@@ -6,8 +6,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
+### Added
+- On-premises deploy targets. `provider.options.deploy.method` is `local` (default, previous behaviour), `ssh` (copy the host over OpenSSH and start a process or systemd unit), or `docker` (build an image that already contains Python). When the server has no Python, set `python: bundle` to ship a portable CPython, or use `method: docker`. `python_home` / `python_url` cover air-gapped mirrors. Wheels are vendored for the target OS/arch (manylinux when the server is Linux).
+- Example [17-on-premises-remote](examples/17-on-premises-remote): SSH + bundled interpreter + systemd.
+
 ### Fixed
 - On-prem host: Windows process helpers (`ctypes.windll`, `subprocess.DETACHED_PROCESS`) are gated on `sys.platform == "win32"` so mypy on Linux/macOS CI no longer reports missing attributes.
+
+Redeploy on-premises hosts to pick up the new `onprem_deploy.py` provisioner. Handler code is unchanged.
 
 ## [0.2.0] - 2026-10-17
 

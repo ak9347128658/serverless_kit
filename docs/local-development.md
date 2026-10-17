@@ -95,7 +95,7 @@ def test_workflow():
 
 ## On-premises is a deploy, not `pskit dev`
 
-`pskit dev` reloads HTTP handlers and drops the process when you stop it. `provider.name: onprem` is the durable run: `pskit deploy` starts a process that keeps schedules, file queues, directory storage, topics and embedded workflows after the command returns. See [providers.md](providers.md#onprem-on-premises) and [`examples/16-on-premises`](../examples/16-on-premises).
+`pskit dev` reloads HTTP handlers and drops the process when you stop it. `provider.name: onprem` is the durable run: `pskit deploy` starts a process that keeps schedules, file queues, directory storage, topics and embedded workflows after the command returns. `options.deploy.method` is `local` (this machine), `ssh`, or `docker`. See [providers.md](providers.md#onprem-on-premises), [`examples/16-on-premises`](../examples/16-on-premises) and [`examples/17-on-premises-remote`](../examples/17-on-premises-remote).
 | `http_event(method, path, body=None, headers=None, query=None)` | dict/list bodies are JSON-encoded; `?query` in `path` is parsed |
 | `build_event(type, data, **http)` | `queue`/`topic` (list → records), `storage` (`{"bucket", "key", "size", "action"}`), `schedule`, `invoke`, `workflow`, `http` |
 

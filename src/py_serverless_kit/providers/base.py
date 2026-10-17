@@ -191,6 +191,9 @@ class Provider(ABC):
             "--only-binary=:all:",
         ]
 
+    def pip_platform_for(self, config: ServiceConfig) -> List[str]:
+        return self.pip_platform(config.provider.runtime, config.provider.architecture)
+
     # ------------------------------------------------------------ validation
     def workflow_engine(self, wf: WorkflowConfig) -> str:
         if wf.engine == "native":

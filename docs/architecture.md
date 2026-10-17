@@ -45,9 +45,11 @@ artifact.zip
 ├── <shim>                        pskit_entry.py (aws) · main.py (gcp) · function_app.py + host.json (azure)
 │                                 index.py (alibaba/tencent/huawei) · __main__.py (ibm/do)
 │                                 func.py + func.yaml + Dockerfile (oracle) · generated worker module (cloudflare)
-│                                 onprem_handler.py (onprem; the host process is started beside the zip)
+│                                 onprem_handler.py (onprem; the host is started beside the zip)
 └── dependencies or requirements.txt
 ```
+
+On-premises also writes `.pskit/onprem-<stage>/onprem_app/` (`pskit_host.json`, `onprem_ctl.py`, `onprem_deploy.py`, the staged bundle, and a Dockerfile or systemd unit when those methods are selected). Terraform `local-exec` runs `onprem_deploy.py apply`, which starts the host on this machine, copies it over SSH (detached process or systemd, optional portable CPython), or builds a Docker image.
 
 ## Runtime flow
 

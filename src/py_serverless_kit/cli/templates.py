@@ -31,6 +31,9 @@ PROVIDER_OPTIONS = {
         "  options:\n"
         "    host: 127.0.0.1\n"
         "    port: 8080\n"
+        "    # deploy.method: local (this machine) | ssh | docker\n"
+        "    # ssh: {host: 10.0.1.12, user: pskit, python: bundle, install: systemd}\n"
+        "    # python: bundle ships a portable CPython when the server has none\n"
         "    # builtin services are created on deploy. To use a directory you already\n"
         "    # have: storage: {use: directory, path: /var/pskit/buckets}\n"
     ),

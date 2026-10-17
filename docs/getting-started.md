@@ -109,7 +109,7 @@ pskit runs Terraform, so credentials come from each Terraform provider's standar
 | `tencent` | `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`, or `options.profile` |
 | `huawei` | `HW_ACCESS_KEY` / `HW_SECRET_KEY` (+ `HW_REGION_NAME`), or `options.profile` |
 | `cloudflare` | `CLOUDFLARE_API_TOKEN`. `options.account_id` is required |
-| `onprem` | nothing to configure. Terraform's built-in provider starts a process with the Python that runs `pskit` |
+| `onprem` | local: nothing to configure (the Python that runs `pskit` starts the host). Remote: OpenSSH and `options.deploy.method: ssh`, or Docker and `method: docker`. Servers without Python: `python: bundle` or Docker |
 
 Provider-specific required options are listed in [providers.md](providers.md).
 

@@ -356,19 +356,19 @@ One Worker script per function. pskit generates a single Python module per Worke
 
 ## onprem (On-premises)
 
-- **Terraform:** built-in `terraform_data` (no plugin download)
-- **Credentials:** none. The host is the same Python that runs `pskit deploy`
-- **Dependencies:** pip wheels for this machine and interpreter, not a Linux cloud image. `tzdata` is vendored so cron timezones work on Windows
+- **Terraform:** built-in `terraform_data` (no plugin download). Create/destroy run `onprem_deploy.py` via `local-exec`
+- **Credentials:** none for `method: local`. SSH keys / an SSH agent for `method: ssh`. Docker CLI (and optional `DOCKER_HOST`) for `method: docker`
+- **Dependencies:** native pip wheels for a local host; manylinux / Windows / macOS wheels matching `deploy.target_os` and `architecture` for a remote host. `tzdata` is vendored so cron timezones work on Windows
 
 ```yaml
 provider:
   name: onprem
   region: local
   options:
-    host: 127.0.0.1          # bind address. 0.0.0.0 is advertised as 127.0.0.1 unless advertise is set
+    host: 127.0.0.1          # bind address on the *target*. 0.0.0.0 is advertised as 127.0.0.1 unless advertise is set
     port: 8080               # 1-65535. Give each service its own port
     advertise: https://fn.internal.example   # optional URL written into outputs
-    data_dir: .pskit/onprem-data             # default .pskit/onprem-data/<service>-<stage>
+    data_dir: .pskit/onprem-data             # default .pskit/onprem-data/<service>-<stage> (local); <path>/data on SSH
     poll_seconds: 0.5
     admin_token: "${env:PSKIT_ADMIN_TOKEN, }"  # header x-pskit-token on /__pskit/* except health
     services:
@@ -377,9 +377,11 @@ provider:
       storage: {use: directory, path: .onprem/buckets}
       topic: builtin
       workflow: embedded                       # builtin is an alias of embedded
+    deploy:
+      method: local          # local | ssh | docker   (default local)
 ```
 
-`pskit deploy` writes the bundle under `.pskit/onprem-<stage>/onprem_app/` and starts `onprem_ctl.py`. The process serves your HTTP routes and polls the service directories. `pskit remove` stops the process and does not delete `data_dir`.
+`pskit deploy` writes the bundle under `.pskit/onprem-<stage>/onprem_app/` and runs `onprem_deploy.py apply`. `pskit remove` stops the process (or container / systemd unit) and does not delete `data_dir`.
 
 Omitted services default to `builtin` and are created at start. `existing: true` on one queue, bucket or topic skips that create and waits until the directory appears. Names are a single path segment (`..`, slashes and NUL are rejected).
 
@@ -406,11 +408,47 @@ Publish from outside the process:
 
 From a handler in that process (`PSKIT_ONPREM_ROOT` is set), call `submit_queue`, `submit_topic`, `put_object` or `delete_object` in `py_serverless_kit.runtime.onprem_host`.
 
-**Resources:** `terraform_data.host` with create and destroy `local-exec` provisioners.
+**Deploy targets** (`options.deploy`)
 
-**Limits:** no cloud authorizer and no IAM mapping. A `terraform.extra` resource from another cloud (`aws_*`, `google_*`, `azurerm_*`, and the other cloud prefixes) is omitted with a warning. A state backend of `s3`, `gcs` or `azurerm` warns; set `provider.state.backend` empty (see `providers.onprem` in examples 11 and 15) to keep state on this machine. Delivery is at-least-once. A missed schedule fires once on the next poll, not as a burst. The host does not kill a handler at `timeout`; `ctx.remaining_time_ms()` still counts down. If `provider.runtime` is not the interpreter running `pskit`, validation warns and the host still uses that interpreter.
+| `method` | What runs | Target needs | Laptop needs |
+|---|---|---|---|
+| `local` (default) | detached process on this machine | Python (the interpreter that runs `pskit`) | — |
+| `ssh` | process or systemd unit on a remote host | SSH. Python only if `python: system` | OpenSSH (`ssh`, `scp`) |
+| `docker` | `docker build` + `docker run` | Docker engine, not Python | Docker CLI; set `docker_host: ssh://user@host` to use a remote daemon |
 
-Example: [`examples/16-on-premises`](../examples/16-on-premises).
+When the server has **no Python**, use `python: bundle` (a portable CPython from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) is fetched at apply and copied with the app) or `method: docker` (the image is `FROM python:<minor>-slim`). Air-gapped: `python_home` (copy a tree you already have) or `python_url` + `python_sha256` (internal mirror of an `install_only` tarball).
+
+```yaml
+# SSH + portable CPython + systemd (server does not need Python)
+deploy:
+  method: ssh
+  host: 10.0.1.12                 # or deploy: ssh://pskit@10.0.1.12/opt/pskit/orders
+  user: pskit
+  port: 22
+  identity_file: ${env:PSKIT_SSH_KEY}   # optional; otherwise the SSH agent
+  known_hosts: accept-new         # accept-new | ignore | path to a known_hosts file
+  path: /opt/pskit/orders
+  python: bundle                  # auto | system | bundle
+  target_os: linux                # auto | linux | windows | darwin
+  target_arch: x86_64             # auto | x86_64 | arm64  (drives pip wheels)
+  install: systemd                # process | systemd (linux only)
+  sudo: true                      # needed to write /etc/systemd/system
+
+# Docker (server needs Docker, not Python)
+deploy:
+  method: docker
+  image: pskit/orders:dev
+  docker_host: ssh://pskit@10.0.1.12   # empty = Docker on this laptop
+  restart: unless-stopped
+```
+
+`options.host` is the bind address **on the target**. Use `0.0.0.0` so other machines can call a remote host. `advertise` is the URL stored in `pskit info`. SSH deploy defaults `advertise` to `http://<ssh host>:<port>` when it is unset.
+
+**Resources:** `terraform_data.host` with create (`onprem_deploy.py apply`) and destroy (`onprem_deploy.py destroy`) `local-exec` provisioners.
+
+**Limits:** no cloud authorizer and no IAM mapping. A `terraform.extra` resource from another cloud (`aws_*`, `google_*`, `azurerm_*`, and the other cloud prefixes) is omitted with a warning. A state backend of `s3`, `gcs` or `azurerm` warns; set `provider.state.backend` empty (see `providers.onprem` in examples 11 and 15) to keep state on this machine. Delivery is at-least-once. A missed schedule fires once on the next poll, not as a burst. The host does not kill a handler at `timeout`; `ctx.remaining_time_ms()` still counts down. If `method` is `local` and `provider.runtime` is not the interpreter running `pskit`, validation warns and the host still uses that interpreter. `python: bundle` needs network on first apply unless `python_home` or a cached archive under `~/.cache/pskit/python-standalone` is present. systemd units are written to `/etc/systemd/system` (set `sudo: true` unless the SSH user is root).
+
+Examples: [`examples/16-on-premises`](../examples/16-on-premises) (local process), [`examples/17-on-premises-remote`](../examples/17-on-premises-remote) (SSH / Docker / bundled Python).
 
 ---
 

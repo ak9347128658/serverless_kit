@@ -58,3 +58,6 @@ Set `options.admin_token` and send `x-pskit-token` on `/__pskit/*` except
 
 `pskit dev` is still the hot-reloading HTTP server. This example is the durable
 deploy: it keeps running after `pskit deploy` returns.
+
+To copy the same host onto another machine (SSH, Docker, or a bundled CPython
+when that machine has no Python), see [17-on-premises-remote](../17-on-premises-remote).

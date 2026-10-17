@@ -53,7 +53,7 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 
 ## Features
 
-- **10 clouds and an on-premises host:** AWS Lambda, Azure Functions, Google Cloud Functions (gen2), Alibaba Function Compute, Oracle Functions, IBM Code Engine, DigitalOcean Functions, Tencent SCF, Huawei FunctionGraph, Cloudflare Workers, plus a process on your own machine (`onprem`).
+- **10 clouds and an on-premises host:** AWS Lambda, Azure Functions, Google Cloud Functions (gen2), Alibaba Function Compute, Oracle Functions, IBM Code Engine, DigitalOcean Functions, Tencent SCF, Huawei FunctionGraph, Cloudflare Workers, plus a process on your own machine or a remote server (`onprem`: local, SSH, Docker, or a bundled CPython when the server has no Python).
 - **Triggers:** HTTP (path params, CORS, auth), schedules (rate/cron, translated into each cloud's cron dialect), queues, object storage, pub/sub topics, and direct function-to-function `invoke()`.
 - **Workflows:** task / choice / wait / pass / parallel / map / succeed / fail with retry and catch. Native on AWS and GCP; an embedded engine on the other clouds; runnable locally with `pskit workflow run`.
 - **Terraform underneath:** real, reviewable `main.tf.json`, any backend (S3, GCS, azurerm, ...), works with OpenTofu. Escape hatches: `terraform.extra`, `${tf:...}` references, per-function `options`.
@@ -76,7 +76,7 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 | IBM Code Engine | beta | ✅ | – | – | – | – | embedded |
 | Oracle Cloud Functions | experimental | ✅ | – | – | ✅ | – | embedded |
 | Cloudflare Workers (Python) | experimental | ✅ | ✅ | – | – | – | embedded |
-| On-premises | experimental | ✅ | ✅ | ✅ files | ✅ directory | ✅ files | embedded (in the host) |
+| On-premises | experimental | ✅ | ✅ | ✅ files | ✅ directory | ✅ files | embedded (local, SSH, or Docker) |
 
 Run `pskit providers` for the live matrix. If a config uses a trigger the target cloud can't support, **`pskit validate` fails with a clear message instead of deploying something half-working.**
 

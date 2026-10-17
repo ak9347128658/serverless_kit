@@ -45,7 +45,7 @@ extends: base.yml               # inherit another file (see below)
 | `iam.statements` | list of `{effect, actions, resources}` | `[]` | AWS-style; `effect` defaults to `Allow`, `resources` to `["*"]`. Ignored (with a warning) on clouds that don't map it |
 | `iam.role` | string | — | use an existing role / agency instead of creating one |
 | `log_retention_days` | int or null | `14` | AWS CloudWatch log group retention |
-| `options` | mapping | `{}` | provider-specific settings, see [providers.md](providers.md) |
+| `options` | mapping | `{}` | provider-specific settings, see [providers.md](providers.md). On-premises: `deploy.method` is `local`, `ssh`, or `docker`; `python: bundle` ships an interpreter when the server has none |
 | `state` | mapping | local state | see [state](#state-remote-terraform-backend) |
 | `terraform` | mapping | | see [terraform](#terraform) |
 

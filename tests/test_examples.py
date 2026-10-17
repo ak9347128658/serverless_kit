@@ -66,6 +66,7 @@ HTTP_CASES = [
     ("14-testing", "price", "POST", "/price", {"amount": 100, "code": "VIP25"}, 200),
     ("15-ci-cd-deploy", "health", "GET", "/health", None, 200),
     ("16-on-premises", "hello", "GET", "/hello?name=Ada", None, 200),
+    ("17-on-premises-remote", "hello", "GET", "/hello?name=Ada", None, 200),
 ]
 
 WORKFLOW_CASES = [
@@ -102,7 +103,7 @@ def _errors(project: Project) -> list:
 
 def test_every_example_is_discovered():
     names = {_id(p) for p in PROJECT_DIRS}
-    assert len(names) == 16, names
+    assert len(names) == 17, names
 
 
 @pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)

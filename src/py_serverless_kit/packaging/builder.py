@@ -238,7 +238,7 @@ def build_artifact(project: Project, *, skip_deps: bool = False, log=print) -> A
         if final_reqs and not skip_deps:
             req_file = work / "requirements.vendor.txt"
             req_file.write_text("\n".join(final_reqs) + "\n", "utf-8")
-            flags = provider.pip_platform(cfg.provider.runtime, cfg.provider.architecture)
+            flags = provider.pip_platform_for(cfg)
             log(f"  vendoring {len(final_reqs)} requirement(s) for {cfg.provider.runtime}/{cfg.provider.architecture}")
             _pip_install(req_file, build_dir, flags, cfg.package.pip_args)
     else:
