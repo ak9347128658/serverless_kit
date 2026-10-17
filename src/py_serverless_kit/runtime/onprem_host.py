@@ -973,7 +973,7 @@ def activate_layout(root: Path) -> None:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
+    if sys.platform == "win32":
         import ctypes
 
         handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
@@ -998,7 +998,7 @@ def stop(root: Path) -> int:
     except ValueError:
         pid = 0
     if _pid_alive(pid):
-        if os.name == "nt":
+        if sys.platform == "win32":
             subprocess.call(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
@@ -1043,7 +1043,7 @@ def start(root: Path) -> int:
         "stderr": subprocess.STDOUT,
         "close_fds": True,
     }
-    if os.name == "nt":
+    if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True

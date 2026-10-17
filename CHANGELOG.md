@@ -6,6 +6,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+- On-prem host: Windows process helpers (`ctypes.windll`, `subprocess.DETACHED_PROCESS`) are gated on `sys.platform == "win32"` so mypy on Linux/macOS CI no longer reports missing attributes.
+
 ## [0.2.0] - 2026-10-17
 
 ### Added
