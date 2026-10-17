@@ -48,3 +48,8 @@ providers:
         container_name: tfstate
         key: "${self:service}-${opt:stage}.tfstate"
         use_oidc: true
+  onprem:
+    region: local
+    options: {host: 127.0.0.1, port: 8095}
+    state:
+      backend: null

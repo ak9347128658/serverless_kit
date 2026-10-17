@@ -1,4 +1,4 @@
-"""One codebase, ten clouds. Nothing in this file knows where it runs.
+"""One codebase, every provider. Nothing in this file knows where it runs.
 
 ``event.provider`` / ``ctx.region`` are informational only - the logic below
 is identical on every provider.

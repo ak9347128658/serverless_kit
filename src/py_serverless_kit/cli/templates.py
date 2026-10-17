@@ -15,6 +15,7 @@ DEFAULT_REGIONS = {
     "tencent": "ap-guangzhou",
     "huawei": "cn-north-4",
     "cloudflare": "global",
+    "onprem": "local",
 }
 
 PROVIDER_OPTIONS = {
@@ -26,6 +27,13 @@ PROVIDER_OPTIONS = {
     ),
     "digitalocean": "  options:\n    namespace: ${env:DO_FUNCTIONS_NAMESPACE}\n",
     "cloudflare": "  options:\n    account_id: ${env:CLOUDFLARE_ACCOUNT_ID}\n",
+    "onprem": (
+        "  options:\n"
+        "    host: 127.0.0.1\n"
+        "    port: 8080\n"
+        "    # builtin services are created on deploy. To use a directory you already\n"
+        "    # have: storage: {use: directory, path: /var/pskit/buckets}\n"
+    ),
 }
 
 HANDLERS_HTTP = '''"""HTTP handlers. This code runs unchanged on every supported cloud."""

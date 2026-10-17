@@ -140,6 +140,9 @@ class Provider(ABC):
     vendor_dependencies: ClassVar[bool] = True
     extra_requirements: ClassVar[List[str]] = []
     max_timeout: ClassVar[int] = 900
+    # Embedded workflows on a cloud function are capped by that function's timeout.
+    # A long-running host (on-premises) sets this to False.
+    warn_on_embedded_workflow: ClassVar[bool] = True
     notes: ClassVar[str] = ""
 
     # ------------------------------------------------------------ naming
@@ -238,7 +241,7 @@ class Provider(ABC):
             except ProviderError as exc:
                 issues.append(Issue("error", str(exc), f"workflows.{name}"))
                 continue
-            if engine == "embedded":
+            if engine == "embedded" and self.warn_on_embedded_workflow:
                 issues.append(
                     Issue(
                         "warning",

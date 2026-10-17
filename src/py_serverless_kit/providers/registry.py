@@ -19,6 +19,7 @@ BUILTIN: Dict[str, str] = {
     "tencent": "py_serverless_kit.providers.tencent:TencentProvider",
     "huawei": "py_serverless_kit.providers.huawei:HuaweiProvider",
     "cloudflare": "py_serverless_kit.providers.cloudflare:CloudflareProvider",
+    "onprem": "py_serverless_kit.providers.onprem:OnPremProvider",
 }
 
 _CACHE: Dict[str, Provider] = {}

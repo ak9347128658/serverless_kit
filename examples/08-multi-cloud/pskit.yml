@@ -1,4 +1,4 @@
-# One file for all ten clouds. Pick the target with:
+# One file for every provider, including an on-premises host. Pick the target with:
 #   pskit deploy                     -> provider.name below (aws)
 #   pskit deploy --provider gcp      -> applies providers.gcp on top
 #
@@ -88,3 +88,9 @@ providers:
     options:                      # credentials: CLOUDFLARE_API_TOKEN
       account_id: "${env:CLOUDFLARE_ACCOUNT_ID, 0123456789abcdef0123456789abcdef}"
       workers_subdomain: "${env:CLOUDFLARE_WORKERS_SUBDOMAIN, my-team}"   # <name>.<subdomain>.workers.dev
+
+  onprem:
+    region: local                 # a long-lived process on this machine; no cloud account
+    options:
+      host: 127.0.0.1
+      port: 8088

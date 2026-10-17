@@ -15,7 +15,19 @@ from py_serverless_kit.providers.registry import get_provider
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 PROJECT_DIRS = sorted(p.parent for p in EXAMPLES.rglob("pskit.yml") if ".pskit" not in p.parts)
-ALL_PROVIDERS = ("aws", "gcp", "azure", "alibaba", "tencent", "huawei", "oracle", "ibm", "digitalocean", "cloudflare")
+ALL_PROVIDERS = (
+    "aws",
+    "gcp",
+    "azure",
+    "alibaba",
+    "tencent",
+    "huawei",
+    "oracle",
+    "ibm",
+    "digitalocean",
+    "cloudflare",
+    "onprem",
+)
 
 # (example dir, function, method, path, body, expected status)
 HTTP_CASES = [
@@ -53,6 +65,7 @@ HTTP_CASES = [
     ("13-migrate-from-aws-lambda/after", "create-order", "POST", "/orders", {"items": [{"qty": 1, "price": 5}]}, 202),
     ("14-testing", "price", "POST", "/price", {"amount": 100, "code": "VIP25"}, 200),
     ("15-ci-cd-deploy", "health", "GET", "/health", None, 200),
+    ("16-on-premises", "hello", "GET", "/hello?name=Ada", None, 200),
 ]
 
 WORKFLOW_CASES = [
@@ -62,6 +75,7 @@ WORKFLOW_CASES = [
     ("13-migrate-from-aws-lambda/after", "order-processing", {"items": [{"qty": 2, "price": 300}]}, "SUCCEEDED"),
     ("13-migrate-from-aws-lambda/after", "order-processing", {"items": [{"qty": 0, "price": 1}]}, "OrderRejected"),
     ("14-testing", "scoring", {"vip": True}, "SUCCEEDED"),
+    ("16-on-premises", "ping", {}, "SUCCEEDED"),
 ]
 
 
@@ -88,7 +102,7 @@ def _errors(project: Project) -> list:
 
 def test_every_example_is_discovered():
     names = {_id(p) for p in PROJECT_DIRS}
-    assert len(names) == 15, names
+    assert len(names) == 16, names
 
 
 @pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)
@@ -111,6 +125,14 @@ def test_portable_to_big_three(example: Path, provider: str, tmp_path: Path):
     _require_provider(provider)
     project = Project.load(cwd=_copy(example, tmp_path), provider=provider)
     assert _errors(project) == []
+
+
+@pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)
+def test_portable_to_onprem(example: Path, tmp_path: Path):
+    _require_provider("onprem")
+    project = Project.load(cwd=_copy(example, tmp_path), provider="onprem")
+    assert _errors(project) == []
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
 
 
 @pytest.mark.parametrize("provider", ALL_PROVIDERS)

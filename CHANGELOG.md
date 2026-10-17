@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-17
+
+### Added
+- On-premises provider (`provider.name: onprem`). `pskit deploy` starts one long-lived Python process on the machine that runs the command. HTTP is served directly. Schedules, file queues (with dead-letter and partial batch failure), directory storage and file topics are created at start when they do not already exist. Point `provider.options.services.<kind>` at `{use: directory, path: ...}` to use a directory you already have. `existing: true` waits for that directory instead of creating it. Workflows run on the embedded engine inside the host, and `invoke()` stays in-process. `pskit remove` stops the process and leaves the data directory in place.
+- Example [16-on-premises](examples/16-on-premises). Every other example has an `providers.onprem` block (its own port, public auth where a cloud authorizer does not apply, local state where the file used a cloud backend).
+
+No change to handlers that already run on a cloud. Redeploy to pick up the new runtime if you use `BatchResult` or `invoke()` on premises.
+
 ## [0.1.3] - 2026-10-15
 
 ### Fixed

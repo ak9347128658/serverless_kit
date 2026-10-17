@@ -80,3 +80,9 @@ providers:
     functions:
       admin-stats:
         events: [{http: GET /admin/stats}]
+  onprem:
+    region: local
+    options: {host: 127.0.0.1, port: 8082}
+    functions:
+      admin-stats:
+        events: [{http: GET /admin/stats}]

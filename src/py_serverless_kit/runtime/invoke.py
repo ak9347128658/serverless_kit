@@ -80,13 +80,23 @@ def invoke(function: str, payload: Any = None, *, asynchronous: bool = False, ti
         return _http_post(override, payload, timeout)
 
     provider = os.environ.get("PSKIT_PROVIDER", "local")
-    if provider == "local":
+    if provider in ("local", "onprem"):
+        # In-process, including on-premises (no function URL required). asynchronous
+        # still finishes before invoke() returns, same as a local run.
         from .context import Context
         from .dispatch import execute
         from .event import Event, EventType
 
-        event = Event(type=EventType.INVOKE, provider="local", function=function, data=payload)
-        return execute(event, Context(function=function), function)
+        event = Event(type=EventType.INVOKE, provider=provider, function=function, data=payload)
+        saved = os.environ.get("PSKIT_FUNCTION")
+        os.environ["PSKIT_FUNCTION"] = function
+        try:
+            return execute(event, Context(function=function, provider=provider), function)
+        finally:
+            if saved is None:
+                os.environ.pop("PSKIT_FUNCTION", None)
+            else:
+                os.environ["PSKIT_FUNCTION"] = saved
 
     if provider == "aws":
         try:

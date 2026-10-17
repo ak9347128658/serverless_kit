@@ -31,6 +31,12 @@ stages:
   prod:
     provider:
       memory: 1024
+      state: {backend: s3}
+    providers:
+      onprem:
+        region: local
+        memory: 128
+        state: {backend: null}
     functions:
       api:
         memory: 512
@@ -75,6 +81,18 @@ def test_stage_overrides(tmp_path):
     assert cfg.provider.memory == 1024
     assert cfg.functions["api"].memory == 512
     assert cfg.provider.environment["TABLE"] == "shop-prod-orders"
+
+
+def test_stage_can_override_one_provider(tmp_path):
+    write(tmp_path, BASE)
+    aws = load_config(cwd=tmp_path, stage="prod").config
+    assert aws.provider.memory == 1024
+    assert aws.provider.state.backend == "s3"
+    onprem = load_config(cwd=tmp_path, provider="onprem", stage="prod").config
+    assert onprem.provider.region == "local"
+    assert onprem.provider.memory == 128
+    assert onprem.provider.state.backend is None
+    assert onprem.functions["api"].memory == 512
 
 
 def test_cli_region(tmp_path):

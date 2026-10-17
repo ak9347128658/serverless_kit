@@ -281,6 +281,19 @@ def build_raw(
     effective_stage = stage or data["provider"].get("stage") or "dev"
     stage_override = stage_overrides.get(effective_stage) or {}
     data = deep_merge(data, stage_override)
+    # A stage may name a cloud again (`stages.prod.providers.onprem`) so a later
+    # stage value, such as a remote state backend, can be replaced for one provider.
+    stage_providers = stage_override.get("providers") if isinstance(stage_override, dict) else None
+    if isinstance(stage_providers, dict):
+        unknown = set(stage_providers) - set(known)
+        if unknown:
+            raise ConfigError(
+                f"`stages.{effective_stage}.providers` has unknown keys {sorted(unknown)}; supported: {', '.join(known)}"
+            )
+        block = stage_providers.get(name) or {}
+        if block:
+            data = deep_merge(data, _provider_override(block))
+        data.pop("providers", None)
     data["provider"]["stage"] = effective_stage
     if region:
         data["provider"]["region"] = region

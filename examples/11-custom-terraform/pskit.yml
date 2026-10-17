@@ -55,6 +55,17 @@ functions:
     events:
       - http: GET /orders/{id}
 
+# On this machine there is no DynamoDB table and no S3 state bucket. The handler
+# already uses an in-memory repository when PSKIT_PROVIDER is not aws.
+providers:
+  onprem:
+    region: local
+    options: {host: 127.0.0.1, port: 8091}
+    environment:
+      ORDERS_TABLE: orders
+    state:
+      backend: null
+
 # Shell commands run from the project root. PSKIT_SERVICE, PSKIT_STAGE,
 # PSKIT_PROVIDER and PSKIT_WORK_DIR are set for them.
 hooks:

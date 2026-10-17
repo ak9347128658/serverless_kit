@@ -23,6 +23,7 @@ PROVIDERS = (
     "tencent",
     "huawei",
     "cloudflare",
+    "onprem",
 )
 EVENT_TYPES = ("http", "schedule", "queue", "storage", "topic")
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY")

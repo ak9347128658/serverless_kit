@@ -3,8 +3,8 @@
 ``event.records`` holds the messages of one batch. Return a ``BatchResult``
 naming the records that failed:
 
-* AWS SQS:         only those messages become visible again and are retried
-                   (``ReportBatchItemFailures`` is enabled for you);
+* AWS SQS and the on-premises host: only those messages become visible again
+                   and are retried (``ReportBatchItemFailures`` on AWS);
 * other clouds:    any failure fails the invocation, so the whole batch is redelivered.
 
 Either way a message that keeps failing ends up in the dead-letter queue
@@ -62,14 +62,20 @@ def _log_dead_letter(record: Record, ctx: Context) -> None:
 
 
 def enqueue(event: Event, ctx: Context):
-    """HTTP producer stub.
+    """HTTP producer.
 
-    Sending a message is a *cloud SDK* call (boto3 ``sqs.send_message``,
-    ``google-cloud-pubsub`` ``publish``, ``azure-storage-queue``
-    ``send_message`` ...). py-serverless-kit does not wrap these SDKs. Keep
-    that one call behind a small function of your own (see README), so the
-    rest of the handler stays portable.
+    On premises the host is in this process, so the message is written to the
+    file queue. On a cloud, publishing is a cloud SDK call (boto3
+    ``sqs.send_message``, ``google-cloud-pubsub`` ``publish``,
+    ``azure-storage-queue`` ``send_message``). Keep that call behind a small
+    function of your own (see README).
     """
     job = event.http.json()
-    ctx.logger.info("would enqueue", extra={"job": job, "queue": ctx.env.get("JOBS_QUEUE")})
-    return {"accepted": True, "queue": ctx.env.get("JOBS_QUEUE")}, 202
+    queue = ctx.env.get("JOBS_QUEUE") or "jobs"
+    if ctx.env.get("PSKIT_ONPREM_ROOT"):
+        from py_serverless_kit.runtime.onprem_host import submit_queue
+
+        message_id = submit_queue(queue, job)
+        return {"accepted": True, "queue": queue, "message_id": message_id}, 202
+    ctx.logger.info("would enqueue", extra={"job": job, "queue": queue})
+    return {"accepted": True, "queue": queue}, 202

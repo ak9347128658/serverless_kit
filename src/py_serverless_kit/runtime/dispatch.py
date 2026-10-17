@@ -200,9 +200,9 @@ def _finish(prep: _Prepared, event: Event, context: Context, result: Any, error:
             )
             raise error
         context.logger.debug("handler ok", extra={"event_type": event.type, "duration_ms": elapsed_ms})
-        # AWS reports partial failures natively; local runs show them; elsewhere the
-        # whole batch must fail so the platform redelivers it.
-        if isinstance(result, BatchResult) and event.provider not in ("aws", "local"):
+        # AWS, the local runner and the on-premises host report partial failures.
+        # Everywhere else the whole batch must fail so the platform redelivers it.
+        if isinstance(result, BatchResult) and event.provider not in ("aws", "local", "onprem"):
             result.raise_if_failed()
             return None
         return result

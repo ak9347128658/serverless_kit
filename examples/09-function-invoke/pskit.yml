@@ -39,3 +39,6 @@ providers:
         environment:
           PSKIT_ENDPOINT_PRICE_CALCULATOR: "${env:PRICE_CALCULATOR_URL, }"
           PSKIT_ENDPOINT_AUDIT_LOG: "${env:AUDIT_LOG_URL, }"
+  onprem:
+    region: local
+    options: {host: 127.0.0.1, port: 8089}

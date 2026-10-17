@@ -52,3 +52,12 @@ providers:
       audit-existing:
         events:
           - storage: {bucket: audit-uploads, events: [created]}
+  onprem:
+    region: local
+    options: {host: 127.0.0.1, port: 8085}
+    # The shared audit bucket is not on this machine. Create a local directory
+    # bucket with the host so the function has somewhere to listen.
+    functions:
+      audit-existing:
+        events:
+          - storage: {bucket: shared-uploads, events: [created, deleted]}
