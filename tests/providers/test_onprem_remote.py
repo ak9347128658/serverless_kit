@@ -10,9 +10,11 @@ from types import SimpleNamespace
 
 from py_serverless_kit.providers.onprem_remote import (
     DeployError,
+    _pack_release,
     apply_docker,
     apply_ssh,
     destroy_docker,
+    destroy_ssh,
     dockerfile_text,
     extract_bundle_for_tests,
 )
@@ -75,10 +77,90 @@ def test_apply_ssh_copies_and_starts(tmp_path: Path):
     }
     runner = _Proc()
     apply_ssh(root, spec, run=runner)
-    joined = [" ".join(c) for c in runner.calls]
     assert any(c[0] == "ssh" and "mkdir -p" in " ".join(c) for c in runner.calls)
-    assert any(c[0] == "scp" and "onprem_ctl.py" in " ".join(c) for c in runner.calls)
-    assert any("onprem_ctl.py start" in line for line in joined)
+    assert any(c[0] == "scp" and "release.tar.gz" in " ".join(c) for c in runner.calls)
+    assert any(c[0] == "ssh" and "remote_apply.sh" in " ".join(c) for c in runner.calls)
+    script = (root / "remote_apply.sh").read_text(encoding="utf-8")
+    assert "tar -xf" in script
+    assert "rm -rf" in script and "staging" in script
+    assert 'onprem_ctl.py" start' in script
+    assert "sudo -n" in script or "SUDO=0" in script
+    assert not (root / "release.tar.gz").exists()
+
+
+def test_apply_ssh_systemd_restarts_and_checks_health(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    (root / "onprem_ctl.py").write_text("print(1)\n", encoding="utf-8")
+    (root / "pskit_host.json").write_text("{}\n", encoding="utf-8")
+    (root / "pskit.service").write_text("[Service]\nExecStart=/opt/pskit/demo/pskit-run.sh\n", encoding="utf-8")
+    (root / "staging").mkdir()
+    spec = {
+        "port": 9090,
+        "unit_name": "pskit-demo-dev",
+        "deploy": {
+            "method": "ssh",
+            "python": "system",
+            "target_os": "linux",
+            "runtime": "python3.12",
+            "install": "systemd",
+            "sudo": True,
+            "ssh": {
+                "host": "10.0.1.12",
+                "user": "pskit",
+                "port": 22,
+                "identity_file": "",
+                "known_hosts": "accept-new",
+                "path": "/opt/pskit/demo",
+            },
+        },
+    }
+    apply_ssh(root, spec, run=_Proc())
+    script = (root / "remote_apply.sh").read_text(encoding="utf-8")
+    assert "systemctl restart" in script
+    assert "systemctl enable" in script
+    assert "http://127.0.0.1:9090/__pskit/health" in script
+    assert "journalctl" in script
+    assert "sudo -n" in script
+    assert 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"' in script
+
+
+def test_release_archive_is_one_tree(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    (root / "onprem_ctl.py").write_text("print(1)\n", encoding="utf-8")
+    (root / "pskit-run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    staging = root / "staging"
+    staging.mkdir()
+    (staging / "app.py").write_text("x\n", encoding="utf-8")
+    dest = tmp_path / "release.tar.gz"
+    _pack_release(root, dest)
+    with tarfile.open(dest, "r:gz") as tar:
+        names = set(tar.getnames())
+    assert "onprem_ctl.py" in names
+    assert "pskit-run.sh" in names
+    assert "staging/app.py" in names or "staging\\app.py" in names
+    assert not any("staging/staging" in name or "staging\\staging" in name for name in names)
+
+
+def test_destroy_ssh_stops_systemd(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    spec = {
+        "unit_name": "pskit-demo-dev",
+        "deploy": {
+            "install": "systemd",
+            "sudo": True,
+            "runtime": "python3.12",
+            "ssh": {"host": "10.0.1.12", "user": "pskit", "port": 22, "path": "/opt/pskit/demo"},
+        },
+    }
+    runner = _Proc()
+    destroy_ssh(root, spec, run=runner)
+    script = (root / "remote_destroy.sh").read_text(encoding="utf-8")
+    assert "systemctl disable --now" in script
+    assert "apt-get" not in script
+    assert any("remote_destroy.sh" in " ".join(c) for c in runner.calls)
 
 
 def test_apply_docker_builds_and_runs(tmp_path: Path):
@@ -144,17 +226,24 @@ def test_apply_docker_remote_builds_locally_and_installs(tmp_path: Path):
     assert runner.calls[0][:4] == ["docker", "build", "-t", "pskit-demo:dev"]
     assert runner.calls[1][:3] == ["docker", "save", "-o"]
     assert runner.calls[1][-1] == "pskit-demo:dev"
-    joined = [" ".join(c) for c in runner.calls]
-    setup = next(line for line in joined if "apt-get install -y docker.io" in line)
-    assert "dnf install -y docker" in setup
-    assert "yum install -y docker" in setup
-    assert "apk add --no-cache docker" in setup
-    assert "command -v docker" in setup
-    assert any(c[0] == "scp" and "-i" in c and str(pem) in c and "image.tar" in " ".join(c) for c in runner.calls)
-    load = next(line for line in joined if "dk load -i" in line)
-    assert "pskit-demo:dev" in load
-    assert "--memory" in load
-    assert "256m" in load
+    script = (root / "remote_docker.sh").read_text(encoding="utf-8")
+    assert "apt-get install -y docker.io" in script
+    assert "dnf install -y docker" in script
+    assert "yum install -y docker" in script
+    assert "apk add --no-cache docker" in script
+    assert "command -v docker" in script
+    assert "sudo -n" in script
+    assert "dk load -i" in script
+    assert "pskit-demo:dev" in script
+    assert "--memory" in script
+    assert "256m" in script
+    assert "{{.State.Running}}" in script
+    assert "http://127.0.0.1:8080/__pskit/health" in script
+    assert any(
+        c[0] == "scp" and "-i" in c and str(pem) in c and "IdentitiesOnly=yes" in c and "image.tar" in " ".join(c)
+        for c in runner.calls
+    )
+    assert any(c[0] == "ssh" and "remote_docker.sh" in " ".join(c) for c in runner.calls)
     assert not (root / "image.tar").exists()
 
 
@@ -165,9 +254,9 @@ def test_apply_docker_remote_skips_install_when_disabled(tmp_path: Path):
     pem.write_text("key\n", encoding="utf-8")
     runner = _Proc()
     apply_docker(root, _remote_spec(pem, install_docker=False), run=runner)
-    setup = next(" ".join(c) for c in runner.calls if c[0] == "ssh" and "command -v docker" in " ".join(c))
-    assert "apt-get install" not in setup
-    assert "Docker is not installed on the server" in setup
+    script = (root / "remote_docker.sh").read_text(encoding="utf-8")
+    assert "apt-get install" not in script
+    assert "Docker is not installed on the server" in script
 
 
 def test_apply_docker_remote_requires_pem(tmp_path: Path):
@@ -190,11 +279,10 @@ def test_destroy_docker_remote_does_not_install(tmp_path: Path):
     pem.write_text("key\n", encoding="utf-8")
     runner = _Proc()
     destroy_docker(root, _remote_spec(pem), run=runner)
-    assert len(runner.calls) == 1
-    command = " ".join(runner.calls[0])
-    assert runner.calls[0][0] == "ssh"
-    assert "dk rm -f" in command
-    assert "apt-get install" not in command
+    script = (root / "remote_docker_destroy.sh").read_text(encoding="utf-8")
+    assert "dk rm -f" in script
+    assert "apt-get install" not in script
+    assert any(c[0] == "ssh" and "remote_docker_destroy.sh" in " ".join(c) for c in runner.calls)
 
 
 def test_parse_docker_pem_and_ssh_url():

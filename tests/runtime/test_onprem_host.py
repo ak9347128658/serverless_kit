@@ -9,7 +9,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from py_serverless_kit.core.deployer import Deployer
-from py_serverless_kit.runtime.onprem_host import Host, activate_layout
+from py_serverless_kit.runtime.onprem_host import Host, activate_layout, health_url
 
 HANDLERS = """
 import os
@@ -237,3 +237,10 @@ def test_admin_token_gates_the_broker(make_project, tmp_path):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_health_url_uses_loopback_when_the_process_binds_every_interface():
+    assert health_url({"host": "0.0.0.0", "port": 9090}) == "http://127.0.0.1:9090/__pskit/health"
+    assert health_url({"host": "::", "port": 8080}) == "http://127.0.0.1:8080/__pskit/health"
+    assert health_url({"host": "10.0.1.12", "port": 9090}) == "http://10.0.1.12:9090/__pskit/health"
+    assert health_url({"host": "::1", "port": 9090}) == "http://[::1]:9090/__pskit/health"

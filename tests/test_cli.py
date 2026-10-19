@@ -72,6 +72,34 @@ def test_ask_onprem_pem_records_the_path(tmp_path, monkeypatch):
     assert Path(stored) == pem.resolve()
 
 
+def test_ask_onprem_pem_for_ssh_keeps_the_agent_when_blank(tmp_path, monkeypatch):
+    import sys
+
+    from py_serverless_kit.cli.main import _ask_onprem_pem
+    from py_serverless_kit.core.project import Project
+
+    root = tmp_path / "svc"
+    root.mkdir()
+    (root / "pskit.yml").write_text(
+        "service: demo\n"
+        "provider:\n"
+        "  name: onprem\n"
+        "  options:\n"
+        "    host: 0.0.0.0\n"
+        "    deploy: {method: ssh, host: 10.0.1.12, user: pskit}\n"
+        "functions:\n"
+        "  hello:\n"
+        "    handler: app.handlers.hello\n"
+        "    events: [{http: GET /hello}]\n",
+        encoding="utf-8",
+    )
+    project = Project.load(cwd=root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("py_serverless_kit.cli.main.click.prompt", lambda *_a, **_k: "")
+    _ask_onprem_pem(project)
+    assert "pem" not in project.config.provider.options["deploy"]
+
+
 def test_remote_docker_deploy_asks_for_pem_off_a_terminal(tmp_path, monkeypatch):
     root = tmp_path / "svc"
     root.mkdir()

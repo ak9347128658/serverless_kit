@@ -187,7 +187,10 @@ def test_ssh_bundle_systemd_renders(make_project, render):
     assert spec["data_dir"] == "/opt/pskit/demo/data"
     assert (root / "pskit.service").is_file()
     unit = (root / "pskit.service").read_text("utf-8")
-    assert "ExecStart=" in unit and "/opt/pskit/demo/python/bin/python3" in unit
+    assert "ExecStart=/opt/pskit/demo/pskit-run.sh" in unit
+    launcher = (root / "pskit-run.sh").read_text(encoding="utf-8")
+    assert "./python/bin/python3" in launcher
+    assert "python3.12" in launcher
     assert tf["output"]["pskit"]["value"]["deploy"] == "ssh"
     flags = project.provider.pip_platform_for(project.config)
     assert "--platform" in flags and "manylinux2014_x86_64" in flags
@@ -222,6 +225,39 @@ functions:
 def test_ssh_requires_host(make_project):
     text = SSH_CONFIG.replace("      host: 10.0.1.12\n", "")
     assert any("host is required" in err for err in _errors(make_project(text)))
+
+
+def test_ctl_swaps_staging_into_app_before_import(tmp_path):
+    import subprocess
+    import sys
+
+    from py_serverless_kit.providers.onprem import _CTL
+
+    pkg = tmp_path / "staging" / "py_serverless_kit" / "runtime"
+    pkg.mkdir(parents=True)
+    (tmp_path / "staging" / "py_serverless_kit" / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "onprem_host.py").write_text("def main(root):\n    return 0\n", encoding="utf-8")
+    (tmp_path / "onprem_ctl.py").write_bytes(_CTL.replace("\r\n", "\n").encode("utf-8"))
+    proc = subprocess.run(
+        [sys.executable, str(tmp_path / "onprem_ctl.py"), "start"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (tmp_path / "app" / "py_serverless_kit" / "runtime" / "onprem_host.py").is_file()
+    assert not (tmp_path / "staging").exists()
+
+
+def test_scp_is_an_alias_of_ssh(make_project, render):
+    text = SSH_CONFIG.replace("method: ssh", "method: scp")
+    project = make_project(text)
+    assert _errors(project) == []
+    render(project)
+    spec = json.loads((project.work_dir / "onprem_app" / "pskit_host.json").read_text("utf-8"))
+    assert spec["deploy"]["method"] == "ssh"
+    assert (project.work_dir / "onprem_app" / "pskit-run.sh").is_file()
 
 
 def test_unknown_deploy_method(make_project):

@@ -208,8 +208,11 @@ def parse_deploy(
         merged.setdefault("python_home", bundle.get("home"))
 
     method = _str(merged, "method", "via", default="local").lower() or "local"
+    if method == "scp":
+        # Same transport as ssh: one archive, copied with scp, started over ssh.
+        method = "ssh"
     if method not in METHODS:
-        raise ValueError(f"options.deploy.method must be one of {', '.join(METHODS)}")
+        raise ValueError(f"options.deploy.method must be one of {', '.join(METHODS)} (scp is an alias of ssh)")
 
     python = _str(merged, "python", default="auto").lower() or "auto"
     if python not in PYTHON_MODES:

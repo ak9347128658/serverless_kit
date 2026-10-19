@@ -357,7 +357,7 @@ One Worker script per function. pskit generates a single Python module per Worke
 ## onprem (On-premises)
 
 - **Terraform:** built-in `terraform_data` (no plugin download). Create/destroy run `onprem_deploy.py` via `local-exec`
-- **Credentials:** none for `method: local`. SSH keys / an SSH agent for `method: ssh`. For `method: docker` on a server, a `.pem` private key (`options.deploy.pem`) plus OpenSSH on the laptop and a Docker CLI to build the image. `pskit deploy` asks for the `.pem` when it is not set. `docker_host: tcp://`, `unix://`, or `npipe://` still talks to that daemon and does not use SSH
+- **Credentials:** none for `method: local`. For `method: ssh` (or `scp`), a `.pem` (`options.deploy.pem` or `identity_file`) or the SSH agent. `pskit deploy` asks for the `.pem` on a terminal; Enter keeps the agent. For `method: docker` on a server, a `.pem` is required, plus OpenSSH on the laptop and a Docker CLI to build the image. `docker_host: tcp://`, `unix://`, or `npipe://` still talks to that daemon and does not use SSH
 - **Dependencies:** native pip wheels for a local host; manylinux / Windows / macOS wheels matching `deploy.target_os` and `architecture` for a remote host. `tzdata` is vendored so cron timezones work on Windows
 
 ```yaml
@@ -378,7 +378,7 @@ provider:
       topic: builtin
       workflow: embedded                       # builtin is an alias of embedded
     deploy:
-      method: local          # local | ssh | docker   (default local)
+      method: local          # local | ssh | scp | docker   (default local). scp is ssh
 ```
 
 `pskit deploy` writes the bundle under `.pskit/onprem-<stage>/onprem_app/` and runs `onprem_deploy.py apply`. `pskit remove` stops the process (or container / systemd unit) and does not delete `data_dir`.
@@ -413,8 +413,8 @@ From a handler in that process (`PSKIT_ONPREM_ROOT` is set), call `submit_queue`
 | `method` | What runs | Target needs | Laptop needs |
 |---|---|---|---|
 | `local` (default) | detached process on this machine | Python (the interpreter that runs `pskit`) | — |
-| `ssh` | process or systemd unit on a remote host | SSH. Python only if `python: system` | OpenSSH (`ssh`, `scp`) |
-| `docker` | image built on this machine, then `docker load` + `docker run` on the server | SSH. Docker is installed at apply when it is missing (`install_docker: true`, the default) | Docker CLI and OpenSSH. `pem` is the server private key |
+| `ssh` or `scp` | one `release.tar.gz` extracted on the server, then a process or a systemd unit. Apply runs `systemctl restart` and waits for `/__pskit/health` | SSH. Python only if `python: system`. Passwordless `sudo` when `install: systemd` and `sudo: true` | OpenSSH (`ssh`, `scp`). Optional `.pem` |
+| `docker` | image built on this machine, then `docker load` + `docker run` on the server. Apply waits until the container answers `/__pskit/health` | SSH. Docker is installed at apply when it is missing (`install_docker: true`, the default). Passwordless `sudo` when the daemon must be installed or the user cannot talk to it | Docker CLI, OpenSSH, and a `.pem` |
 
 When the server has **no Python**, use `python: bundle` (a portable CPython from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) is fetched at apply and copied with the app) or `method: docker` (the image is `FROM python:<minor>-slim`). Air-gapped: `python_home` (copy a tree you already have) or `python_url` + `python_sha256` (internal mirror of an `install_only` tarball).
 
@@ -425,7 +425,7 @@ deploy:
   host: 10.0.1.12                 # or deploy: ssh://pskit@10.0.1.12/opt/pskit/orders
   user: pskit
   port: 22
-  identity_file: ${env:PSKIT_SSH_KEY}   # optional; otherwise the SSH agent
+  pem: ${env:PSKIT_SSH_KEY}       # or identity_file. pskit deploy asks when a terminal is attached
   known_hosts: accept-new         # accept-new | ignore | path to a known_hosts file
   path: /opt/pskit/orders
   python: bundle                  # auto | system | bundle
@@ -456,11 +456,13 @@ deploy:
 
 `options.host` is the bind address **on the target**. Use `0.0.0.0` so other machines can call a remote host. `advertise` is the URL stored in `pskit info`. SSH and remote Docker deploys default `advertise` to `http://<server>:<port>` when it is unset.
 
-Remote Docker (`method: docker` plus `host`, or `docker_host: ssh://user@host`) builds `pskit-<service>-<stage>` locally, saves it to a tar, and `scp`s that tar to `pskit-images/<container>/` in the SSH user's home. Apply then runs `docker load` and `docker run`, and deletes the tar. The SSH user needs passwordless `sudo` when Docker must be installed or when the user cannot talk to the daemon (`sudo` defaults to true). The `.pem` must be accepted by `ssh -o BatchMode=yes` (no passphrase prompt). Set `install_docker: false` to refuse a server that does not already have Docker. A server whose package manager is not apt, dnf, yum, or apk is reported and left unchanged.
+SSH and `scp` write `pskit-run.sh` plus `release.tar.gz` (the staged bundle, `onprem_ctl.py`, `pskit_host.json`, the unit when `install: systemd`, and `python/` when `python: bundle`). Apply copies those two files, extracts them under `path`, and does not delete `data_dir`. `install: systemd` runs `systemctl restart`. `install: process` runs `onprem_ctl.py start`. Either way the deploy fails if `http://127.0.0.1:<port>/__pskit/health` does not answer, and the failure includes `systemctl status` and `journalctl` when a unit was used.
+
+Remote Docker (`method: docker` plus `host`, or `docker_host: ssh://user@host`) builds `pskit-<service>-<stage>` locally, saves it to a tar, and `scp`s that tar to `pskit-images/<container>/` in the SSH user's home. A script on the server installs Docker when it is missing (apt, dnf, yum, or apk), waits until `docker info` succeeds, runs `docker load` and `docker run`, and deletes the tar. The deploy fails if the container does not answer `/__pskit/health`, and the failure includes `docker logs`. The SSH user needs passwordless `sudo` (`sudo -n`) when Docker must be installed or when the user cannot talk to the daemon (`sudo` defaults to true). The `.pem` must be accepted by `ssh -o BatchMode=yes` (no passphrase prompt). On Windows, if OpenSSH says the key is unprotected, restrict it with `icacls`. Set `install_docker: false` to refuse a server that does not already have Docker. A server whose package manager is not apt, dnf, yum, or apk is reported and left unchanged.
 
 **Resources:** `terraform_data.host` with create (`onprem_deploy.py apply`) and destroy (`onprem_deploy.py destroy`) `local-exec` provisioners.
 
-**Limits:** no cloud authorizer and no IAM mapping. A `terraform.extra` resource from another cloud (`aws_*`, `google_*`, `azurerm_*`, and the other cloud prefixes) is omitted with a warning. A state backend of `s3`, `gcs` or `azurerm` warns; set `provider.state.backend` empty (see `providers.onprem` in examples 11 and 15) to keep state on this machine. Delivery is at-least-once. A missed schedule fires once on the next poll, not as a burst. The host does not kill a handler at `timeout`; `ctx.remaining_time_ms()` still counts down. If `method` is `local` and `provider.runtime` is not the interpreter running `pskit`, validation warns and the host still uses that interpreter. `python: bundle` needs network on first apply unless `python_home` or a cached archive under `~/.cache/pskit/python-standalone` is present. systemd units are written to `/etc/systemd/system` (set `sudo: true` unless the SSH user is root).
+**Limits:** no cloud authorizer and no IAM mapping. A `terraform.extra` resource from another cloud (`aws_*`, `google_*`, `azurerm_*`, and the other cloud prefixes) is omitted with a warning. A state backend of `s3`, `gcs` or `azurerm` warns; set `provider.state.backend` empty (see `providers.onprem` in examples 11 and 15) to keep state on this machine. Delivery is at-least-once. A missed schedule fires once on the next poll, not as a burst. The host does not kill a handler at `timeout`; `ctx.remaining_time_ms()` still counts down. If `method` is `local` and `provider.runtime` is not the interpreter running `pskit`, validation warns and the host still uses that interpreter. `python: bundle` needs network on first apply unless `python_home` or a cached archive under `~/.cache/pskit/python-standalone` is present. systemd units are written to `/etc/systemd/system` (set `sudo: true` unless the SSH user is root). That `sudo` is non-interactive (`sudo -n`), so the sudoers rule must not ask for a password.
 
 Examples: [`examples/16-on-premises`](../examples/16-on-premises) (local process), [`examples/17-on-premises-remote`](../examples/17-on-premises-remote) (SSH / Docker / bundled Python).
 

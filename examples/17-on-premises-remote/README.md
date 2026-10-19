@@ -9,14 +9,14 @@ Three ways to get code from this laptop onto that server:
 | `options.deploy.method` | What the server needs | What the laptop needs | When to use it |
 | --- | --- | --- | --- |
 | `local` | this machine (example 16) | Python + pskit | laptop / the server *is* the deploy machine |
-| `ssh` | SSH. Python only if `python: system` | OpenSSH (`ssh`, `scp`) | most on-prem Linux boxes |
+| `ssh` or `scp` | SSH. Python only if `python: system` | OpenSSH (`ssh`, `scp`) and a `.pem` or the SSH agent | most on-prem Linux boxes |
 | `docker` | SSH. Docker is installed at deploy when it is missing | Docker CLI, OpenSSH, and a `.pem` for the server | the server should run a container, with or without Docker already installed |
 
 When the server has **no Python**, pick one of:
 
-- `method: ssh` and `python: bundle` — pskit downloads a portable CPython
+- `method: ssh` (or `method: scp`) and `python: bundle` — pskit downloads a portable CPython
   ([python-build-standalone](https://github.com/astral-sh/python-build-standalone))
-  at apply time, copies it with the app, and starts systemd (this file)
+  at apply time, packs it into one `release.tar.gz`, copies that file, and restarts systemd (this file)
 - `method: docker` — the image is `FROM python:3.12-slim` and is built on this
   machine. The server does not need Python. If it also has no Docker, deploy
   installs Docker and then loads the image
@@ -28,15 +28,24 @@ When the server has **no Python**, pick one of:
 ```bash
 export PSKIT_ONPREM_HOST=10.0.1.12          # SSH target
 export PSKIT_ONPREM_USER=pskit
-export PSKIT_SSH_KEY=$HOME/.ssh/id_ed25519  # optional
+export PSKIT_SSH_KEY=$HOME/.ssh/factory.pem # optional; pskit deploy asks when this is empty
 export PSKIT_ONPREM_URL=http://10.0.1.12:8090
 pskit deploy
 curl http://10.0.1.12:8090/hello?name=Ada
+curl http://10.0.1.12:8090/__pskit/health
 pskit remove                                 # systemctl stop; data dir stays
 ```
 
-The SSH user needs `sudo` to write `/etc/systemd/system` (`deploy.sudo: true`).
-Wheels are vendored as manylinux x86_64 because `target_os: linux`.
+`pskit deploy` packs the host into one archive, copies it with `scp`, runs
+`systemctl restart`, and returns only after `http://127.0.0.1:8090/__pskit/health`
+answers on the server. A failed start prints `systemctl status` and `journalctl`.
+
+The SSH user needs passwordless `sudo` to write `/etc/systemd/system`
+(`deploy.sudo: true`). On a terminal, leave the `.pem` prompt empty to use the
+SSH agent. The key must be accepted with `BatchMode` (no passphrase prompt).
+If OpenSSH says the `.pem` is too open, run `chmod 600` on Linux or macOS, or
+`icacls` on Windows. Wheels are vendored as manylinux x86_64 because
+`target_os: linux`.
 
 Shorthand for the same method:
 
@@ -48,8 +57,9 @@ deploy: ssh://pskit@10.0.1.12/opt/pskit/factory-api
 
 The image is built on the laptop. It is copied to the server with the `.pem`
 and started there. The server does not need Python. If `docker` is not on the
-server, deploy installs it (apt, dnf, yum, or apk) and then loads the image.
-`pskit deploy` asks for the `.pem` path when `pem` is empty.
+server, deploy installs it (apt, dnf, yum, or apk), waits until the daemon
+answers, loads the image, and returns only after the container answers
+`/__pskit/health`. `pskit deploy` asks for the `.pem` path when `pem` is empty.
 
 ```yaml
 provider:

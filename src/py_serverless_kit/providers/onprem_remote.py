@@ -3,9 +3,13 @@
 Terraform ``local-exec`` runs this with the same interpreter as ``pskit deploy``.
 The target never needs pskit installed. ``python: bundle`` ships a portable
 CPython; ``method: docker`` builds an image that already contains Python.
-A remote Docker target (``host`` or ``docker_host: ssh://...``) builds that
-image on this machine, installs Docker on the server when it is missing, then
-copies the image over SSH and runs it.
+
+Remote SSH (``method: ssh`` or ``scp``) packs one ``release.tar.gz`` and copies
+that file. A shell script on the server extracts it, restarts the process or
+the systemd unit, and waits until ``/__pskit/health`` answers on loopback.
+A remote Docker target builds the image on this machine, installs Docker on
+the server when it is missing, copies the image with the ``.pem``, and waits
+until the container is healthy.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from .onprem_spec import json_targets_remote_docker, python_bin_for
+from .onprem_spec import json_targets_remote_docker
 
 _CACHE = Path(os.environ.get("PSKIT_CACHE_DIR") or (Path.home() / ".cache" / "pskit"))
 RunFn = Callable[..., "subprocess.CompletedProcess[Any]"]
@@ -78,46 +82,43 @@ def destroy_local(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = No
 
 
 def apply_ssh(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
+    """Copy one archive with scp and start it from a script that runs on the server.
+
+    A single ``release.tar.gz`` avoids the nested-directory redeploy that
+    ``scp -r`` does when the destination already exists. The remote script
+    restarts systemd (``enable --now`` leaves the old process running) and
+    waits until ``/__pskit/health`` answers on the server's loopback.
+    """
     deploy = spec["deploy"]
     ssh = deploy["ssh"]
+    _check_identity(ssh, required=False)
     _ensure_python(root, spec)
-    remote = ssh["path"]
-    _ssh(ssh, f"mkdir -p { _shq(remote) }", run=run)
-    for name in ("pskit_host.json", "onprem_ctl.py", "pskit.service", "staging", "python"):
-        src = root / name
-        if src.exists():
-            _scp(ssh, src, f"{remote}/{name}", run=run)
-    py = python_bin_for(_view(deploy), remote)
-    if deploy.get("install") == "systemd":
-        unit = spec.get("unit_name") or "pskit-host"
-        unit_src = f"{remote}/pskit.service"
-        dest = f"/etc/systemd/system/{unit}.service"
-        copy = f"cp { _shq(unit_src) } { _shq(dest) }"
-        if deploy.get("sudo"):
-            copy = "sudo " + copy
-        reload = "systemctl daemon-reload && systemctl enable --now " + _shq(unit)
-        if deploy.get("sudo"):
-            reload = "sudo bash -lc " + _shq(reload)
-        _ssh(ssh, copy, run=run)
-        _ssh(ssh, reload, run=run)
-        return
-    _ssh(ssh, f"cd { _shq(remote) } && { _shq(py) } onprem_ctl.py start", run=run)
+    if not (root / "pskit-run.sh").is_file():
+        _write_text(root / "pskit-run.sh", launcher_text(str(deploy.get("runtime") or "python3.12")))
+    remote = str(ssh["path"])
+    archive = root / "release.tar.gz"
+    script_path = root / "remote_apply.sh"
+    try:
+        _pack_release(root, archive)
+        _write_text(script_path, _ssh_apply_script(spec))
+        _ssh(ssh, f"mkdir -p {_shq(remote)}", run=run)
+        _scp(ssh, archive, f"{remote}/release.tar.gz", run=run)
+        _scp(ssh, script_path, f"{remote}/remote_apply.sh", run=run)
+        _ssh(ssh, f"sh {_shq(remote + '/remote_apply.sh')}", run=run)
+    finally:
+        if archive.is_file():
+            archive.unlink()
 
 
 def destroy_ssh(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
-    del root
     deploy = spec["deploy"]
     ssh = deploy["ssh"]
-    remote = ssh["path"]
-    if deploy.get("install") == "systemd":
-        unit = spec.get("unit_name") or "pskit-host"
-        cmd = "systemctl disable --now " + _shq(unit)
-        if deploy.get("sudo"):
-            cmd = "sudo " + cmd
-        _ssh(ssh, cmd, run=run, check=False)
-        return
-    py = python_bin_for(_view(deploy), remote)
-    _ssh(ssh, f"cd { _shq(remote) } && { _shq(py) } onprem_ctl.py stop", run=run, check=False)
+    remote = str(ssh["path"])
+    script_path = root / "remote_destroy.sh"
+    _write_text(script_path, _ssh_destroy_script(spec))
+    _ssh(ssh, f"mkdir -p {_shq(remote)}", run=run, check=False)
+    _scp(ssh, script_path, f"{remote}/remote_destroy.sh", run=run, check=False)
+    _ssh(ssh, f"sh {_shq(remote + '/remote_destroy.sh')}", run=run, check=False)
 
 
 def apply_docker(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
@@ -135,29 +136,28 @@ def apply_docker(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = Non
 
 
 def apply_docker_remote(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
-    """Build on this machine, install Docker on the server if needed, then load and run."""
+    """Build on this machine, install Docker on the server if needed, then load and run.
+
+    The server script is a file, copied with scp. Passing a multi-line script as
+    the SSH command is unreliable from Windows OpenSSH, which re-quotes arguments.
+    """
     deploy = spec["deploy"]
     docker = deploy["docker"]
     ssh = deploy["ssh"]
     image = str(docker["image"])
-    identity = str(ssh.get("identity_file") or "")
-    if not identity:
-        raise DeployError(
-            "remote Docker deploy needs a .pem private key. "
-            "Set options.deploy.pem, or run `pskit deploy` in a terminal and enter the path."
-        )
-    if not os.path.isfile(identity):
-        raise DeployError(f"SSH private key not found: {identity}")
+    _check_identity(ssh, required=True)
     _run(["docker", "build", "-t", image, "."], cwd=root, run=run)
     tar_path = root / "image.tar"
     try:
         _run(["docker", "save", "-o", str(tar_path), image], cwd=root, run=run)
         remote_tar = _remote_tar(str(docker["container"]))
         remote_dir = remote_tar.rsplit("/", 1)[0]
-        install = bool(docker.get("install_docker", True))
-        _ssh(ssh, _docker_setup_script(install=install, remote_dir=remote_dir), run=run)
+        script_path = root / "remote_docker.sh"
+        _write_text(script_path, _docker_remote_script(docker, spec, remote_tar))
+        _ssh(ssh, f"mkdir -p {_shq(remote_dir)}", run=run)
         _scp(ssh, tar_path, remote_tar, run=run)
-        _ssh(ssh, _docker_load_script(docker, spec, remote_tar), run=run)
+        _scp(ssh, script_path, f"{remote_dir}/remote_docker.sh", run=run)
+        _ssh(ssh, f"sh {_shq(remote_dir + '/remote_docker.sh')}", run=run)
     finally:
         if tar_path.is_file():
             tar_path.unlink()
@@ -169,8 +169,13 @@ def destroy_docker(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = N
     if json_targets_remote_docker(deploy):
         ssh = deploy["ssh"]
         container = str(docker["container"])
-        script = _docker_shell_header() + f"dk rm -f {_shq(container)} || true\n"
-        _ssh(ssh, script, run=run, check=False)
+        remote_tar = _remote_tar(container)
+        remote_dir = remote_tar.rsplit("/", 1)[0]
+        script_path = root / "remote_docker_destroy.sh"
+        _write_text(script_path, _docker_shell_header() + f"dk rm -f {_shq(container)} || true\n")
+        _ssh(ssh, f"mkdir -p {_shq(remote_dir)}", run=run, check=False)
+        _scp(ssh, script_path, f"{remote_dir}/remote_docker_destroy.sh", run=run, check=False)
+        _ssh(ssh, f"sh {_shq(remote_dir + '/remote_docker_destroy.sh')}", run=run, check=False)
         return
     env = _docker_env(docker.get("host") or "")
     _run(["docker", "rm", "-f", docker["container"]], cwd=root, run=run, env=env, check=False)
@@ -202,53 +207,76 @@ def _remote_tar(container: str) -> str:
     return f"pskit-images/{slug}/image.tar"
 
 
-def _docker_shell_header() -> str:
+def _shell_prelude() -> str:
+    """PATH is often tiny on a non-login SSH session, so systemctl and python3 are missed."""
     return (
+        "#!/bin/sh\n"
         "set -eu\n"
-        "as_root() { if [ \"$(id -u)\" -eq 0 ]; then \"$@\"; else sudo \"$@\"; fi; }\n"
-        "dk() { if docker info >/dev/null 2>&1; then docker \"$@\"; else as_root docker \"$@\"; fi; }\n"
+        'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"\n'
     )
 
 
-def _docker_setup_script(*, install: bool, remote_dir: str) -> str:
-    """Create the staging directory and install Docker when the server does not have it."""
-    lines = [_docker_shell_header(), f"mkdir -p {_shq(remote_dir)}\n"]
-    if install:
-        lines.append(
-            "if ! command -v docker >/dev/null 2>&1; then\n"
-            "  if command -v apt-get >/dev/null 2>&1; then\n"
-            "    export DEBIAN_FRONTEND=noninteractive\n"
-            "    as_root apt-get update\n"
-            "    as_root apt-get install -y docker.io\n"
-            "  elif command -v dnf >/dev/null 2>&1; then\n"
-            "    as_root dnf install -y docker\n"
-            "  elif command -v yum >/dev/null 2>&1; then\n"
-            "    as_root yum install -y docker\n"
-            "  elif command -v apk >/dev/null 2>&1; then\n"
-            "    as_root apk add --no-cache docker\n"
-            "  else\n"
-            '    echo "pskit: Docker is not installed and this server has no apt-get, dnf, yum, or apk" >&2\n'
-            "    exit 1\n"
-            "  fi\n"
-            "  if command -v systemctl >/dev/null 2>&1; then\n"
-            "    as_root systemctl enable --now docker || as_root service docker start || true\n"
-            "  elif command -v service >/dev/null 2>&1; then\n"
-            "    as_root service docker start || true\n"
-            "  fi\n"
-            "fi\n"
-        )
-    lines.append(
+def _docker_shell_header() -> str:
+    return (
+        _shell_prelude()
+        + 'as_root() { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi; }\n'
+        + 'dk() { if docker info >/dev/null 2>&1; then docker "$@"; else as_root docker "$@"; fi; }\n'
+    )
+
+
+def _docker_install_block() -> str:
+    return (
+        "if ! command -v docker >/dev/null 2>&1; then\n"
+        "  if command -v apt-get >/dev/null 2>&1; then\n"
+        "    export DEBIAN_FRONTEND=noninteractive\n"
+        "    as_root apt-get update\n"
+        "    as_root apt-get install -y docker.io\n"
+        "  elif command -v dnf >/dev/null 2>&1; then\n"
+        "    as_root dnf install -y docker\n"
+        "  elif command -v yum >/dev/null 2>&1; then\n"
+        "    as_root yum install -y docker\n"
+        "  elif command -v apk >/dev/null 2>&1; then\n"
+        "    as_root apk add --no-cache docker\n"
+        "    as_root rc-update add docker default 2>/dev/null || true\n"
+        "  else\n"
+        '    echo "pskit: Docker is not installed and this server has no apt-get, dnf, yum, or apk" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "  if command -v systemctl >/dev/null 2>&1; then\n"
+        "    as_root systemctl enable --now docker || as_root service docker start || true\n"
+        "  elif command -v service >/dev/null 2>&1; then\n"
+        "    as_root service docker start || true\n"
+        "  fi\n"
+        "fi\n"
+    )
+
+
+def _docker_ready_block() -> str:
+    return (
         "if ! command -v docker >/dev/null 2>&1; then\n"
         '  echo "pskit: Docker is not installed on the server. Set options.deploy.install_docker: true or install it, then redeploy." >&2\n'
         "  exit 1\n"
         "fi\n"
-        "dk info >/dev/null\n"
+        "ready=0\n"
+        "i=0\n"
+        'while [ "$i" -lt 30 ]; do\n'
+        "  if dk info >/dev/null 2>&1; then\n"
+        "    ready=1\n"
+        "    break\n"
+        "  fi\n"
+        "  i=$((i + 1))\n"
+        "  sleep 1\n"
+        "done\n"
+        'if [ "$ready" != "1" ]; then\n'
+        '  echo "pskit: Docker is installed but the daemon did not become ready." >&2\n'
+        "  exit 1\n"
+        "fi\n"
     )
-    return "".join(lines)
 
 
-def _docker_load_script(docker: Dict[str, Any], spec: Dict[str, Any], remote_tar: str) -> str:
-    publish = str(docker.get("publish") or f"{spec.get('port') or 8080}:{spec.get('port') or 8080}")
+def _docker_remote_script(docker: Dict[str, Any], spec: Dict[str, Any], remote_tar: str) -> str:
+    port = int(spec.get("port") or 8080)
+    publish = str(docker.get("publish") or f"{port}:{port}")
     restart = str(docker.get("restart") or "unless-stopped")
     container = str(docker["container"])
     image = str(docker["image"])
@@ -269,14 +297,40 @@ def _docker_load_script(docker: Dict[str, Any], spec: Dict[str, Any], remote_tar
         parts.append(_shq(str(item)))
     parts.append(_shq(image))
     run = " ".join(parts)
-    return (
-        _docker_shell_header()
-        + f"dk load -i {_shq(remote_tar)}\n"
-        + f"dk rm -f {_shq(container)} || true\n"
-        + run
-        + "\n"
-        + f"rm -f {_shq(remote_tar)}\n"
+    url = f"http://127.0.0.1:{port}/__pskit/health"
+    code = "import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2).read()"
+    lines = [_docker_shell_header()]
+    if bool(docker.get("install_docker", True)):
+        lines.append(_docker_install_block())
+    lines.append(_docker_ready_block())
+    lines.append(f"dk load -i {_shq(remote_tar)}\n")
+    lines.append(f"dk rm -f {_shq(container)} || true\n")
+    lines.append(run + "\n")
+    lines.append(f"rm -f {_shq(remote_tar)}\n")
+    lines.append(
+        "ok=0\n"
+        "i=0\n"
+        'while [ "$i" -lt 40 ]; do\n'
+        f"  if dk exec {_shq(container)} python -c {_shq(code)} {_shq(url)} >/dev/null 2>&1; then\n"
+        "    ok=1\n"
+        "    break\n"
+        "  fi\n"
+        f"  running=$(dk inspect -f '{{{{.State.Running}}}}' {_shq(container)} 2>/dev/null || echo false)\n"
+        '  if [ "$running" != "true" ]; then\n'
+        f"    dk logs --tail 120 {_shq(container)} || true\n"
+        '    echo "pskit: container exited before it became healthy" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "  i=$((i + 1))\n"
+        "  sleep 1\n"
+        "done\n"
+        'if [ "$ok" != "1" ]; then\n'
+        f"  dk logs --tail 120 {_shq(container)} || true\n"
+        f'  echo "pskit: container did not answer {url}" >&2\n'
+        "  exit 1\n"
+        "fi\n"
     )
+    return "".join(lines)
 
 
 def dockerfile_text(runtime: str, port: int) -> str:
@@ -294,16 +348,43 @@ def dockerfile_text(runtime: str, port: int) -> str:
     )
 
 
-def systemd_unit_text(desc: str, remote_path: str, python_bin: str, user: str) -> str:
+def launcher_text(runtime: str) -> str:
+    """Pick a bundled interpreter, then the configured Python, then ``python3``."""
+    minor = runtime.replace("python", "").strip() or "3"
+    preferred = f"python{minor}"
+    return (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'cd "$(dirname "$0")"\n'
+        'if [ -x ./python/bin/python3 ]; then\n'
+        "  exec ./python/bin/python3 ./onprem_ctl.py foreground\n"
+        "fi\n"
+        'if [ -x ./python/python.exe ]; then\n'
+        "  exec ./python/python.exe ./onprem_ctl.py foreground\n"
+        "fi\n"
+        f'if command -v {preferred} >/dev/null 2>&1; then\n'
+        f"  exec {preferred} ./onprem_ctl.py foreground\n"
+        "fi\n"
+        'if command -v python3 >/dev/null 2>&1; then\n'
+        "  exec python3 ./onprem_ctl.py foreground\n"
+        "fi\n"
+        'echo "pskit: no Python on this machine. Redeploy with python: bundle or method: docker." >&2\n'
+        "exit 1\n"
+    )
+
+
+def systemd_unit_text(desc: str, remote_path: str, user: str) -> str:
+    launch = remote_path.rstrip("/") + "/pskit-run.sh"
     return (
         "[Unit]\n"
         f"Description={desc}\n"
-        "After=network.target\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
         "\n"
         "[Service]\n"
         "Type=simple\n"
         f"WorkingDirectory={remote_path}\n"
-        f"ExecStart={python_bin} {remote_path}/onprem_ctl.py foreground\n"
+        f"ExecStart={launch}\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         f"User={user}\n"
@@ -313,36 +394,154 @@ def systemd_unit_text(desc: str, remote_path: str, python_bin: str, user: str) -
     )
 
 
-def _view(deploy: Dict[str, Any]) -> Any:
-    from .onprem_spec import DeploySpec
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.replace("\r\n", "\n").encode("utf-8"))
 
-    ssh = deploy.get("ssh") or {}
-    docker = deploy.get("docker") or {}
-    bundle = deploy.get("python_bundle") or {}
-    return DeploySpec(
-        method=str(deploy.get("method") or "local"),
-        python=str(deploy.get("python") or "system"),
-        target_os=str(deploy.get("target_os") or "linux"),
-        target_arch=str(deploy.get("target_arch") or "x86_64"),
-        runtime=str(deploy.get("runtime") or "python3.12"),
-        ssh_host=str(ssh.get("host") or ""),
-        ssh_user=str(ssh.get("user") or ""),
-        ssh_port=int(ssh.get("port") or 22),
-        identity_file=str(ssh.get("identity_file") or ""),
-        known_hosts=str(ssh.get("known_hosts") or "accept-new"),
-        remote_path=str(ssh.get("path") or ""),
-        sudo=bool(deploy.get("sudo")),
-        install=str(deploy.get("install") or "process"),
-        image=str(docker.get("image") or ""),
-        container=str(docker.get("container") or ""),
-        docker_host=str(docker.get("host") or ""),
-        restart=str(docker.get("restart") or "unless-stopped"),
-        publish=str(docker.get("publish") or ""),
-        docker_args=list(docker.get("args") or []),
-        install_docker=bool(docker.get("install_docker", False)),
-        python_url=str(bundle.get("url") or ""),
-        python_sha256=str(bundle.get("sha256") or ""),
-        python_home=str(bundle.get("home") or ""),
+
+def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    if info.name.endswith("pskit-run.sh"):
+        info.mode = 0o755
+    return info
+
+
+def _pack_release(root: Path, dest: Path) -> None:
+    """One archive: host files, the staged bundle, and a bundled interpreter when present."""
+    if dest.exists():
+        dest.unlink()
+    with tarfile.open(dest, "w:gz") as tar:
+        for name in ("pskit_host.json", "onprem_ctl.py", "pskit-run.sh", "pskit.service"):
+            path = root / name
+            if path.is_file():
+                tar.add(str(path), arcname=name, filter=_tar_filter)
+        for folder in ("staging", "python"):
+            path = root / folder
+            if path.is_dir():
+                tar.add(str(path), arcname=folder, filter=_tar_filter)
+
+
+def _preferred_python(runtime: str) -> str:
+    minor = runtime.replace("python", "").strip() or "3"
+    return f"python{minor}"
+
+
+def _as_root_function(sudo: bool) -> str:
+    flag = "1" if sudo else "0"
+    return (
+        f"SUDO={flag}\n"
+        "as_root() {\n"
+        '  if [ "$SUDO" = "1" ] && [ "$(id -u)" -ne 0 ]; then\n'
+        '    sudo -n "$@"\n'
+        "  else\n"
+        '    "$@"\n'
+        "  fi\n"
+        "}\n"
+    )
+
+
+def _pick_python_function(remote: str, runtime: str) -> str:
+    preferred = _preferred_python(runtime)
+    return (
+        "pick_python() {\n"
+        f'  if [ -x {_shq(remote + "/python/bin/python3")} ]; then\n'
+        f"    printf '%s\\n' {_shq(remote + '/python/bin/python3')}\n"
+        "    return 0\n"
+        "  fi\n"
+        f"  if command -v {_shq(preferred)} >/dev/null 2>&1; then\n"
+        f"    command -v {_shq(preferred)}\n"
+        "    return 0\n"
+        "  fi\n"
+        "  if command -v python3 >/dev/null 2>&1; then\n"
+        "    command -v python3\n"
+        "    return 0\n"
+        "  fi\n"
+        '  echo "pskit: no Python on this machine. Redeploy with python: bundle or method: docker." >&2\n'
+        "  return 1\n"
+        "}\n"
+    )
+
+
+def _ssh_apply_script(spec: Dict[str, Any]) -> str:
+    deploy = spec["deploy"]
+    ssh = deploy["ssh"]
+    remote = str(ssh["path"])
+    port = int(spec.get("port") or 8080)
+    unit = str(spec.get("unit_name") or "pskit-host")
+    install = str(deploy.get("install") or "process")
+    runtime = str(deploy.get("runtime") or "python3.12")
+    url = f"http://127.0.0.1:{port}/__pskit/health"
+    code = "import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2).read()"
+    body = (
+        _shell_prelude()
+        + f"REMOTE={_shq(remote)}\n"
+        + f"PORT={port}\n"
+        + f"UNIT={_shq(unit)}\n"
+        + f"INSTALL={_shq(install)}\n"
+        + _as_root_function(bool(deploy.get("sudo")))
+        + _pick_python_function(remote, runtime)
+        + 'mkdir -p "$REMOTE"\n'
+        + 'rm -rf "$REMOTE/staging" "$REMOTE/python"\n'
+        + 'tar -xf "$REMOTE/release.tar.gz" -C "$REMOTE"\n'
+        + 'rm -f "$REMOTE/release.tar.gz"\n'
+        + 'chmod 755 "$REMOTE/pskit-run.sh" 2>/dev/null || true\n'
+        + 'if [ "$INSTALL" = "systemd" ]; then\n'
+        + "  if ! command -v systemctl >/dev/null 2>&1; then\n"
+        + '    echo "pskit: systemd is not on this server. Set options.deploy.install: process." >&2\n'
+        + "    exit 1\n"
+        + "  fi\n"
+        + '  as_root cp "$REMOTE/pskit.service" "/etc/systemd/system/${UNIT}.service"\n'
+        + "  as_root systemctl daemon-reload\n"
+        + '  as_root systemctl enable "$UNIT"\n'
+        + '  as_root systemctl restart "$UNIT"\n'
+        + "  ok=0\n"
+        + "  i=0\n"
+        + '  while [ "$i" -lt 40 ]; do\n'
+        + '    py="$(pick_python)"\n'
+        + f"    if \"$py\" -c {_shq(code)} {_shq(url)} >/dev/null 2>&1; then\n"
+        + "      ok=1\n"
+        + "      break\n"
+        + "    fi\n"
+        + "    i=$((i + 1))\n"
+        + "    sleep 1\n"
+        + "  done\n"
+        + '  if [ "$ok" != "1" ]; then\n'
+        + f'    echo "pskit: host did not answer {url}" >&2\n'
+        + '    as_root systemctl status "$UNIT" --no-pager || true\n'
+        + '    as_root journalctl -u "$UNIT" -n 120 --no-pager || true\n'
+        + "    exit 1\n"
+        + "  fi\n"
+        + "else\n"
+        + '  py="$(pick_python)"\n'
+        + '  "$py" "$REMOTE/onprem_ctl.py" start\n'
+        + "fi\n"
+    )
+    return body
+
+
+def _ssh_destroy_script(spec: Dict[str, Any]) -> str:
+    deploy = spec["deploy"]
+    ssh = deploy["ssh"]
+    remote = str(ssh["path"])
+    unit = str(spec.get("unit_name") or "pskit-host")
+    install = str(deploy.get("install") or "process")
+    runtime = str(deploy.get("runtime") or "python3.12")
+    return (
+        _shell_prelude()
+        + f"REMOTE={_shq(remote)}\n"
+        + f"UNIT={_shq(unit)}\n"
+        + f"INSTALL={_shq(install)}\n"
+        + _as_root_function(bool(deploy.get("sudo")))
+        + _pick_python_function(remote, runtime)
+        + 'if [ "$INSTALL" = "systemd" ]; then\n'
+        + '  as_root systemctl disable --now "$UNIT" || true\n'
+        + "else\n"
+        + '  py="$(pick_python)" || exit 0\n'
+        + '  "$py" "$REMOTE/onprem_ctl.py" stop || true\n'
+        + "fi\n"
     )
 
 
@@ -442,11 +641,34 @@ def _docker_env(host: str) -> Dict[str, str]:
     return env
 
 
-def _ssh_base(ssh: Dict[str, Any]) -> List[str]:
-    argv = ["ssh", "-o", "BatchMode=yes", "-p", str(ssh.get("port") or 22)]
+def _check_identity(ssh: Dict[str, Any], *, required: bool) -> None:
+    identity = str(ssh.get("identity_file") or "")
+    if not identity:
+        if required:
+            raise DeployError(
+                "remote deploy needs a .pem private key. "
+                "Set options.deploy.pem, or run `pskit deploy` in a terminal and enter the path."
+            )
+        return
+    if not os.path.isfile(identity):
+        raise DeployError(f"SSH private key not found: {identity}")
+
+
+def _ssh_options(ssh: Dict[str, Any], *, port_flag: str) -> List[str]:
+    argv = [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=20",
+        "-o",
+        "ServerAliveInterval=15",
+        port_flag,
+        str(ssh.get("port") or 22),
+    ]
     identity = str(ssh.get("identity_file") or "")
     if identity:
-        argv.extend(["-i", identity])
+        # Do not offer other keys. A wrong default key makes the server close the connection.
+        argv.extend(["-i", identity, "-o", "IdentitiesOnly=yes"])
     known = str(ssh.get("known_hosts") or "accept-new")
     if known == "accept-new":
         argv.extend(["-o", "StrictHostKeyChecking=accept-new"])
@@ -458,6 +680,10 @@ def _ssh_base(ssh: Dict[str, Any]) -> List[str]:
     return argv
 
 
+def _ssh_base(ssh: Dict[str, Any]) -> List[str]:
+    return ["ssh", *_ssh_options(ssh, port_flag="-p")]
+
+
 def _target(ssh: Dict[str, Any]) -> str:
     return f"{ssh['user']}@{ssh['host']}"
 
@@ -467,19 +693,9 @@ def _ssh(ssh: Dict[str, Any], command: str, *, run: Optional[RunFn], check: bool
     _run(argv, run=run, check=check)
 
 
-def _scp(ssh: Dict[str, Any], src: Path, dest: str, *, run: Optional[RunFn]) -> None:
-    argv = ["scp", "-r", "-o", "BatchMode=yes", "-P", str(ssh.get("port") or 22)]
-    identity = str(ssh.get("identity_file") or "")
-    if identity:
-        argv.extend(["-i", identity])
-    known = str(ssh.get("known_hosts") or "accept-new")
-    if known == "accept-new":
-        argv.extend(["-o", "StrictHostKeyChecking=accept-new"])
-    elif known == "ignore":
-        null = "NUL" if sys.platform == "win32" else "/dev/null"
-        argv.extend(["-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={null}"])
-    argv.extend([str(src), f"{_target(ssh)}:{dest}"])
-    _run(argv, run=run)
+def _scp(ssh: Dict[str, Any], src: Path, dest: str, *, run: Optional[RunFn], check: bool = True) -> None:
+    argv = ["scp", *_ssh_options(ssh, port_flag="-P"), str(src), f"{_target(ssh)}:{dest}"]
+    _run(argv, run=run, check=check)
 
 
 def _shq(value: str) -> str:
@@ -501,8 +717,32 @@ def _run(
         raise DeployError(f"command not found: {argv[0]}. Install it on this machine and retry.") from exc
     code = int(proc.returncode or 0)
     if check and code:
-        err = str(proc.stderr or proc.stdout or "")[-4000:]
+        err = _annotate_ssh_error(list(argv), str(proc.stderr or proc.stdout or "")[-4000:])
         raise DeployError(f"command failed ({code}): {' '.join(argv)}\n{err}")
+
+
+def _annotate_ssh_error(argv: Sequence[str], err: str) -> str:
+    if not argv or argv[0] not in ("ssh", "scp"):
+        return err
+    lowered = err.lower()
+    extra = ""
+    if "unprotected private key" in lowered or "permissions are too open" in lowered or "bad permissions" in lowered:
+        extra += (
+            "\nThe .pem is too open for OpenSSH. "
+            "On Linux or macOS run: chmod 600 /path/to/key.pem. "
+            'On Windows run: icacls C:\\path\\to\\key.pem /inheritance:r /grant:r "%USERNAME%:R"'
+        )
+    if "permission denied" in lowered and "publickey" in lowered:
+        extra += (
+            "\nSSH rejected the key. Check options.deploy.pem (or identity_file), the user, "
+            "and that the matching public key is in authorized_keys on the server."
+        )
+    if "a password is required" in lowered or "a terminal is required to read the password" in lowered:
+        extra += (
+            "\nThe SSH user needs passwordless sudo for this deploy (sudo -n). "
+            "Add a sudoers rule for systemctl or docker, or SSH in as root."
+        )
+    return err + extra
 
 
 def extract_bundle_for_tests(archive: Path, dest: Path) -> Path:

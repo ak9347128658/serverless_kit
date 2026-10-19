@@ -227,7 +227,11 @@ def remove(project, yes: bool) -> None:  # noqa: ANN001
 
 
 def _ask_onprem_pem(project: Any) -> None:
-    """Ask for the server ``.pem`` when a remote Docker deploy has none yet."""
+    """Ask for the server ``.pem`` when a remote deploy has none yet.
+
+    Docker on a server requires a key. SSH also asks when a terminal is
+    attached; an empty answer keeps the SSH agent or the default key.
+    """
     if project.config.provider.name != "onprem":
         return
     from ..providers.onprem_spec import assign_pem, parse_deploy, targets_remote_docker
@@ -243,23 +247,41 @@ def _ask_onprem_pem(project: Any) -> None:
         )
     except ValueError:
         return
-    if not targets_remote_docker(spec):
+    remote_docker = targets_remote_docker(spec)
+    remote_ssh = spec.method == "ssh"
+    if not remote_docker and not remote_ssh:
         return
     if spec.identity_file and os.path.isfile(spec.identity_file):
         return
     who = f"{spec.ssh_user}@{spec.ssh_host}" if spec.ssh_user else spec.ssh_host
     if not sys.stdin.isatty():
-        raise click.ClickException(
-            "on-premises Docker deploy needs a .pem private key for "
-            f"{who}. Set options.deploy.pem in pskit.yml (or PSKIT_SSH_KEY) and run pskit deploy again."
+        if remote_docker:
+            raise click.ClickException(
+                "on-premises Docker deploy needs a .pem private key for "
+                f"{who}. Set options.deploy.pem in pskit.yml (or PSKIT_SSH_KEY) and run pskit deploy again."
+            )
+        if spec.identity_file:
+            raise click.ClickException(f"SSH private key not found: {spec.identity_file}")
+        return
+    if remote_docker:
+        echo(f"On-premises Docker deploy builds an image on this machine and copies it to {who}.")
+        echo("If Docker is not installed on that server, it is installed before the image is loaded.")
+        entered = click.prompt(
+            "Path to the SSH private key (.pem)",
+            type=click.Path(exists=True, dir_okay=False, readable=True),
         )
-    echo(f"On-premises Docker deploy builds an image on this machine and copies it to {who}.")
-    echo("If Docker is not installed on that server, it is installed before the image is loaded.")
-    entered = click.prompt(
-        "Path to the SSH private key (.pem)",
-        type=click.Path(exists=True, dir_okay=False, readable=True),
-    )
-    assign_pem(cfg.provider.options, str(entered))
+        assign_pem(cfg.provider.options, str(entered))
+        return
+    echo(f"On-premises SSH deploy copies one archive to {who} and starts the host.")
+    echo("Enter a .pem path, or press Enter to use the SSH agent or the default key.")
+    entered = click.prompt("Path to the SSH private key (.pem)", default="", show_default=False)
+    text = str(entered).strip()
+    if not text:
+        return
+    candidate = Path(text).expanduser()
+    if not candidate.is_file():
+        raise click.ClickException(f"SSH private key not found: {text}")
+    assign_pem(cfg.provider.options, str(candidate))
 
 
 # ----------------------------------------------------------------------------- info / dashboard

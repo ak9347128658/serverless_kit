@@ -967,7 +967,12 @@ def activate_layout(root: Path) -> None:
         return
     if app.exists():
         shutil.rmtree(app)
-    staging.rename(app)
+    try:
+        staging.rename(app)
+    except OSError:
+        # Windows will not rename a tree the current process already imported.
+        shutil.copytree(staging, app)
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1016,6 +1021,25 @@ def stop(root: Path) -> int:
     return 0
 
 
+def health_url(spec: Dict[str, Any]) -> str:
+    """Loopback URL of ``/__pskit/health`` on the address this process binds.
+
+    ``endpoint`` may be a public advertise URL. A host that binds ``0.0.0.0``
+    still answers on ``127.0.0.1``, including when the public address is not
+    reachable from the machine itself.
+    """
+    host = str(spec.get("host") or "127.0.0.1").strip() or "127.0.0.1"
+    if host in ("0.0.0.0", "::", "[::]"):  # noqa: S104 - wildcard bind is probed on loopback
+        host = "127.0.0.1"
+    elif ":" in host and not host.startswith("["):
+        host = "[" + host + "]"
+    try:
+        port = int(spec.get("port") or 8080)
+    except (TypeError, ValueError):
+        port = 8080
+    return f"http://{host}:{port}/__pskit/health"
+
+
 def _wait_healthy(url: str, timeout: float) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1049,8 +1073,7 @@ def start(root: Path) -> int:
         kwargs["start_new_session"] = True
     subprocess.Popen(cmd, **kwargs)  # noqa: S603 - fixed argv, this interpreter
     spec = json.loads((root / "pskit_host.json").read_text("utf-8"))
-    endpoint = str(spec.get("endpoint") or "http://127.0.0.1:8080")
-    if _wait_healthy(endpoint + "/__pskit/health", 30):
+    if _wait_healthy(health_url(spec), 30):
         return 0
     sys.stderr.write(f"on-prem host did not become healthy; see {log_path}\n")
     return 1

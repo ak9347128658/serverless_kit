@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-19
+
+### Changed
+- On-premises remote deploy copies one `release.tar.gz` with `scp` and starts it from a script on the server. `options.deploy.method: scp` is the same path as `ssh`. A `.pem` (`pem` or `identity_file`) is passed with `IdentitiesOnly`. `pskit deploy` asks for that path on a terminal for SSH as well as Docker; press Enter on the SSH prompt to keep the SSH agent or the default key. Docker on a server still requires a key.
+- The server script restarts a systemd unit (`systemctl restart`, so a redeploy replaces the running process), installs and starts Docker when `method: docker` and `docker` is missing, and uses `sudo -n` so a missing sudoers rule fails immediately. It exports a normal `PATH` (non-login SSH often cannot see `systemctl` or `python3`). `pskit-run.sh` starts a bundled CPython when one was copied, then `python3.x`, then `python3`.
+- Apply waits until `http://127.0.0.1:<port>/__pskit/health` answers. A dead process or container fails the deploy and prints `journalctl` or `docker logs`. A process that binds `0.0.0.0` is checked on `127.0.0.1`, including when `advertise` is a public URL.
+
+Redeploy on-premises hosts to pick up the new provisioner. Handler code is unchanged.
+
 ## [0.4.0] - 2026-10-19
 
 ### Added

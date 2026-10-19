@@ -12,8 +12,10 @@
 #
 # Switch to Docker (image built on this machine, run on the server) by replacing
 # deploy.method with docker and setting pem to the server .pem. pskit deploy
-# asks for that path when pem is empty, installs Docker on the server if the
-# `docker` command is missing, then loads and runs the image. See the README.
+# asks for a .pem on a terminal when identity_file is empty (Enter keeps the
+# SSH agent for method ssh). method: scp is the same archive copy as ssh.
+# Docker on a server installs the engine when `docker` is missing, then waits
+# until /__pskit/health answers. See the README.
 service: factory-api
 
 provider:

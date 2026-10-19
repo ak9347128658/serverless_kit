@@ -23,7 +23,7 @@ by changing only the provider (`pskit deploy --provider gcp`).
 | 14 | [testing](14-testing) | pytest with `LocalRunner`, synthetic events, workflow tests, CI validation | AWS, GCP, Azure |
 | 15 | [ci-cd-deploy](15-ci-cd-deploy) | GitHub Actions per-stage deploys with OIDC, remote state, dashboard artifact | AWS, GCP, Azure |
 | 16 | [on-premises](16-on-premises) | one process on this machine: HTTP, schedule, queue, directory storage, topic, embedded workflow | on-premises |
-| 17 | [on-premises-remote](17-on-premises-remote) | SSH / Docker / bundled CPython onto a server that may not have Python | on-premises |
+| 17 | [on-premises-remote](17-on-premises-remote) | SSH/SCP or Docker onto a server, with a `.pem` and a bundled CPython when it has no Python | on-premises |
 
 \* Azure blob triggers can't fire on deletions; the example's `providers.azure` block
 handles that explicitly.
