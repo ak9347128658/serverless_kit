@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
 from py_serverless_kit.providers.onprem_remote import (
     DeployError,
+    _ensure_python,
     _pack_release,
     apply_docker,
     apply_ssh,
@@ -115,7 +118,11 @@ def test_apply_ssh_systemd_restarts_and_checks_health(tmp_path: Path):
             },
         },
     }
-    apply_ssh(root, spec, run=_Proc())
+    runner = _Proc()
+    apply_ssh(root, spec, run=runner)
+    mkdir = next(" ".join(call) for call in runner.calls if call[0] == "ssh" and "mkdir -p" in " ".join(call))
+    assert "sudo -n mkdir -p" in mkdir
+    assert "sudo -n chown 'pskit'" in mkdir
     script = (root / "remote_apply.sh").read_text(encoding="utf-8")
     assert "systemctl restart" in script
     assert "systemctl enable" in script
@@ -326,6 +333,27 @@ def test_dockerfile_uses_runtime():
     assert "EXPOSE 9090" in text
 
 
+def _standalone_archive(path: Path) -> None:
+    long_name = (
+        "python/lib/python3.10/site-packages/pkg_resources/tests/data/"
+        "my-test-package_unpacked-egg/my_test_package-1.0-py3.7.egg/EGG-INFO"
+    )
+    body = b"#!/x\n"
+    with tarfile.open(path, "w:gz") as tar:
+        real = tarfile.TarInfo("python/bin/python3.12")
+        real.size = len(body)
+        real.mode = 0o755
+        tar.addfile(real, io.BytesIO(body))
+        link = tarfile.TarInfo("python/bin/python3")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "python3.12"
+        link.mode = 0o777
+        tar.addfile(link)
+        egg = tarfile.TarInfo(long_name)
+        egg.size = 4
+        tar.addfile(egg, io.BytesIO(b"egg\n"))
+
+
 def test_extract_install_only_archive(tmp_path: Path):
     archive = tmp_path / "python.tgz"
     payload = tmp_path / "src"
@@ -336,6 +364,48 @@ def test_extract_install_only_archive(tmp_path: Path):
     dest = tmp_path / "out"
     python = extract_bundle_for_tests(archive, dest)
     assert (python / "bin" / "python3").is_file()
+
+
+def test_extract_skips_setuptools_test_eggs(tmp_path: Path):
+    archive = tmp_path / "python.tgz"
+    _standalone_archive(archive)
+    python = extract_bundle_for_tests(archive, tmp_path / "out")
+    assert (python / "bin" / "python3.12").read_bytes() == b"#!/x\n"
+    assert not (python / "lib").exists()
+
+
+def test_windows_remote_bundle_is_streamed_into_the_release(tmp_path: Path, monkeypatch):
+    archive = tmp_path / "cpython.tar.gz"
+    _standalone_archive(archive)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        "py_serverless_kit.providers.onprem_remote._download",
+        lambda _url, _sha: archive,
+    )
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    (root / "onprem_ctl.py").write_text("print(1)\n", encoding="utf-8")
+    spec = {
+        "deploy": {
+            "method": "ssh",
+            "python": "bundle",
+            "target_os": "linux",
+            "python_bundle": {"url": "https://example.invalid/cpython.tar.gz", "sha256": "", "home": ""},
+        }
+    }
+    _ensure_python(root, spec)
+    assert (root / "python" / ".pskit-from-archive").is_file()
+    assert not (root / "python" / "lib").exists()
+    dest = tmp_path / "release.tar.gz"
+    _pack_release(root, dest)
+    with tarfile.open(dest, "r:gz") as tar:
+        names = set(tar.getnames())
+        link = tar.getmember("python/bin/python3")
+    assert "python/bin/python3.12" in names
+    assert link.issym()
+    assert link.linkname == "python3.12"
+    assert not any("EGG-INFO" in name for name in names)
+    assert not any(name.endswith(".pskit-from-archive") for name in names)
 
 
 def test_parse_rejects_unsafe_host():

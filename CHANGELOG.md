@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-19
+
+### Fixed
+- On-premises SSH deploy as a normal user such as `azureuser`. With `deploy.sudo: true`, apply creates `deploy.path` with `sudo -n mkdir` and `chown`s it to the SSH user before `scp`. A user who cannot write `/opt` no longer fails with `Permission denied`.
+
+Redeploy the on-premises host after upgrading. Handler code is unchanged.
+
+## [0.5.1] - 2026-10-19
+
+### Fixed
+- On-premises `python: bundle` on Windows. Unpacking a Linux CPython into the project raised `WinError 206` (`The filename or extension is too long`) on setuptools test files under `pkg_resources/tests`. A remote deploy now copies that archive straight into `release.tar.gz` and leaves those test files out. A partial `onprem_app/python` tree from the failed unpack is removed on the next deploy.
+
+Redeploy the on-premises host after upgrading. Handler code is unchanged.
+
 ## [0.5.0] - 2026-10-19
 
 ### Changed

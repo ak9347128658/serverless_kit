@@ -15,7 +15,7 @@ Add `-v` to any command to see the full traceback. Start with `pskit validate`, 
 
   `pskit package --skip-deps` lets you test packaging without dependencies.
 
-**Paths too long on Windows** (`FileNotFoundError` / `[WinError 206]` while building)
+**Paths too long on Windows** (`FileNotFoundError` / `[WinError 206]` while building, or while unpacking a bundled CPython for an on-premises deploy)
 : Some providers copy the bundle into nested folders (DigitalOcean especially). Enable long paths, either with `git config --system core.longpaths true` for git, or system-wide with:
 
   ```powershell

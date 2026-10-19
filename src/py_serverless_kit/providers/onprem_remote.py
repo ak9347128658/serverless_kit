@@ -101,7 +101,7 @@ def apply_ssh(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) 
     try:
         _pack_release(root, archive)
         _write_text(script_path, _ssh_apply_script(spec))
-        _ssh(ssh, f"mkdir -p {_shq(remote)}", run=run)
+        _prepare_remote_dir(ssh, remote, sudo=bool(deploy.get("sudo")), run=run)
         _scp(ssh, archive, f"{remote}/release.tar.gz", run=run)
         _scp(ssh, script_path, f"{remote}/remote_apply.sh", run=run)
         _ssh(ssh, f"sh {_shq(remote + '/remote_apply.sh')}", run=run)
@@ -116,7 +116,7 @@ def destroy_ssh(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None
     remote = str(ssh["path"])
     script_path = root / "remote_destroy.sh"
     _write_text(script_path, _ssh_destroy_script(spec))
-    _ssh(ssh, f"mkdir -p {_shq(remote)}", run=run, check=False)
+    _prepare_remote_dir(ssh, remote, sudo=bool(deploy.get("sudo")), run=run, check=False)
     _scp(ssh, script_path, f"{remote}/remote_destroy.sh", run=run, check=False)
     _ssh(ssh, f"sh {_shq(remote + '/remote_destroy.sh')}", run=run, check=False)
 
@@ -418,10 +418,29 @@ def _pack_release(root: Path, dest: Path) -> None:
             path = root / name
             if path.is_file():
                 tar.add(str(path), arcname=name, filter=_tar_filter)
-        for folder in ("staging", "python"):
-            path = root / folder
-            if path.is_dir():
-                tar.add(str(path), arcname=folder, filter=_tar_filter)
+        staging = root / "staging"
+        if staging.is_dir():
+            tar.add(str(staging), arcname="staging", filter=_tar_filter)
+        _pack_python(tar, root / "python")
+
+
+def _pack_python(tar: tarfile.TarFile, python_dir: Path) -> None:
+    """Copy a bundled interpreter into the release archive.
+
+    On Windows a Linux ``install_only`` tree contains setuptools test eggs whose
+    paths exceed ``MAX_PATH`` (WinError 206). Those files are not unpacked on
+    the laptop: the downloaded tarball is streamed in, minus ``site-packages``
+    test data.
+    """
+    marker = python_dir / ".pskit-from-archive"
+    if marker.is_file():
+        archive = Path(marker.read_text("utf-8").strip())
+        if not archive.is_file():
+            raise DeployError(f"bundled CPython archive is missing: {archive}")
+        _add_standalone_archive(tar, archive)
+        return
+    if python_dir.is_dir():
+        tar.add(str(python_dir), arcname="python", filter=_tar_filter)
 
 
 def _preferred_python(runtime: str) -> str:
@@ -567,9 +586,11 @@ def _ensure_python(root: Path, spec: Dict[str, Any]) -> Path:
     url = str(bundle.get("url") or "")
     sha = str(bundle.get("sha256") or "")
     if dest.is_dir() and marker.is_file() and marker.read_text("utf-8").strip() in (url, home, "ok"):
+        if (dest / ".pskit-from-archive").is_file():
+            return dest / "bin" / "python3"
         return _python_exe(root, spec, require_bundle=True)
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     if home:
         src = Path(home)
         if not src.is_dir():
@@ -580,6 +601,13 @@ def _ensure_python(root: Path, spec: Dict[str, Any]) -> Path:
     if not url:
         raise DeployError("python: bundle needs options.deploy.python_url or python_home")
     archive = _download(url, sha)
+    if _stream_bundle(spec):
+        # The interpreter runs on the server. Writing it under the project on
+        # Windows hits MAX_PATH inside setuptools' test data.
+        dest.mkdir(parents=True)
+        (dest / ".pskit-from-archive").write_bytes(str(archive).encode("utf-8"))
+        marker.write_text(url, "utf-8")
+        return dest / "bin" / "python3"
     dest.mkdir(parents=True)
     with tarfile.open(archive, "r:*") as tar:
         _extract_tar(tar, dest.parent)
@@ -618,12 +646,156 @@ def _download(url: str, sha256: str) -> Path:
     return path
 
 
+def _stream_bundle(spec: Dict[str, Any]) -> bool:
+    """True when the bundle is for another OS and this machine is Windows."""
+    if sys.platform != "win32":
+        return False
+    deploy = spec.get("deploy") or {}
+    if str(deploy.get("method") or "local") == "local":
+        return False
+    return str(deploy.get("target_os") or "") != "windows"
+
+
+def _member_rel(name: str) -> Optional[str]:
+    text = name.replace("\\", "/").strip()
+    if not text or text.startswith("/"):
+        return None
+    parts = []
+    for part in text.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            return None
+        parts.append(part)
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
+def _skip_bundle_member(rel: str) -> bool:
+    """setuptools and pkg_resources ship test eggs whose paths exceed MAX_PATH."""
+    parts = rel.split("/")
+    if "site-packages" not in parts:
+        return False
+    return "tests" in parts
+
+
+def _safe_link(link: str) -> bool:
+    text = link.replace("\\", "/")
+    if text.startswith("/") or (len(text) >= 2 and text[1] == ":"):
+        return False
+    return ".." not in text.split("/")
+
+
+def _extended_path(path: Path) -> str:
+    text = os.path.abspath(str(path))
+    if text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text.lstrip("\\")
+    return "\\\\?\\" + text
+
+
+def _fs_path(dest: Path, rel: str) -> str:
+    full = dest.joinpath(*rel.split("/"))
+    if sys.platform == "win32":
+        return _extended_path(full)
+    return str(full)
+
+
+def _rmtree(path: Path) -> None:
+    target = _extended_path(path) if sys.platform == "win32" else str(path)
+    if not os.path.exists(target):
+        return
+
+    def _onerror(func, failed, _exc):  # noqa: ANN001
+        os.chmod(failed, 0o700)
+        func(failed)
+
+    shutil.rmtree(target, onerror=_onerror)
+
+
 def _extract_tar(tar: tarfile.TarFile, dest: Path) -> None:
-    # filter= exists on 3.12+; keep 3.9-compatible.
-    if sys.version_info >= (3, 12):
-        tar.extractall(dest, filter="data")  # noqa: S202
-    else:
-        tar.extractall(dest)  # noqa: S202
+    dest.mkdir(parents=True, exist_ok=True)
+    for member in tar.getmembers():
+        rel = _member_rel(member.name)
+        if rel is None or _skip_bundle_member(rel):
+            continue
+        if member.issym() or member.islnk():
+            if _safe_link(member.linkname):
+                _extract_link(dest, rel, member.linkname, symlink=member.issym())
+            continue
+        if member.isdir():
+            os.makedirs(_fs_path(dest, rel), exist_ok=True)
+            continue
+        if not member.isfile():
+            continue
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        if parent:
+            os.makedirs(_fs_path(dest, parent), exist_ok=True)
+        src = tar.extractfile(member)
+        if src is None:
+            continue
+        target = _fs_path(dest, rel)
+        with open(target, "wb") as out:  # noqa: SIM115
+            shutil.copyfileobj(src, out)
+        if member.mode:
+            try:
+                os.chmod(target, member.mode)
+            except OSError:
+                pass
+
+
+def _extract_link(dest: Path, rel: str, linkname: str, *, symlink: bool) -> None:
+    parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    if parent:
+        os.makedirs(_fs_path(dest, parent), exist_ok=True)
+    target = _fs_path(dest, rel)
+    if os.path.lexists(target):
+        os.unlink(target)
+    try:
+        if symlink:
+            os.symlink(linkname, target)
+        else:
+            os.link(_fs_path(dest, _member_rel(linkname) or linkname), target)
+    except OSError:
+        # Windows often refuses symlinks without extra privileges. The Linux
+        # target still receives the link, because remote bundles are streamed.
+        return
+
+
+def _add_standalone_archive(tar: tarfile.TarFile, archive: Path) -> None:
+    with tarfile.open(archive, "r:*") as src:
+        for member in src.getmembers():
+            rel = _member_rel(member.name)
+            if rel is None or not rel.startswith("python/") or _skip_bundle_member(rel):
+                continue
+            cloned = tarfile.TarInfo(rel)
+            cloned.mtime = member.mtime
+            cloned.mode = member.mode or 0o644
+            cloned.uid = 0
+            cloned.gid = 0
+            cloned.uname = ""
+            cloned.gname = ""
+            if member.isdir():
+                cloned.type = tarfile.DIRTYPE
+                tar.addfile(cloned)
+                continue
+            if member.issym() or member.islnk():
+                if not _safe_link(member.linkname):
+                    continue
+                cloned.type = tarfile.SYMTYPE if member.issym() else tarfile.LNKTYPE
+                cloned.linkname = member.linkname
+                tar.addfile(cloned)
+                continue
+            if not member.isfile():
+                continue
+            cloned.size = member.size
+            cloned.type = tarfile.REGTYPE
+            payload = src.extractfile(member)
+            if payload is None:
+                continue
+            tar.addfile(cloned, payload)
 
 
 def _sha256(path: Path) -> str:
@@ -639,6 +811,28 @@ def _docker_env(host: str) -> Dict[str, str]:
     if host:
         env["DOCKER_HOST"] = host
     return env
+
+
+def _prepare_remote_dir(
+    ssh: Dict[str, Any],
+    remote: str,
+    *,
+    sudo: bool,
+    run: Optional[RunFn],
+    check: bool = True,
+) -> None:
+    """Create the install directory as a user who can write it.
+
+    ``azureuser`` can log in and use sudo, and cannot create ``/opt/pskit``.
+    ``sudo mkdir`` plus ``chown`` lets the later ``scp`` run as that user.
+    """
+    user = str(ssh.get("user") or "")
+    quoted = _shq(remote)
+    if sudo and user and user != "root":
+        command = f"sudo -n mkdir -p {quoted} && sudo -n chown {_shq(user)} {quoted}"
+    else:
+        command = f"mkdir -p {quoted}"
+    _ssh(ssh, command, run=run, check=check)
 
 
 def _check_identity(ssh: Dict[str, Any], *, required: bool) -> None:
