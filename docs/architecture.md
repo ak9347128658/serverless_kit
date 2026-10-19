@@ -49,7 +49,7 @@ artifact.zip
 └── dependencies or requirements.txt
 ```
 
-On-premises also writes `.pskit/onprem-<stage>/onprem_app/` (`pskit_host.json`, `onprem_ctl.py`, `onprem_deploy.py`, the staged bundle, and a Dockerfile or systemd unit when those methods are selected). Terraform `local-exec` runs `onprem_deploy.py apply`, which starts the host on this machine, copies it over SSH (detached process or systemd, optional portable CPython), or builds a Docker image.
+On-premises also writes `.pskit/onprem-<stage>/onprem_app/` (`pskit_host.json`, `onprem_ctl.py`, `onprem_deploy.py`, the staged bundle, and a Dockerfile or systemd unit when those methods are selected). Terraform `local-exec` runs `onprem_deploy.py apply`, which starts the host on this machine, copies it over SSH (detached process or systemd, optional portable CPython), or builds a Docker image. A remote Docker target builds that image locally, installs Docker on the server when `docker` is missing, then copies the image with the configured `.pem` and runs it.
 
 ## Runtime flow
 

@@ -41,6 +41,64 @@ def test_init_every_template_validates(tmp_path, monkeypatch, provider):
         assert result.exit_code == 0, result.output
 
 
+def test_ask_onprem_pem_records_the_path(tmp_path, monkeypatch):
+    import sys
+
+    from py_serverless_kit.cli.main import _ask_onprem_pem
+    from py_serverless_kit.core.project import Project
+
+    root = tmp_path / "svc"
+    root.mkdir()
+    pem = tmp_path / "server.pem"
+    pem.write_text("key\n", encoding="utf-8")
+    (root / "pskit.yml").write_text(
+        "service: demo\n"
+        "provider:\n"
+        "  name: onprem\n"
+        "  options:\n"
+        "    host: 0.0.0.0\n"
+        "    deploy: {method: docker, host: 10.0.1.12, user: pskit}\n"
+        "functions:\n"
+        "  hello:\n"
+        "    handler: app.handlers.hello\n"
+        "    events: [{http: GET /hello}]\n",
+        encoding="utf-8",
+    )
+    project = Project.load(cwd=root)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("py_serverless_kit.cli.main.click.prompt", lambda *_a, **_k: str(pem))
+    _ask_onprem_pem(project)
+    stored = project.config.provider.options["deploy"]["pem"]
+    assert Path(stored) == pem.resolve()
+
+
+def test_remote_docker_deploy_asks_for_pem_off_a_terminal(tmp_path, monkeypatch):
+    root = tmp_path / "svc"
+    root.mkdir()
+    (root / "pskit.yml").write_text(
+        "service: demo\n"
+        "provider:\n"
+        "  name: onprem\n"
+        "  options:\n"
+        "    host: 0.0.0.0\n"
+        "    port: 9090\n"
+        "    deploy:\n"
+        "      method: docker\n"
+        "      host: 10.0.1.12\n"
+        "      user: pskit\n"
+        "functions:\n"
+        "  hello:\n"
+        "    handler: app.handlers.hello\n"
+        "    events:\n"
+        "      - http: GET /hello\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(cli, ["deploy"])
+    assert result.exit_code != 0
+    assert ".pem" in result.output
+
+
 def test_validate_and_providers(project_dir):
     result = run("validate")
     assert result.exit_code == 0 and "Configuration is valid" in result.output

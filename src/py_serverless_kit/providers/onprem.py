@@ -8,7 +8,10 @@ provisioner (no cloud plugin, no extra broker to install).
 
 * ``local`` — this machine, same as earlier releases (the default)
 * ``ssh`` — copy the bundle over OpenSSH and start it (process or systemd)
-* ``docker`` — build an image that already contains Python and run a container
+* ``docker`` — build an image that already contains Python and run a container.
+  With ``host`` (or ``docker_host: ssh://...``) the image is built on this
+  machine, copied over SSH with a ``.pem`` key, and started on the server.
+  Docker is installed on that server first when it is not already there.
 
 When the target has no Python, set ``deploy.python: bundle`` (a portable
 CPython is downloaded at apply and copied with the app) or ``method: docker``.
@@ -44,6 +47,7 @@ from .onprem_spec import (
     parse_deploy,
     pip_flags,
     python_bin_for,
+    targets_remote_docker,
     unit_name,
     validate_identity,
 )
@@ -122,7 +126,9 @@ class OnPremProvider(Provider):
     notes = (
         "Runs a long-lived Python process. Default `options.deploy.method` is `local` "
         "(this machine). `ssh` copies the bundle with OpenSSH; `docker` builds an image "
-        "that includes Python so the server does not need an interpreter. "
+        "that includes Python. A remote Docker host (`deploy.host` or `docker_host: ssh://`) "
+        "asks for a `.pem` key, builds the image locally, installs Docker on the server "
+        "when it is missing, then loads and runs the image. "
         "`python: bundle` ships a portable CPython for hosts without Python. "
         "HTTP, schedules, file-backed queues, directory storage, topics and embedded "
         "workflows all run in that process. Set provider.options.services.<kind> to "
@@ -199,7 +205,21 @@ class OnPremProvider(Provider):
         if spec is not None:
             missing = validate_identity(spec)
             if missing:
-                issues.append(Issue("warning", missing, "provider.options.deploy.identity_file"))
+                where = (
+                    "provider.options.deploy.pem"
+                    if targets_remote_docker(spec)
+                    else "provider.options.deploy.identity_file"
+                )
+                issues.append(Issue("warning", missing, where))
+            if targets_remote_docker(spec) and spec.install_docker and not spec.sudo:
+                issues.append(
+                    Issue(
+                        "warning",
+                        "installing Docker on the server uses sudo unless the SSH user is root. "
+                        "Set options.deploy.sudo: true.",
+                        "provider.options.deploy.sudo",
+                    )
+                )
             running = f"python{sys.version_info.major}.{sys.version_info.minor}"
             if spec.method == "local" and spec.python == "system" and config.provider.runtime != running:
                 issues.append(
@@ -398,6 +418,10 @@ class OnPremProvider(Provider):
         cfg = ctx.config
         options = cfg.provider.options
         spec = self._deploy(cfg)
+        if spec.identity_file:
+            ident = Path(spec.identity_file)
+            if not ident.is_absolute():
+                spec.identity_file = str((ctx.root / ident).resolve())
         host = str(options.get("host") or "127.0.0.1")
         port = int(options.get("port") or 8080)
         if spec.method == "docker" and host in ("127.0.0.1", "localhost"):

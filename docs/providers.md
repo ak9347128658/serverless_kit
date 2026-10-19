@@ -357,7 +357,7 @@ One Worker script per function. pskit generates a single Python module per Worke
 ## onprem (On-premises)
 
 - **Terraform:** built-in `terraform_data` (no plugin download). Create/destroy run `onprem_deploy.py` via `local-exec`
-- **Credentials:** none for `method: local`. SSH keys / an SSH agent for `method: ssh`. Docker CLI (and optional `DOCKER_HOST`) for `method: docker`
+- **Credentials:** none for `method: local`. SSH keys / an SSH agent for `method: ssh`. For `method: docker` on a server, a `.pem` private key (`options.deploy.pem`) plus OpenSSH on the laptop and a Docker CLI to build the image. `pskit deploy` asks for the `.pem` when it is not set. `docker_host: tcp://`, `unix://`, or `npipe://` still talks to that daemon and does not use SSH
 - **Dependencies:** native pip wheels for a local host; manylinux / Windows / macOS wheels matching `deploy.target_os` and `architecture` for a remote host. `tzdata` is vendored so cron timezones work on Windows
 
 ```yaml
@@ -414,7 +414,7 @@ From a handler in that process (`PSKIT_ONPREM_ROOT` is set), call `submit_queue`
 |---|---|---|---|
 | `local` (default) | detached process on this machine | Python (the interpreter that runs `pskit`) | — |
 | `ssh` | process or systemd unit on a remote host | SSH. Python only if `python: system` | OpenSSH (`ssh`, `scp`) |
-| `docker` | `docker build` + `docker run` | Docker engine, not Python | Docker CLI; set `docker_host: ssh://user@host` to use a remote daemon |
+| `docker` | image built on this machine, then `docker load` + `docker run` on the server | SSH. Docker is installed at apply when it is missing (`install_docker: true`, the default) | Docker CLI and OpenSSH. `pem` is the server private key |
 
 When the server has **no Python**, use `python: bundle` (a portable CPython from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) is fetched at apply and copied with the app) or `method: docker` (the image is `FROM python:<minor>-slim`). Air-gapped: `python_home` (copy a tree you already have) or `python_url` + `python_sha256` (internal mirror of an `install_only` tarball).
 
@@ -434,15 +434,29 @@ deploy:
   install: systemd                # process | systemd (linux only)
   sudo: true                      # needed to write /etc/systemd/system
 
-# Docker (server needs Docker, not Python)
+# Docker on a server. The image is built here, copied with the .pem, and run there.
+# `pskit deploy` asks for the .pem when `pem` is empty. Docker is installed on the
+# server first when `docker` is not already on PATH (apt/dnf/yum/apk).
+deploy:
+  method: docker
+  host: 10.0.1.12
+  user: pskit
+  port: 22
+  pem: ${env:PSKIT_SSH_KEY}          # or identity_file; path to the .pem
+  image: pskit/orders:dev
+  install_docker: true               # default for a remote host
+  sudo: true                         # default; needed to install and start dockerd
+  restart: unless-stopped
+
+# Docker on this laptop only (no SSH, no .pem)
 deploy:
   method: docker
   image: pskit/orders:dev
-  docker_host: ssh://pskit@10.0.1.12   # empty = Docker on this laptop
-  restart: unless-stopped
 ```
 
-`options.host` is the bind address **on the target**. Use `0.0.0.0` so other machines can call a remote host. `advertise` is the URL stored in `pskit info`. SSH deploy defaults `advertise` to `http://<ssh host>:<port>` when it is unset.
+`options.host` is the bind address **on the target**. Use `0.0.0.0` so other machines can call a remote host. `advertise` is the URL stored in `pskit info`. SSH and remote Docker deploys default `advertise` to `http://<server>:<port>` when it is unset.
+
+Remote Docker (`method: docker` plus `host`, or `docker_host: ssh://user@host`) builds `pskit-<service>-<stage>` locally, saves it to a tar, and `scp`s that tar to `pskit-images/<container>/` in the SSH user's home. Apply then runs `docker load` and `docker run`, and deletes the tar. The SSH user needs passwordless `sudo` when Docker must be installed or when the user cannot talk to the daemon (`sudo` defaults to true). The `.pem` must be accepted by `ssh -o BatchMode=yes` (no passphrase prompt). Set `install_docker: false` to refuse a server that does not already have Docker. A server whose package manager is not apt, dnf, yum, or apk is reported and left unchanged.
 
 **Resources:** `terraform_data.host` with create (`onprem_deploy.py apply`) and destroy (`onprem_deploy.py destroy`) `local-exec` provisioners.
 

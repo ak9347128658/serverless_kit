@@ -10,9 +10,10 @@
 #   set PSKIT_ONPREM_HOST=10.0.1.12
 #   pskit deploy
 #
-# Switch to Docker (server needs Docker, not Python) with the `providers.onprem`
-# block left as-is and:
-#   pskit deploy  after changing deploy.method to docker (see README).
+# Switch to Docker (image built on this machine, run on the server) by replacing
+# deploy.method with docker and setting pem to the server .pem. pskit deploy
+# asks for that path when pem is empty, installs Docker on the server if the
+# `docker` command is missing, then loads and runs the image. See the README.
 service: factory-api
 
 provider:

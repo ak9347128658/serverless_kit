@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
@@ -66,6 +67,7 @@ class DeploySpec:
     restart: str = "unless-stopped"
     publish: str = ""
     docker_args: List[str] = field(default_factory=list)
+    install_docker: bool = False
     python_url: str = ""
     python_sha256: str = ""
     python_home: str = ""
@@ -94,6 +96,7 @@ class DeploySpec:
                 "restart": self.restart,
                 "publish": self.publish,
                 "args": list(self.docker_args),
+                "install_docker": self.install_docker,
             },
             "python_bundle": {
                 "url": self.python_url or standalone_url(self.runtime, self.target_os, self.target_arch),
@@ -256,7 +259,7 @@ def parse_deploy(
         ssh_host=_str(merged, "host"),
         ssh_user=_str(merged, "user"),
         ssh_port=_port(merged.get("port"), "options.deploy.port", 22),
-        identity_file=os.path.expanduser(_str(merged, "identity_file", "identity")),
+        identity_file=os.path.expanduser(_str(merged, "identity_file", "identity", "pem")),
         known_hosts=_str(merged, "known_hosts", default="accept-new") or "accept-new",
         remote_path=_str(merged, "path", "remote_path"),
         image=_str(merged, "image"),
@@ -315,6 +318,39 @@ def parse_deploy(
             or spec.docker_host.startswith("ssh://")
         ):
             raise ValueError("options.deploy.docker_host must be a docker host URL (unix://, tcp://, npipe://, ssh://)")
+        if spec.publish and ("\n" in spec.publish or "\r" in spec.publish):
+            raise ValueError("options.deploy.publish cannot contain newlines")
+        if "\n" in spec.restart or "\r" in spec.restart:
+            raise ValueError("options.deploy.restart cannot contain newlines")
+        if spec.docker_host.startswith("ssh://"):
+            parsed = urlsplit(spec.docker_host)
+            if not spec.ssh_host:
+                spec.ssh_host = parsed.hostname or ""
+            if parsed.username and "user" not in merged:
+                spec.ssh_user = unquote(parsed.username)
+            if parsed.port and "port" not in merged:
+                spec.ssh_port = int(parsed.port)
+        if spec.ssh_host and not is_docker_daemon_url(spec.docker_host):
+            if not _SAFE_HOST.match(spec.ssh_host):
+                raise ValueError("options.deploy.host contains characters that are not safe to pass to ssh")
+            if not spec.ssh_user:
+                spec.ssh_user = (
+                    os.environ.get("PSKIT_ONPREM_USER")
+                    or os.environ.get("USER")
+                    or os.environ.get("USERNAME")
+                    or "pskit"
+                )
+            if not _SAFE_USER.match(spec.ssh_user):
+                raise ValueError("options.deploy.user contains characters that are not safe to pass to ssh")
+            if not spec.remote_path:
+                spec.remote_path = f"/opt/pskit/{slug}"
+            if not _SAFE_PATH.match(spec.remote_path):
+                raise ValueError("options.deploy.path contains characters that are not safe to pass to ssh")
+            if spec.known_hosts not in KNOWN_HOSTS_SPECIAL and spec.known_hosts:
+                spec.known_hosts = os.path.expanduser(spec.known_hosts)
+            spec.install_docker = _bool(merged, "install_docker", True) if "install_docker" in merged else True
+            if "sudo" not in merged:
+                spec.sudo = True
         spec.python = "system"
 
     if spec.python == "bundle" and method == "local":
@@ -335,6 +371,8 @@ def advertise_host(options: Dict[str, Any], spec: DeploySpec, bind_host: str, po
         return str(advertise).rstrip("/")
     shown = bind_host
     if spec.method == "ssh" and spec.ssh_host:
+        shown = spec.ssh_host
+    elif spec.method == "docker" and spec.ssh_host and not is_docker_daemon_url(spec.docker_host):
         shown = spec.ssh_host
     elif spec.method == "docker" and spec.docker_host.startswith("ssh://"):
         parsed = urlsplit(spec.docker_host)
@@ -391,11 +429,49 @@ def python_bin_for(spec: DeploySpec, root_posix: str) -> str:
     return f"{root_posix}/python/bin/python3"
 
 
+def is_docker_daemon_url(host: str) -> bool:
+    """True when ``docker_host`` names a daemon (``DOCKER_HOST``), not an SSH server."""
+    return host.startswith("unix://") or host.startswith("tcp://") or host.startswith("npipe://")
+
+
+def targets_remote_docker(spec: DeploySpec) -> bool:
+    """Build the image locally and copy it to a server over SSH."""
+    return spec.method == "docker" and bool(spec.ssh_host) and not is_docker_daemon_url(spec.docker_host)
+
+
+def json_targets_remote_docker(deploy: Dict[str, Any]) -> bool:
+    docker = deploy.get("docker") or {}
+    ssh = deploy.get("ssh") or {}
+    return bool(ssh.get("host")) and not is_docker_daemon_url(str(docker.get("host") or ""))
+
+
+def assign_pem(options: Dict[str, Any], path: str) -> str:
+    """Store an absolute ``.pem`` path on ``options.deploy`` and return it."""
+    resolved = str(Path(path).expanduser().resolve())
+    deploy = options.get("deploy")
+    if not isinstance(deploy, dict):
+        options["deploy"] = {"method": str(deploy or "docker"), "pem": resolved}
+        return resolved
+    deploy["pem"] = resolved
+    deploy["identity_file"] = resolved
+    return resolved
+
+
 def validate_identity(spec: DeploySpec) -> Optional[str]:
-    if spec.method != "ssh" or not spec.identity_file:
+    if spec.method == "ssh":
+        if not spec.identity_file:
+            return None
+        if not os.path.isfile(spec.identity_file):
+            return f"options.deploy.identity_file {spec.identity_file!r} does not exist yet (needed at apply)"
         return None
-    if not os.path.isfile(spec.identity_file):
-        return f"options.deploy.identity_file {spec.identity_file!r} does not exist yet (needed at apply)"
+    if targets_remote_docker(spec):
+        if not spec.identity_file:
+            return (
+                "remote Docker deploy needs options.deploy.pem (a .pem private key). "
+                "`pskit deploy` asks for the path when a terminal is attached"
+            )
+        if not os.path.isfile(spec.identity_file):
+            return f"options.deploy.pem {spec.identity_file!r} does not exist yet (needed at apply)"
     return None
 
 

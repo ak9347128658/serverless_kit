@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-19
+
+### Added
+- On-premises Docker deploy to a server. Set `options.deploy.method: docker` and `options.deploy.host`. `pskit deploy` asks for a `.pem` private key when `options.deploy.pem` is unset (`identity_file` is the same field). The image is built on the machine that runs `pskit`, copied over SSH, and started with `docker run`. If `docker` is missing on the server, apply installs it (`docker.io` via apt, `docker` via dnf or yum, or `docker` via apk) and then loads the image. `install_docker: false` skips the install and fails if Docker is absent. `sudo` defaults to true for this path so the SSH user can install and start the daemon.
+
+Redeploy on-premises Docker hosts to pick up the new provisioner. Handler code is unchanged.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added

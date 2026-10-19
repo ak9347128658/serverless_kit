@@ -243,9 +243,48 @@ def test_docker_writes_dockerfile(make_project, render):
     assert spec["deploy"]["method"] == "docker"
     assert spec["host"] == "0.0.0.0"
     assert spec["data_dir"] == "/var/pskit/data"
+    assert spec["deploy"]["ssh"]["host"] == "10.0.1.12"
+    assert spec["deploy"]["ssh"]["user"] == "pskit"
+    assert spec["deploy"]["docker"]["install_docker"] is True
+    assert spec["deploy"]["sudo"] is True
     docker = (root / "Dockerfile").read_text("utf-8")
     assert docker.startswith("FROM python:3.12-slim-bookworm")
     assert "onprem_ctl.py" in docker
+    assert spec["endpoint"] == "http://10.0.1.12:9090"
+    warnings = [str(i) for i in project.validate() if i.level == "warning"]
+    assert any("pem" in warning for warning in warnings)
+
+
+REMOTE_DOCKER = """
+service: demo
+provider:
+  name: onprem
+  options:
+    host: 0.0.0.0
+    port: 9090
+    deploy:
+      method: docker
+      host: 10.0.1.12
+      user: pskit
+      pem: keys/server.pem
+      image: pskit-demo:dev
+functions:
+  hello:
+    handler: app.handlers.hello
+    events:
+      - http: GET /hello
+"""
+
+
+def test_remote_docker_pem_is_stored_absolute(make_project, render):
+    project = make_project(REMOTE_DOCKER)
+    assert _errors(project) == []
+    render(project)
+    spec = json.loads((project.work_dir / "onprem_app" / "pskit_host.json").read_text("utf-8"))
+    identity = Path(spec["deploy"]["ssh"]["identity_file"])
+    assert identity.is_absolute()
+    assert identity.name == "server.pem"
+    assert spec["deploy"]["docker"]["install_docker"] is True
     assert spec["endpoint"] == "http://10.0.1.12:9090"
 
 

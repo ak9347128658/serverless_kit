@@ -2,13 +2,17 @@
 
 Terraform ``local-exec`` runs this with the same interpreter as ``pskit deploy``.
 The target never needs pskit installed. ``python: bundle`` ships a portable
-CPython; ``method: docker`` ships an image that already contains Python.
+CPython; ``method: docker`` builds an image that already contains Python.
+A remote Docker target (``host`` or ``docker_host: ssh://...``) builds that
+image on this machine, installs Docker on the server when it is missing, then
+copies the image over SSH and runs it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from .onprem_spec import python_bin_for
+from .onprem_spec import json_targets_remote_docker, python_bin_for
 
 _CACHE = Path(os.environ.get("PSKIT_CACHE_DIR") or (Path.home() / ".cache" / "pskit"))
 RunFn = Callable[..., "subprocess.CompletedProcess[Any]"]
@@ -117,35 +121,162 @@ def destroy_ssh(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None
 
 
 def apply_docker(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
-    docker = spec["deploy"]["docker"]
+    deploy = spec["deploy"]
+    if json_targets_remote_docker(deploy):
+        apply_docker_remote(root, spec, run=run)
+        return
+    docker = deploy["docker"]
     env = _docker_env(docker.get("host") or "")
     image = docker["image"]
     container = docker["container"]
     _run(["docker", "build", "-t", image, "."], cwd=root, run=run, env=env)
     _run(["docker", "rm", "-f", container], cwd=root, run=run, env=env, check=False)
-    publish = docker.get("publish") or f"{spec.get('port') or 8080}:{spec.get('port') or 8080}"
+    _run(_docker_run_argv(docker, spec), cwd=root, run=run, env=env)
+
+
+def apply_docker_remote(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
+    """Build on this machine, install Docker on the server if needed, then load and run."""
+    deploy = spec["deploy"]
+    docker = deploy["docker"]
+    ssh = deploy["ssh"]
+    image = str(docker["image"])
+    identity = str(ssh.get("identity_file") or "")
+    if not identity:
+        raise DeployError(
+            "remote Docker deploy needs a .pem private key. "
+            "Set options.deploy.pem, or run `pskit deploy` in a terminal and enter the path."
+        )
+    if not os.path.isfile(identity):
+        raise DeployError(f"SSH private key not found: {identity}")
+    _run(["docker", "build", "-t", image, "."], cwd=root, run=run)
+    tar_path = root / "image.tar"
+    try:
+        _run(["docker", "save", "-o", str(tar_path), image], cwd=root, run=run)
+        remote_tar = _remote_tar(str(docker["container"]))
+        remote_dir = remote_tar.rsplit("/", 1)[0]
+        install = bool(docker.get("install_docker", True))
+        _ssh(ssh, _docker_setup_script(install=install, remote_dir=remote_dir), run=run)
+        _scp(ssh, tar_path, remote_tar, run=run)
+        _ssh(ssh, _docker_load_script(docker, spec, remote_tar), run=run)
+    finally:
+        if tar_path.is_file():
+            tar_path.unlink()
+
+
+def destroy_docker(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
+    deploy = spec["deploy"]
+    docker = deploy["docker"]
+    if json_targets_remote_docker(deploy):
+        ssh = deploy["ssh"]
+        container = str(docker["container"])
+        script = _docker_shell_header() + f"dk rm -f {_shq(container)} || true\n"
+        _ssh(ssh, script, run=run, check=False)
+        return
+    env = _docker_env(docker.get("host") or "")
+    _run(["docker", "rm", "-f", docker["container"]], cwd=root, run=run, env=env, check=False)
+
+
+def _docker_run_argv(docker: Dict[str, Any], spec: Dict[str, Any]) -> List[str]:
+    publish = str(docker.get("publish") or f"{spec.get('port') or 8080}:{spec.get('port') or 8080}")
     argv = [
         "docker",
         "run",
         "-d",
         "--name",
-        container,
+        str(docker["container"]),
         "--restart",
         str(docker.get("restart") or "unless-stopped"),
         "-p",
         publish,
         "-v",
-        f"{container}-data:/var/pskit/data",
+        f"{docker['container']}-data:/var/pskit/data",
     ]
     argv.extend(str(item) for item in (docker.get("args") or []))
-    argv.append(image)
-    _run(argv, cwd=root, run=run, env=env)
+    argv.append(str(docker["image"]))
+    return argv
 
 
-def destroy_docker(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
-    docker = spec["deploy"]["docker"]
-    env = _docker_env(docker.get("host") or "")
-    _run(["docker", "rm", "-f", docker["container"]], cwd=root, run=run, env=env, check=False)
+def _remote_tar(container: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", container).strip("-") or "pskit"
+    # Home-relative so the SSH user can write it, and so it is not a shared temp dir.
+    return f"pskit-images/{slug}/image.tar"
+
+
+def _docker_shell_header() -> str:
+    return (
+        "set -eu\n"
+        "as_root() { if [ \"$(id -u)\" -eq 0 ]; then \"$@\"; else sudo \"$@\"; fi; }\n"
+        "dk() { if docker info >/dev/null 2>&1; then docker \"$@\"; else as_root docker \"$@\"; fi; }\n"
+    )
+
+
+def _docker_setup_script(*, install: bool, remote_dir: str) -> str:
+    """Create the staging directory and install Docker when the server does not have it."""
+    lines = [_docker_shell_header(), f"mkdir -p {_shq(remote_dir)}\n"]
+    if install:
+        lines.append(
+            "if ! command -v docker >/dev/null 2>&1; then\n"
+            "  if command -v apt-get >/dev/null 2>&1; then\n"
+            "    export DEBIAN_FRONTEND=noninteractive\n"
+            "    as_root apt-get update\n"
+            "    as_root apt-get install -y docker.io\n"
+            "  elif command -v dnf >/dev/null 2>&1; then\n"
+            "    as_root dnf install -y docker\n"
+            "  elif command -v yum >/dev/null 2>&1; then\n"
+            "    as_root yum install -y docker\n"
+            "  elif command -v apk >/dev/null 2>&1; then\n"
+            "    as_root apk add --no-cache docker\n"
+            "  else\n"
+            '    echo "pskit: Docker is not installed and this server has no apt-get, dnf, yum, or apk" >&2\n'
+            "    exit 1\n"
+            "  fi\n"
+            "  if command -v systemctl >/dev/null 2>&1; then\n"
+            "    as_root systemctl enable --now docker || as_root service docker start || true\n"
+            "  elif command -v service >/dev/null 2>&1; then\n"
+            "    as_root service docker start || true\n"
+            "  fi\n"
+            "fi\n"
+        )
+    lines.append(
+        "if ! command -v docker >/dev/null 2>&1; then\n"
+        '  echo "pskit: Docker is not installed on the server. Set options.deploy.install_docker: true or install it, then redeploy." >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        "dk info >/dev/null\n"
+    )
+    return "".join(lines)
+
+
+def _docker_load_script(docker: Dict[str, Any], spec: Dict[str, Any], remote_tar: str) -> str:
+    publish = str(docker.get("publish") or f"{spec.get('port') or 8080}:{spec.get('port') or 8080}")
+    restart = str(docker.get("restart") or "unless-stopped")
+    container = str(docker["container"])
+    image = str(docker["image"])
+    parts = [
+        "dk",
+        "run",
+        "-d",
+        "--name",
+        _shq(container),
+        "--restart",
+        _shq(restart),
+        "-p",
+        _shq(publish),
+        "-v",
+        _shq(f"{container}-data:/var/pskit/data"),
+    ]
+    for item in docker.get("args") or []:
+        parts.append(_shq(str(item)))
+    parts.append(_shq(image))
+    run = " ".join(parts)
+    return (
+        _docker_shell_header()
+        + f"dk load -i {_shq(remote_tar)}\n"
+        + f"dk rm -f {_shq(container)} || true\n"
+        + run
+        + "\n"
+        + f"rm -f {_shq(remote_tar)}\n"
+    )
 
 
 def dockerfile_text(runtime: str, port: int) -> str:
@@ -208,6 +339,7 @@ def _view(deploy: Dict[str, Any]) -> Any:
         restart=str(docker.get("restart") or "unless-stopped"),
         publish=str(docker.get("publish") or ""),
         docker_args=list(docker.get("args") or []),
+        install_docker=bool(docker.get("install_docker", False)),
         python_url=str(bundle.get("url") or ""),
         python_sha256=str(bundle.get("sha256") or ""),
         python_home=str(bundle.get("home") or ""),
@@ -363,7 +495,10 @@ def _run(
     check: bool = True,
 ) -> None:
     fn = run or subprocess.run
-    proc = fn(list(argv), cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True)
+    try:
+        proc = fn(list(argv), cwd=str(cwd) if cwd else None, env=env, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise DeployError(f"command not found: {argv[0]}. Install it on this machine and retry.") from exc
     code = int(proc.returncode or 0)
     if check and code:
         err = str(proc.stderr or proc.stdout or "")[-4000:]

@@ -198,6 +198,7 @@ def deploy(project, skip_deps: bool, confirm: bool, upgrade: bool, no_dashboard:
     from ..core.deployer import Deployer
     from ..dashboard.generator import write_dashboard
 
+    _ask_onprem_pem(project)
     record = Deployer(project, echo=echo).deploy(skip_deps=skip_deps, auto_approve=not confirm, upgrade=upgrade)
     ok(f"\nDeployed {record['service']} ({record['stage']}) to {record['provider_display']} {record['region']}")
     _print_record(record)
@@ -223,6 +224,42 @@ def remove(project, yes: bool) -> None:  # noqa: ANN001
     Deployer(project, echo=echo).remove(auto_approve=True)
     write_dashboard(project.root)
     ok("Removed.")
+
+
+def _ask_onprem_pem(project: Any) -> None:
+    """Ask for the server ``.pem`` when a remote Docker deploy has none yet."""
+    if project.config.provider.name != "onprem":
+        return
+    from ..providers.onprem_spec import assign_pem, parse_deploy, targets_remote_docker
+
+    cfg = project.config
+    try:
+        spec = parse_deploy(
+            cfg.provider.options,
+            service=cfg.service,
+            stage=cfg.provider.stage,
+            runtime=cfg.provider.runtime,
+            architecture=cfg.provider.architecture,
+        )
+    except ValueError:
+        return
+    if not targets_remote_docker(spec):
+        return
+    if spec.identity_file and os.path.isfile(spec.identity_file):
+        return
+    who = f"{spec.ssh_user}@{spec.ssh_host}" if spec.ssh_user else spec.ssh_host
+    if not sys.stdin.isatty():
+        raise click.ClickException(
+            "on-premises Docker deploy needs a .pem private key for "
+            f"{who}. Set options.deploy.pem in pskit.yml (or PSKIT_SSH_KEY) and run pskit deploy again."
+        )
+    echo(f"On-premises Docker deploy builds an image on this machine and copies it to {who}.")
+    echo("If Docker is not installed on that server, it is installed before the image is loaded.")
+    entered = click.prompt(
+        "Path to the SSH private key (.pem)",
+        type=click.Path(exists=True, dir_okay=False, readable=True),
+    )
+    assign_pem(cfg.provider.options, str(entered))
 
 
 # ----------------------------------------------------------------------------- info / dashboard

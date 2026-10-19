@@ -8,7 +8,14 @@ import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from py_serverless_kit.providers.onprem_remote import apply_docker, apply_ssh, dockerfile_text, extract_bundle_for_tests
+from py_serverless_kit.providers.onprem_remote import (
+    DeployError,
+    apply_docker,
+    apply_ssh,
+    destroy_docker,
+    dockerfile_text,
+    extract_bundle_for_tests,
+)
 from py_serverless_kit.providers.onprem_spec import parse_deploy, python_bin_for, standalone_url
 
 
@@ -98,6 +105,131 @@ def test_apply_docker_builds_and_runs(tmp_path: Path):
     run = runner.calls[2]
     assert run[:3] == ["docker", "run", "-d"]
     assert "pskit-demo:dev" in run
+
+
+def _remote_spec(pem: Path, *, install_docker: bool = True) -> dict:
+    return {
+        "port": 8080,
+        "deploy": {
+            "method": "docker",
+            "sudo": True,
+            "ssh": {
+                "host": "10.0.1.12",
+                "user": "pskit",
+                "port": 22,
+                "identity_file": str(pem),
+                "known_hosts": "accept-new",
+                "path": "/tmp/pskit-demo",
+            },
+            "docker": {
+                "image": "pskit-demo:dev",
+                "container": "pskit-demo-dev",
+                "host": "",
+                "restart": "unless-stopped",
+                "publish": "8080:8080",
+                "args": ["--memory", "256m"],
+                "install_docker": install_docker,
+            },
+        },
+    }
+
+
+def test_apply_docker_remote_builds_locally_and_installs(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    pem = tmp_path / "server.pem"
+    pem.write_text("key\n", encoding="utf-8")
+    runner = _Proc()
+    apply_docker(root, _remote_spec(pem), run=runner)
+    assert runner.calls[0][:4] == ["docker", "build", "-t", "pskit-demo:dev"]
+    assert runner.calls[1][:3] == ["docker", "save", "-o"]
+    assert runner.calls[1][-1] == "pskit-demo:dev"
+    joined = [" ".join(c) for c in runner.calls]
+    setup = next(line for line in joined if "apt-get install -y docker.io" in line)
+    assert "dnf install -y docker" in setup
+    assert "yum install -y docker" in setup
+    assert "apk add --no-cache docker" in setup
+    assert "command -v docker" in setup
+    assert any(c[0] == "scp" and "-i" in c and str(pem) in c and "image.tar" in " ".join(c) for c in runner.calls)
+    load = next(line for line in joined if "dk load -i" in line)
+    assert "pskit-demo:dev" in load
+    assert "--memory" in load
+    assert "256m" in load
+    assert not (root / "image.tar").exists()
+
+
+def test_apply_docker_remote_skips_install_when_disabled(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    pem = tmp_path / "server.pem"
+    pem.write_text("key\n", encoding="utf-8")
+    runner = _Proc()
+    apply_docker(root, _remote_spec(pem, install_docker=False), run=runner)
+    setup = next(" ".join(c) for c in runner.calls if c[0] == "ssh" and "command -v docker" in " ".join(c))
+    assert "apt-get install" not in setup
+    assert "Docker is not installed on the server" in setup
+
+
+def test_apply_docker_remote_requires_pem(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    spec = _remote_spec(tmp_path / "missing.pem")
+    spec["deploy"]["ssh"]["identity_file"] = ""
+    try:
+        apply_docker(root, spec, run=_Proc())
+    except DeployError as exc:
+        assert ".pem" in str(exc)
+    else:
+        raise AssertionError("expected DeployError")
+
+
+def test_destroy_docker_remote_does_not_install(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    pem = tmp_path / "server.pem"
+    pem.write_text("key\n", encoding="utf-8")
+    runner = _Proc()
+    destroy_docker(root, _remote_spec(pem), run=runner)
+    assert len(runner.calls) == 1
+    command = " ".join(runner.calls[0])
+    assert runner.calls[0][0] == "ssh"
+    assert "dk rm -f" in command
+    assert "apt-get install" not in command
+
+
+def test_parse_docker_pem_and_ssh_url():
+    spec = parse_deploy(
+        {"deploy": {"method": "docker", "host": "10.0.1.12", "user": "pskit", "pem": "keys/server.pem"}},
+        service="demo",
+        stage="dev",
+        runtime="python3.12",
+        architecture="x86_64",
+    )
+    assert spec.identity_file.replace("\\", "/").endswith("keys/server.pem")
+    assert spec.install_docker is True
+    assert spec.sudo is True
+    assert spec.ssh_host == "10.0.1.12"
+    via = parse_deploy(
+        {"deploy": {"method": "docker", "docker_host": "ssh://ops@10.1.1.5:2222"}},
+        service="demo",
+        stage="dev",
+        runtime="python3.12",
+        architecture="x86_64",
+    )
+    assert via.ssh_host == "10.1.1.5"
+    assert via.ssh_user == "ops"
+    assert via.ssh_port == 2222
+    assert via.install_docker is True
+    local = parse_deploy(
+        {"deploy": {"method": "docker", "image": "pskit-demo:dev"}},
+        service="demo",
+        stage="dev",
+        runtime="python3.12",
+        architecture="x86_64",
+    )
+    assert local.ssh_host == ""
+    assert local.install_docker is False
+    assert local.sudo is False
 
 
 def test_dockerfile_uses_runtime():

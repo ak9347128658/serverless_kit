@@ -10,15 +10,16 @@ Three ways to get code from this laptop onto that server:
 | --- | --- | --- | --- |
 | `local` | this machine (example 16) | Python + pskit | laptop / the server *is* the deploy machine |
 | `ssh` | SSH. Python only if `python: system` | OpenSSH (`ssh`, `scp`) | most on-prem Linux boxes |
-| `docker` | Docker engine | Docker CLI (and SSH if `docker_host` is `ssh://…`) | the server has Docker and you do not want to manage Python |
+| `docker` | SSH. Docker is installed at deploy when it is missing | Docker CLI, OpenSSH, and a `.pem` for the server | the server should run a container, with or without Docker already installed |
 
 When the server has **no Python**, pick one of:
 
 - `method: ssh` and `python: bundle` — pskit downloads a portable CPython
   ([python-build-standalone](https://github.com/astral-sh/python-build-standalone))
   at apply time, copies it with the app, and starts systemd (this file)
-- `method: docker` — the image is `FROM python:3.12-slim`; the server never
-  installs Python
+- `method: docker` — the image is `FROM python:3.12-slim` and is built on this
+  machine. The server does not need Python. If it also has no Docker, deploy
+  installs Docker and then loads the image
 - `python_home: /path/to/portable-python` — air-gapped: you already have a
   CPython tree, pskit copies it instead of downloading
 
@@ -45,7 +46,10 @@ deploy: ssh://pskit@10.0.1.12/opt/pskit/factory-api
 
 ## Docker instead
 
-The server needs a Docker engine. It does not need Python.
+The image is built on the laptop. It is copied to the server with the `.pem`
+and started there. The server does not need Python. If `docker` is not on the
+server, deploy installs it (apt, dnf, yum, or apk) and then loads the image.
+`pskit deploy` asks for the `.pem` path when `pem` is empty.
 
 ```yaml
 provider:
@@ -54,13 +58,21 @@ provider:
     port: 8090
     deploy:
       method: docker
+      host: 10.0.1.12
+      user: pskit
+      pem: ~/.ssh/factory.pem
       image: pskit/factory-api:dev
-      docker_host: ssh://pskit@10.0.1.12   # empty = Docker on this laptop
       restart: unless-stopped
 ```
 
-`pskit deploy` runs `docker build` and `docker run` (with `DOCKER_HOST` when
-`docker_host` is set). Data lives in a volume named after the container.
+```bash
+pskit deploy
+# Path to the SSH private key (.pem): C:\keys\factory.pem
+```
+
+Leave out `host` to build and run the container on the laptop instead. Data
+lives in a volume named after the container. The SSH user needs passwordless
+`sudo` when Docker has to be installed.
 
 ## Server already has Python
 
