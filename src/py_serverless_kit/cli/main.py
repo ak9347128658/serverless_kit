@@ -332,10 +332,13 @@ def info_cmd(project, as_json: bool, refresh: bool) -> None:  # noqa: ANN001
     "-d", "--dir", "directory", default=".", type=click.Path(file_okay=False, exists=True), help="Project root."
 )
 @click.option("-o", "--output", default=None, type=click.Path(dir_okay=False), help="Write HTML here.")
-@click.option("--serve", is_flag=True, help="Serve the dashboard over HTTP.")
+@click.option("--serve", is_flag=True, help="Serve the dashboard with live logs and workflow executions.")
+@click.option("--host", "bind_host", default="127.0.0.1", show_default=True, help="Bind address for --serve.")
 @click.option("--port", default=8765, show_default=True)
 @click.option("--open", "open_browser", is_flag=True, help="Open in the browser.")
-def dashboard(directory: str, output: Optional[str], serve: bool, port: int, open_browser: bool) -> None:
+def dashboard(
+    directory: str, output: Optional[str], serve: bool, bind_host: str, port: int, open_browser: bool
+) -> None:
     """Generate (and optionally serve) the deployment dashboard."""
     from ..dashboard.generator import collect_records, local_record, write_dashboard
 
@@ -352,19 +355,30 @@ def dashboard(directory: str, output: Optional[str], serve: bool, port: int, ope
     path = write_dashboard(root, records, Path(output).resolve() if output else None)
     ok(f"Dashboard written to {path}")
     if serve:
-        import http.server
-        import socketserver
+        from ..dashboard.server import is_loopback, make_server
 
-        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(path.parent))
-        with socketserver.TCPServer(("127.0.0.1", port), handler) as httpd:
-            url = f"http://127.0.0.1:{port}/{path.name}"
-            echo(f"Serving on {url} (Ctrl+C to stop)")
-            if open_browser:
-                webbrowser.open(url)
-            try:
-                httpd.serve_forever()
-            except KeyboardInterrupt:
-                pass
+        try:
+            httpd = make_server(root, bind_host, port)
+        except OSError as exc:
+            raise click.ClickException(f"cannot listen on {bind_host}:{port}: {exc}") from exc
+        shown = "127.0.0.1" if bind_host in ("0.0.0.0", "::") else bind_host  # noqa: S104
+        if ":" in shown and not shown.startswith("["):
+            shown = f"[{shown}]"
+        url = f"http://{shown}:{httpd.server_address[1]}/"
+        if not is_loopback(bind_host):
+            fail(
+                f"warning: listening on {bind_host}. Anyone who can reach this port can read logs and "
+                "start or cancel workflow executions."
+            )
+        echo(f"Serving on {url} (Ctrl+C to stop)")
+        if open_browser:
+            webbrowser.open(url)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            httpd.server_close()
     elif open_browser:
         webbrowser.open(path.as_uri())
 
@@ -497,6 +511,222 @@ def workflow_show(project, name: str, fmt: str) -> None:  # noqa: ANN001
     else:
         out = definition
     click.echo(json.dumps(out, indent=2))
+
+
+def _deployed_record(project: Any) -> dict:
+    from ..core.deployer import Deployer
+
+    record = Deployer(project, echo=echo).load_record()
+    if record is None:
+        raise click.ClickException(
+            f"{project.config.provider.name}/{project.config.provider.stage} is not deployed yet; run `pskit deploy`"
+        )
+    return record
+
+
+def _remote(call: Callable[[], Any]) -> Any:
+    """Run a control-API / cloud-SDK call and turn its failures into CLI errors."""
+    from ..core.executions import ExecutionError
+
+    try:
+        return call()
+    except (ExecutionError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+def _execution_backend(project: Any) -> Any:
+    from ..core.executions import backend_for
+
+    return backend_for(_deployed_record(project), project.root)
+
+
+def _print_execution_line(item: dict) -> None:
+    status = str(item.get("status") or "?")
+    color = {"SUCCEEDED": "green", "RUNNING": "cyan"}.get(status, "red")
+    started = str(item.get("started_at") or "")[:19].replace("T", " ")
+    took = f"{item['duration_ms']:.0f} ms" if isinstance(item.get("duration_ms"), (int, float)) else ""
+    current = f"@ {item['current_state']}" if status == "RUNNING" and item.get("current_state") else ""
+    click.echo(
+        f"{item.get('execution_id')}  {item.get('workflow', ''):<18} "
+        + click.style(f"{status:<10}", fg=color)
+        + f" {started:<19} {took:>10} {current}"
+    )
+
+
+@workflow.command("start")
+@project_options
+@click.argument("name")
+@click.option("-i", "--input", "data", default=None, help="JSON input or @file.json.")
+@click.option("--wait", is_flag=True, help="Wait for the result (on-prem; native engines return at once).")
+@click.option("--json", "as_json", is_flag=True)
+def workflow_start(project, name: str, data: Optional[str], wait: bool, as_json: bool) -> None:  # noqa: ANN001
+    """Start a deployed workflow and print its execution id."""
+    from ..local.runner import parse_data
+
+    backend = _execution_backend(project)
+    result = _remote(lambda: backend.start(name, parse_data(data), wait=wait))
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+    ok(f"execution_id: {result.get('execution_id')}")
+    echo(f"status:       {result.get('status')}")
+    if result.get("console"):
+        echo(f"console:      {result['console']}")
+    if "output" in result and result.get("status") == "SUCCEEDED":
+        click.echo(json.dumps(result["output"], indent=2, default=str))
+    elif result.get("error"):
+        fail(f"{result.get('error')}: {result.get('cause') or ''}")
+    if result.get("status") == "RUNNING":
+        echo(f"Follow it with: pskit workflow status {result.get('execution_id')} --watch")
+
+
+@workflow.command("executions")
+@project_options
+@click.argument("name", required=False)
+@click.option("--status", default=None, help="RUNNING, SUCCEEDED, FAILED, TIMED_OUT, CANCELLED or ABORTED.")
+@click.option("-n", "--limit", default=20, show_default=True)
+@click.option("--offset", default=0, show_default=True, help="Skip this many (on-prem).")
+@click.option("--token", default=None, help="Next-page token printed by a previous call (AWS/GCP).")
+@click.option("--json", "as_json", is_flag=True)
+def workflow_executions(  # noqa: ANN001
+    project, name: Optional[str], status: Optional[str], limit: int, offset: int, token: Optional[str], as_json: bool
+) -> None:
+    """List executions of the deployed workflows (newest first)."""
+    backend = _execution_backend(project)
+    result = _remote(lambda: backend.list(workflow=name, status=status, limit=limit, offset=offset, token=token))
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+    if not result.get("supported", True):
+        raise click.ClickException(result.get("reason") or "execution history is not available here")
+    items = result.get("items") or []
+    if not items:
+        echo("No executions yet.")
+    for item in items:
+        _print_execution_line(item)
+    total = result.get("total")
+    if isinstance(total, int) and total > offset + len(items):
+        echo(f"... {total - offset - len(items)} more (use --offset {offset + len(items)})")
+    elif result.get("next_token"):
+        echo(f"... more (use --token {result['next_token']})")
+
+
+@workflow.command("status")
+@project_options
+@click.argument("execution_id")
+@click.option("-w", "--workflow", "name", default=None, help="Workflow name (helps AWS/GCP resolve the id).")
+@click.option("--history", is_flag=True, help="Print the state history.")
+@click.option("--watch", is_flag=True, help="Poll until the execution finishes.")
+@click.option("--json", "as_json", is_flag=True)
+def workflow_status(  # noqa: ANN001
+    project, execution_id: str, name: Optional[str], history: bool, watch: bool, as_json: bool
+) -> None:
+    """Show one execution: status, current state, output or error."""
+    import time
+
+    backend = _execution_backend(project)
+    record = _remote(lambda: backend.get(execution_id, name))
+    while watch and record.get("status") == "RUNNING":
+        if not as_json:
+            echo(f"RUNNING @ {record.get('current_state') or '-'}")
+        time.sleep(2)
+        record = _remote(lambda: backend.get(execution_id, name))
+    if as_json:
+        click.echo(json.dumps(record, indent=2, default=str))
+        return
+    _print_execution_line(record)
+    if record.get("console"):
+        echo(f"console: {record['console']}")
+    if record.get("status") == "SUCCEEDED":
+        click.echo(json.dumps(record.get("output"), indent=2, default=str))
+    elif record.get("error") or record.get("cause"):
+        fail(f"{record.get('error')}: {record.get('cause') or ''}")
+    if history:
+        for step in record.get("history") or []:
+            extra = f" ({step['error']})" if step.get("error") else ""
+            echo(f"  {str(step.get('ts') or '')[11:23]}  {step.get('event', ''):<6} {step.get('state')}{extra}")
+
+
+@workflow.command("cancel")
+@project_options
+@click.argument("execution_id")
+@click.option("-w", "--workflow", "name", default=None, help="Workflow name (AWS/GCP).")
+def workflow_cancel(project, execution_id: str, name: Optional[str]) -> None:  # noqa: ANN001
+    """Cancel a running execution (it stops before its next state)."""
+    backend = _execution_backend(project)
+    record = _remote(lambda: backend.cancel(execution_id, name))
+    _print_execution_line(record)
+
+
+# ----------------------------------------------------------------------------- logs
+@cli.command()
+@project_options
+@click.option("-f", "--follow", is_flag=True, help="Keep printing new entries.")
+@click.option("-n", "--lines", default=100, show_default=True, help="How many recent entries to show first.")
+@click.option("--function", "function", default=None, help="Only this function.")
+@click.option("--level", default=None, help="Minimum level: DEBUG, INFO, WARNING, ERROR.")
+@click.option(
+    "--source",
+    default=None,
+    type=click.Choice(["function", "host", "stdout", "stderr", "invocation"]),
+    help="Only one kind of entry.",
+)
+@click.option("-q", "--grep", "text", default=None, help="Only entries containing this text.")
+@click.option("--json", "as_json", is_flag=True, help="One JSON object per line.")
+def logs(  # noqa: ANN001
+    project,
+    follow: bool,
+    lines: int,
+    function: Optional[str],
+    level: Optional[str],
+    source: Optional[str],
+    text: Optional[str],
+    as_json: bool,
+) -> None:
+    """Show logs of the deployed on-premises host (handlers, print output, invocations)."""
+    import time
+
+    from ..core.onprem_control import control_for
+
+    record = _deployed_record(project)
+    control = control_for(record, project.root)
+    if control is None:
+        raise click.ClickException(
+            "`pskit logs` reads the on-premises host. For cloud providers use the console link from `pskit info`."
+        )
+
+    def fetch(since: int, limit: int) -> dict:
+        return dict(
+            _remote(lambda: control.logs(since=since, limit=limit, level=level, function=function, q=text, source=source))
+        )
+
+    colors = {"ERROR": "red", "CRITICAL": "red", "WARNING": "yellow", "DEBUG": "bright_black"}
+
+    def show(entries: list) -> None:
+        for entry in entries:
+            if as_json:
+                click.echo(json.dumps(entry, default=str))
+                continue
+            who = entry.get("function") or entry.get("source")
+            stamp = str(entry.get("ts") or "")[:23].replace("T", " ")
+            click.echo(
+                click.style(f"{stamp} {entry.get('level', ''):<7}", fg=colors.get(entry.get("level", "")))
+                + f" [{who}] {entry.get('message', '')}"
+            )
+
+    page = fetch(0, lines)
+    show(page.get("entries") or [])
+    cursor = int(page.get("next") or 0)
+    while follow:
+        try:
+            time.sleep(1)
+            page = fetch(cursor, 500)
+        except KeyboardInterrupt:
+            break
+        if page.get("gap"):
+            fail("... some entries were dropped from the host's buffer ...")
+        show(page.get("entries") or [])
+        cursor = int(page.get("next") or cursor)
 
 
 # ----------------------------------------------------------------------------- providers / terraform

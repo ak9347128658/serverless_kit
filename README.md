@@ -55,11 +55,12 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 
 - **10 clouds and an on-premises host:** AWS Lambda, Azure Functions, Google Cloud Functions (gen2), Alibaba Function Compute, Oracle Functions, IBM Code Engine, DigitalOcean Functions, Tencent SCF, Huawei FunctionGraph, Cloudflare Workers, plus a process on your own machine or a remote server (`onprem`: local, SSH/SCP of one archive with a `.pem`, or Docker — the image is built locally, Docker is installed on the server when it is missing, and deploy waits until the host is healthy — or a bundled CPython when the server has no Python).
 - **Triggers:** HTTP (path params, CORS, auth), schedules (rate/cron, translated into each cloud's cron dialect), queues, object storage, pub/sub topics, and direct function-to-function `invoke()`.
-- **Workflows:** task / choice / wait / pass / parallel / map / succeed / fail with retry and catch. Native on AWS and GCP; an embedded engine on the other clouds; runnable locally with `pskit workflow run`.
+- **Workflows:** task / choice / wait / pass / parallel / map / succeed / fail with retry and catch. Native on AWS and GCP; an embedded engine on the other clouds; runnable locally with `pskit workflow run`. Every run returns an `execution_id`; `pskit workflow start|executions|status|cancel` and the dashboard list, follow and cancel runs (on premises, Step Functions, Cloud Workflows).
+- **Resources:** a `resources:` section for buckets, queues, topics, databases, caches or any service, created by pskit or attached as `external`. Handlers read them with `resource("name")` on every cloud. On premises, queues can live in Redis and storage in MinIO / any S3-compatible store.
 - **Terraform underneath:** real, reviewable `main.tf.json`, any backend (S3, GCS, azurerm, ...), works with OpenTofu. Escape hatches: `terraform.extra`, `${tf:...}` references, per-function `options`.
 - **Config that scales:** `extends:`, per-provider `providers:` blocks, per-stage `stages:` blocks, and `${env:}`, `${opt:}`, `${self:}`, `${file()}` variables.
 - **Local dev:** `pskit dev` (hot-reloading HTTP server), `pskit invoke` with synthetic queue/storage/schedule events, and a `LocalRunner` for pytest.
-- **Dashboard:** a self-contained `index.html` listing every deployment, function, trigger, endpoint, ARN/id, console link and workflow.
+- **Dashboard:** a self-contained React page listing every deployment, function, trigger, endpoint, ARN/id, console link, workflow and resource. `pskit dashboard --serve` adds live on-prem logs and stats and workflow executions (start, follow, cancel). `pskit logs -f` tails an on-prem host from the terminal.
 - **Production details:** deterministic artifacts (no redeploy when nothing changed), partial batch failures (`BatchResult`), structured JSON logs, consistent HTTP error mapping, stack traces hidden from clients, a stdlib-only runtime (no extra dependencies inside your function), and hooks (`before_deploy`, ...).
 
 ## Supported providers
@@ -208,7 +209,7 @@ More: [docs/architecture.md](https://github.com/ak9347128658/serverless_kit/blob
 
 ## Examples
 
-Sixteen runnable scenarios live in [`examples/`](https://github.com/ak9347128658/serverless_kit/tree/main/examples/). They are tested in CI.
+Eighteen runnable examples live in [`examples/`](https://github.com/ak9347128658/serverless_kit/tree/main/examples/). They are tested in CI.
 
 | | |
 |---|---|
@@ -221,6 +222,10 @@ Sixteen runnable scenarios live in [`examples/`](https://github.com/ak9347128658
 | [07-workflow-orders](https://github.com/ak9347128658/serverless_kit/tree/main/examples/07-workflow-orders) | Every workflow state type, retry/catch |
 | [08-multi-cloud](https://github.com/ak9347128658/serverless_kit/tree/main/examples/08-multi-cloud) | Same code, all 11 providers |
 | [16-on-premises](https://github.com/ak9347128658/serverless_kit/tree/main/examples/16-on-premises) | HTTP, schedule, queue, storage, topic and a workflow on one machine |
+| [17-on-premises-remote](https://github.com/ak9347128658/serverless_kit/tree/main/examples/17-on-premises-remote) | SSH/SCP or Docker onto a server |
+| [18-resources](https://github.com/ak9347128658/serverless_kit/tree/main/examples/18-resources) | Managed and external resources, bindings, Redis/MinIO on premises |
+| [19-custom-drivers](https://github.com/ak9347128658/serverless_kit/tree/main/examples/19-custom-drivers) | Your own on-prem queue/storage driver class; RabbitMQ and Kafka templates |
+| [20-onprem-external-clouds](https://github.com/ak9347128658/serverless_kit/tree/main/examples/20-onprem-external-clouds) | On-prem host watching queues and buckets in AWS, Azure, GCP, Alibaba, Cloudflare and MinIO |
 | [09-function-invoke](https://github.com/ak9347128658/serverless_kit/tree/main/examples/09-function-invoke) | Function-to-function `invoke()` |
 | [10-stages-and-config](https://github.com/ak9347128658/serverless_kit/tree/main/examples/10-stages-and-config) | Stages, variables, secrets |
 | [11-custom-terraform](https://github.com/ak9347128658/serverless_kit/tree/main/examples/11-custom-terraform) | `terraform.extra`, `${tf:...}`, remote state, hooks |
@@ -233,11 +238,14 @@ Sixteen runnable scenarios live in [`examples/`](https://github.com/ak9347128658
 
 | | |
 |---|---|
+| [Scenarios](https://github.com/ak9347128658/serverless_kit/blob/main/docs/scenarios.md) | Step-by-step guides by use case |
 | [Getting started](https://github.com/ak9347128658/serverless_kit/blob/main/docs/getting-started.md) | Install, credentials, first deploy |
 | [Configuration reference](https://github.com/ak9347128658/serverless_kit/blob/main/docs/configuration.md) | Every `pskit.yml` key, variables, `extends`, stages |
 | [Events](https://github.com/ak9347128658/serverless_kit/blob/main/docs/events.md) | HTTP, schedule, queue, storage, topic, with a per-provider matrix |
 | [Handler API](https://github.com/ak9347128658/serverless_kit/blob/main/docs/handlers.md) | `Event`, `Context`, `Response`, errors, `BatchResult`, `invoke()` |
 | [Workflows](https://github.com/ak9347128658/serverless_kit/blob/main/docs/workflows.md) | State machine reference, engines, limitations |
+| [Workflow executions](https://github.com/ak9347128658/serverless_kit/blob/main/docs/workflow-executions.md) | Execution ids, status, history, cancel |
+| [Resources](https://github.com/ak9347128658/serverless_kit/blob/main/docs/resources.md) | Storage, queues, topics, databases, external services |
 | [Providers](https://github.com/ak9347128658/serverless_kit/blob/main/docs/providers.md) | Options, credentials, resources and limits per cloud |
 | [CLI](https://github.com/ak9347128658/serverless_kit/blob/main/docs/cli.md) | Every command and flag |
 | [Local development](https://github.com/ak9347128658/serverless_kit/blob/main/docs/local-development.md) | `pskit dev`, `invoke`, testing |

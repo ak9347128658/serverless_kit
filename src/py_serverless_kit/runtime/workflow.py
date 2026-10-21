@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,6 +37,29 @@ class WorkflowFailed(Exception):
         self.cause = cause
         self.history = history or []
         super().__init__(f"{error}: {cause}" if cause else error)
+
+
+class WorkflowCancelled(WorkflowFailed):
+    """Raised between states once :meth:`WorkflowEngine.cancel` was requested."""
+
+    def __init__(self, history: Optional[List[Dict[str, Any]]] = None) -> None:
+        super().__init__("States.Cancelled", "execution was cancelled", history)
+
+
+TIMEOUT_ERROR = "States.Timeout"
+
+
+_ID_LOCK = threading.Lock()
+_LAST_ID_MS = 0
+
+
+def new_execution_id() -> str:
+    """Time-sortable hex id: millisecond timestamp (strictly increasing in this process) + random suffix."""
+    global _LAST_ID_MS
+    with _ID_LOCK:
+        _LAST_ID_MS = max(int(time.time() * 1000), _LAST_ID_MS + 1)
+        stamp = _LAST_ID_MS
+    return f"{stamp:013x}{uuid.uuid4().hex[:15]}"
 
 
 # --------------------------------------------------------------------- JSON path
@@ -150,13 +175,46 @@ class WorkflowEngine:
     sleep: Callable[[float], None] = time.sleep
     max_steps: int = 10_000
     history: List[Dict[str, Any]] = field(default_factory=list)
+    # Execution tracking (all optional): called after every history entry, checked between states.
+    on_change: Optional[Callable[[WorkflowEngine], None]] = None
+    deadline: Optional[float] = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    current_state: Optional[str] = None
 
     def run(self, data: Any = None) -> Any:
         return self._run_machine(self.definition, data)
 
+    def cancel(self) -> None:
+        """Stop before the next state starts (a running task is not interrupted)."""
+        self.cancel_event.set()
+
     # ------------------------------------------------------------------
     def _record(self, state: str, kind: str, **extra: Any) -> None:
         self.history.append({"ts": datetime.now(timezone.utc).isoformat(), "state": state, "type": kind, **extra})
+        if extra.get("event") == "enter":
+            self.current_state = state
+        if self.on_change is not None:
+            try:
+                self.on_change(self)
+            except Exception:  # noqa: BLE001, S110 - tracking must never break the run
+                pass
+
+    def _checkpoint(self) -> None:
+        if self.cancel_event.is_set():
+            raise WorkflowCancelled(self.history)
+        if self.deadline is not None and time.time() >= self.deadline:
+            raise WorkflowFailed(TIMEOUT_ERROR, "workflow exceeded its timeout", self.history)
+
+    def _pause(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        if self.sleep is time.sleep:
+            # Real waits wake up early on cancel and never outlive the deadline.
+            limit = seconds if self.deadline is None else max(0.0, min(seconds, self.deadline - time.time()))
+            self.cancel_event.wait(limit)
+        else:
+            self.sleep(seconds)
+        self._checkpoint()
 
     def _run_machine(self, machine: Dict[str, Any], data: Any) -> Any:
         states: Dict[str, Dict[str, Any]] = machine["states"]
@@ -166,16 +224,19 @@ class WorkflowEngine:
             steps += 1
             if steps > self.max_steps:
                 raise WorkflowFailed("States.Runtime", f"exceeded {self.max_steps} steps", self.history)
+            self._checkpoint()
             state = states[name]
             kind = state["type"]
             self._record(name, kind, event="enter")
             if kind == "succeed":
                 return data
             if kind == "fail":
+                self._record(name, kind, event="fail", error=state.get("error", "States.Fail"))
                 raise WorkflowFailed(state.get("error", "States.Fail"), state.get("cause", ""), self.history)
             if kind == "choice":
                 name = self._choose(state, data)
                 continue
+            began = time.perf_counter()
             try:
                 data = self._execute(state, data)
             except WorkflowFailed:
@@ -192,6 +253,7 @@ class WorkflowEngine:
                 data = set_path(data, handler.get("result_path", "$.error"), info)
                 name = handler["next"]
                 continue
+            self._record(name, kind, event="exit", duration_ms=round((time.perf_counter() - began) * 1000, 2))
             if state.get("end") or not state.get("next"):
                 return data
             name = state["next"]
@@ -217,7 +279,7 @@ class WorkflowEngine:
                 seconds = float(get_path(data, state["seconds_path"]))
             else:
                 seconds = float(state.get("seconds", 0))
-            self.sleep(seconds)
+            self._pause(seconds)
             result = input_data
         elif kind == "parallel":
             branches = state.get("branches") or []
@@ -258,7 +320,8 @@ class WorkflowEngine:
                 attempts[idx] = count + 1
                 delay = float(rule.get("interval_seconds", 1)) * float(rule.get("backoff_rate", 2.0)) ** count
                 self._record(state.get("function", "?"), "task", event="retry", attempt=count + 1, error=name)
-                self.sleep(min(delay, float(rule.get("max_delay_seconds", 300))))
+                cap = rule.get("max_delay_seconds")
+                self._pause(min(delay, float(300 if cap is None else cap)))
 
 
 def in_process_runner(provider: str = "local") -> TaskRunner:
@@ -273,8 +336,35 @@ def in_process_runner(provider: str = "local") -> TaskRunner:
     return run
 
 
+_EXECUTOR: Any = None
+
+
+def install_executor(executor: Any) -> None:
+    """Route orchestrator calls through an :class:`~.executions.Executor` (the on-prem host does)."""
+    global _EXECUTOR
+    _EXECUTOR = executor
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def wants_wait(event: Event) -> bool:
+    """HTTP callers opt into a synchronous run with ``?wait=true`` or ``Prefer: wait``."""
+    if event.http is None:
+        return True
+    prefer = (event.http.headers.get("prefer") or "").lower()
+    return _truthy(event.http.query.get("wait")) or _truthy(event.http.headers.get("x-pskit-wait")) or "wait" in prefer
+
+
 def orchestrate(event: Event, context: Context) -> Any:
-    """Handler of the auto-generated ``<workflow>-orchestrator`` function."""
+    """Handler of the auto-generated ``<workflow>-orchestrator`` function.
+
+    Every run gets an ``execution_id``. Inside the on-prem host (an executor is
+    installed) an HTTP start returns ``202`` at once and the run is tracked in the
+    execution store; ``?wait=true`` waits for the result. On cloud functions the
+    run is synchronous and the response carries the id.
+    """
     from .manifest import load_manifest
 
     manifest = load_manifest()
@@ -293,20 +383,45 @@ def orchestrate(event: Event, context: Context) -> Any:
         data = event.http.json(default=None) if event.http.body else dict(event.http.query)
     else:
         data = event.data
+    executor = _EXECUTOR
+    if executor is not None and executor.knows(name):
+        if not wants_wait(event):
+            return Response.json(executor.start(name, data), 202)
+        # Synchronous: tasks run in this thread's dispatcher (the caller may hold the host's env lock).
+        record = executor.start(name, data, wait=True, task_runner=in_process_runner(event.provider))
+        result = executor.result_body(record)
+        if record.get("status") != "SUCCEEDED":
+            context.logger.error("workflow failed", extra={k: result.get(k) for k in ("workflow", "error", "cause")})
+            if event.http is not None:
+                return Response.json(result, 500)
+            raise WorkflowFailed(str(record.get("error") or "States.Runtime"), str(record.get("cause") or ""))
+        return result
+    execution_id = new_execution_id()
     engine = WorkflowEngine(wf["definition"], in_process_runner(event.provider))
-    started = time.time()
+    timeout = wf.get("timeout")
+    if timeout:
+        engine.deadline = time.time() + float(timeout)
+    started = time.perf_counter()
     try:
         output = engine.run(data)
     except WorkflowFailed as exc:
-        failure = {"workflow": name, "status": "FAILED", "error": exc.error, "cause": exc.cause}
+        failure = {
+            "execution_id": execution_id,
+            "workflow": name,
+            "status": "TIMED_OUT" if exc.error == TIMEOUT_ERROR else "FAILED",
+            "error": exc.error,
+            "cause": exc.cause,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
         context.logger.error("workflow failed", extra=failure)
         if event.http is not None:
             return Response.json(failure, 500)
         raise
     body: Dict[str, Any] = {
+        "execution_id": execution_id,
         "workflow": name,
         "status": "SUCCEEDED",
         "output": output,
-        "duration_ms": round((time.time() - started) * 1000, 2),
+        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
     }
     return body

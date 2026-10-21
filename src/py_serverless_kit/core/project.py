@@ -102,11 +102,14 @@ class Project:
                 "memory": self.config.memory_of(fn),
                 "resource_name": self.provider.physical_name(self.config.service, self.config.provider.stage, name),
             }
-        workflows = {
-            name: {"orchestrator": orchestrator_name(name), "definition": definition_dict(wf)}
-            for name, wf in sorted(self.config.workflows.items())
-            if self.engines.get(name) == "embedded"
-        }
+        workflows: Dict[str, Any] = {}
+        for name, wf in sorted(self.config.workflows.items()):
+            if self.engines.get(name) != "embedded":
+                continue
+            workflows[name] = {"orchestrator": orchestrator_name(name), "definition": definition_dict(wf)}
+            if wf.timeout:
+                # Enforced by the embedded engine (the on-prem host has no function timeout above it).
+                workflows[name]["timeout"] = wf.timeout
         return {
             "service": self.config.service,
             "stage": self.config.provider.stage,

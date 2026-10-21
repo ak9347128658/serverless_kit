@@ -122,6 +122,24 @@ Example: `queue.max_concurrency`.
 
 Create `examples/NN-name/` with `pskit.yml`, handler code and a `README.md`. `tests/test_examples.py` picks it up automatically and validates and packages it.
 
+### Dashboard UI
+
+The dashboard page is built from [`dashboard-ui/`](../dashboard-ui) (Vite + React 18 + TypeScript). The build output is committed as `src/py_serverless_kit/dashboard/template.html`, a single file with JS and CSS inline. `dashboard/generator.py` fills its `{{TITLE}}` and `{{DATA}}` placeholders.
+
+- Never hand-edit `template.html`. Change `dashboard-ui/src/` and rebuild:
+
+  ```bash
+  cd dashboard-ui
+  npm ci
+  npm run build          # writes ../src/py_serverless_kit/dashboard/template.html (deterministic)
+  npm run dev            # Vite dev server; proxies /api to pskit dashboard --serve on 127.0.0.1:8765
+  ```
+
+- Commit `template.html` together with the source change. The `dashboard-ui` CI job rebuilds it and fails if `git diff` shows a difference.
+- Keep both placeholders verbatim and keep the page self-contained (no CDN, works from `file://`). Render user data as text only.
+- Node is only needed to change the UI. Installing or using pskit never needs it: the built page ships in the wheel, and `dashboard-ui/` isn't packaged.
+- The live API is `dashboard/server.py`. Its tests (`tests/test_dashboard_server.py`) mock `core.onprem_control` and `core.executions`.
+
 ## Verifying Terraform
 
 Unit tests check the *shape* of the generated JSON. Only Terraform itself can say whether the resources and arguments exist. For any provider change:

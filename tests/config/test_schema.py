@@ -77,3 +77,55 @@ def test_workflow_references_unknown_function():
                 "workflows": {"w": {"start_at": "A", "states": {"A": {"type": "task", "function": "zzz"}}}},
             }
         )
+
+
+# --------------------------------------------------------------------------- resources
+
+
+def _service(resources, events=None, functions=None):
+    return ServiceConfig.model_validate(
+        {
+            "service": "svc",
+            "provider": {"name": "aws"},
+            "resources": resources,
+            "functions": {"w": {"handler": "app.h.w", "events": events or []}, **(functions or {})},
+            "workflows": {},
+        }
+    )
+
+
+def test_resource_defaults_and_binding():
+    cfg = _service(
+        {"jobs": {"type": "queue"}, "db": {"type": "database", "external": True, "connection": {"port": 5432}}},
+        events=[{"queue": {"resource": "jobs"}}],
+    )
+    assert cfg.functions["w"].events_of("queue")[0].name == "jobs"
+    assert cfg.resources["db"].connection == {"port": "5432"}
+    env = cfg.binding_environment("w")
+    assert env["PSKIT_RESOURCES"] == "db,jobs"
+    assert env["PSKIT_RESOURCE_DB_PORT"] == "5432" and env["PSKIT_RESOURCE_JOBS_NAME"] == "jobs"
+
+
+def test_resource_native_name_from_arn_and_revalidation():
+    cfg = _service(
+        {"t": {"type": "topic", "external": True, "connection": {"arn": "arn:aws:sns:us-east-1:1:shared"}}},
+        events=[{"topic": {"resource": "t"}}],
+    )
+    ev = cfg.functions["w"].events_of("topic")[0]
+    assert (ev.name, ev.existing) == ("shared", True)
+    # A dumped config (name and resource both set) validates again.
+    again = ServiceConfig.model_validate(cfg.model_dump())
+    assert again.functions["w"].events_of("topic")[0].name == "shared"
+
+
+def test_generated_functions_get_only_listed_resources():
+    cfg = _service(
+        {"a": {"type": "cache", "external": True}},
+        functions={"flow-orchestrator": {"handler": "py_serverless_kit.runtime.workflow.orchestrate"}},
+    )
+    assert cfg.resources_for("w") and not cfg.resources_for("flow-orchestrator")
+
+
+def test_managed_database_rejected():
+    with pytest.raises(ValidationError, match="external: true"):
+        _service({"db": {"type": "database"}})

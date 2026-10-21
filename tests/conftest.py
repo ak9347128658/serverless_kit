@@ -86,6 +86,19 @@ def _reset_manifest():
     runtime_manifest.set_manifest(None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_onprem_globals(monkeypatch):
+    """Host.open() installs a process-wide broker/executor and sets env vars; undo that after each test."""
+    from py_serverless_kit.runtime import onprem_host, workflow
+
+    for key in ("PSKIT_ONPREM_ROOT", "PSKIT_MANIFEST"):
+        monkeypatch.setenv(key, "x")  # registers the current value (or absence) for restoration
+        monkeypatch.delenv(key)
+    yield
+    onprem_host.install_broker(None)
+    workflow.install_executor(None)
+
+
 @pytest.fixture
 def make_project(tmp_path: Path) -> Callable[..., Project]:
     """Create a project directory from YAML text and return a loaded :class:`Project`."""

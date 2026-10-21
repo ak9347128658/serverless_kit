@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..config.schema import FunctionConfig, ServiceConfig
+from ..config.schema import FunctionConfig, QueueEvent, ResourceConfig, ServiceConfig
 from ..runtime.adapters.base import envelope
 from ..workflows import definition_dict
 from ..workflows.asl import compile_asl
@@ -17,6 +17,23 @@ from .terraform_doc import TerraformDoc, escape, ref, tf_id
 LAMBDA = "aws_lambda_function"
 BASIC_EXEC = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 SQS_EXEC = "arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole"
+RESOURCE_ACTIONS = {
+    "storage": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+    "queue": [
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl",
+    ],
+    "topic": ["sns:Publish"],
+}
+
+
+def tf_ref(*parts: str) -> str:
+    """A Terraform reference in the ``${tf:...}`` form that :func:`escape` keeps live."""
+    return "${tf:" + ".".join(parts) + "}"
 
 
 def _assume(service: str) -> str:
@@ -45,6 +62,7 @@ class AwsProvider(Provider):
     runtimes = {f"python3.{v}": f"python3.{v}" for v in (9, 10, 11, 12, 13)}
     vendor_dependencies = True
     max_timeout = 900
+    standalone_resources = True
     notes = "HTTP via API Gateway HTTP API; schedules via EventBridge Scheduler; workflows via Step Functions."
 
     # ------------------------------------------------------------------ bundle
@@ -91,7 +109,17 @@ class AwsProvider(Provider):
     def render_resources(self, doc: TerraformDoc, ctx: RenderContext) -> None:
         cfg = ctx.config
         has = {e.type for fn in cfg.functions.values() for e in fn.events}
-        shared_role = self._role(doc, ctx, "lambda", cfg.provider.iam.statements, "queue" in has, cfg.provider.iam.role)
+        self._resources(doc, ctx)
+        shared_users = [n for n, f in ctx.function_items() if not (f.iam.statements or f.iam.role)]
+        shared_role = self._role(
+            doc,
+            ctx,
+            "lambda",
+            cfg.provider.iam.statements,
+            "queue" in has,
+            cfg.provider.iam.role,
+            self._resource_statements(ctx, shared_users),
+        )
         code = self._code_source(doc, ctx)
 
         fn_out: Dict[str, Dict[str, Any]] = {}
@@ -109,6 +137,7 @@ class AwsProvider(Provider):
                     cfg.provider.iam.statements + fn.iam.statements,
                     bool(fn.events_of("queue")),
                     fn.iam.role,
+                    self._resource_statements(ctx, [name]),
                 )
             lam = self._function(doc, ctx, name, fn, role, code)
             arns[name] = ref(lam, "arn")
@@ -155,9 +184,14 @@ class AwsProvider(Provider):
         statements: List[Any],
         sqs: bool,
         existing: Optional[str],
+        resource_statements: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Return a Terraform expression for the role ARN."""
         if existing:
+            if resource_statements:
+                doc.warnings.append(
+                    f"AWS: role {existing} is not managed by pskit; grant it access to the bound resources yourself"
+                )
             return existing
         role = doc.resource(
             "aws_iam_role",
@@ -184,6 +218,12 @@ class AwsProvider(Provider):
                         )
                     ),
                 },
+            )
+        if resource_statements:
+            doc.resource(
+                "aws_iam_role_policy",
+                f"{label}-resources",
+                {"name": "pskit-resources", "role": ref(role, "id"), "policy": _policy(resource_statements)},
             )
         return ref(role, "arn")
 
@@ -446,23 +486,7 @@ class AwsProvider(Provider):
         self, doc: TerraformDoc, ctx: RenderContext, bucket: str, subs: List[Tuple[str, Any]], arns: Dict[str, str]
     ) -> None:
         label = f"b-{bucket}"
-        if any(not ev.existing for _, ev in subs):
-            if not doc.has_resource("aws_s3_bucket", label):
-                b = doc.resource("aws_s3_bucket", label, {"bucket": bucket, "tags": ctx.tags()})
-                doc.resource(
-                    "aws_s3_bucket_public_access_block",
-                    label,
-                    {
-                        "bucket": ref(b, "id"),
-                        "block_public_acls": True,
-                        "block_public_policy": True,
-                        "ignore_public_acls": True,
-                        "restrict_public_buckets": True,
-                    },
-                )
-            bucket_ref = f"aws_s3_bucket.{tf_id(label)}"
-        else:
-            bucket_ref = doc.data("aws_s3_bucket", label, {"bucket": bucket})
+        bucket_ref = self._bucket(doc, ctx, bucket, existing=all(ev.existing for _, ev in subs))
         perms = []
         configs = []
         for fname, ev in subs:
@@ -491,14 +515,115 @@ class AwsProvider(Provider):
             {"bucket": ref(bucket_ref, "id"), "lambda_function": configs, "depends_on": perms},
         )
 
-    def _topic(self, doc: TerraformDoc, ctx: RenderContext, name: str, lam: str, ev: Any) -> None:
-        label = f"t-{ev.name}"
-        if ev.existing:
-            topic = doc.data("aws_sns_topic", label, {"name": ev.name})
+    def _bucket(self, doc: TerraformDoc, ctx: RenderContext, bucket: str, existing: bool) -> str:
+        label = f"b-{bucket}"
+        if existing:
+            return doc.data("aws_s3_bucket", label, {"bucket": bucket})
+        if not doc.has_resource("aws_s3_bucket", label):
+            b = doc.resource("aws_s3_bucket", label, {"bucket": bucket, "tags": ctx.tags()})
+            doc.resource(
+                "aws_s3_bucket_public_access_block",
+                label,
+                {
+                    "bucket": ref(b, "id"),
+                    "block_public_acls": True,
+                    "block_public_policy": True,
+                    "ignore_public_acls": True,
+                    "restrict_public_buckets": True,
+                },
+            )
+        return f"aws_s3_bucket.{tf_id(label)}"
+
+    def _topic_ref(self, doc: TerraformDoc, ctx: RenderContext, name: str, existing: bool) -> str:
+        label = f"t-{name}"
+        if existing:
+            return doc.data("aws_sns_topic", label, {"name": name})
+        if not doc.has_resource("aws_sns_topic", label):
+            doc.resource("aws_sns_topic", label, {"name": name, "tags": ctx.tags()})
+        return f"aws_sns_topic.{tf_id(label)}"
+
+    # ------------------------------------------------------------------ resources
+    def _queue_event_for(self, ctx: RenderContext, key: str, res: ResourceConfig) -> QueueEvent:
+        """The queue settings of resource ``key``: from the first event using it, else ``options``."""
+        for _name, fn in ctx.function_items():
+            for ev in fn.events_of("queue"):
+                if ev.resource == key:
+                    return ev
+        opts = res.options
+        return QueueEvent(
+            name=res.native_name(key),
+            existing=res.external,
+            fifo=bool(opts.get("fifo", False)),
+            visibility_timeout=opts.get("visibility_timeout"),
+            dead_letter=opts.get("dead_letter"),
+            max_receive=int(opts.get("max_receive", 5)),
+        )
+
+    def _resource_target(self, ctx: RenderContext, key: str, res: ResourceConfig) -> Optional[str]:
+        """Terraform address (resource or data source) of a bound storage/queue/topic, or None."""
+        if res.external and res.conn("arn"):
+            return None
+        name = res.native_name(key)
+        if res.type == "storage":
+            label, kind = f"b-{name}", "aws_s3_bucket"
+        elif res.type == "queue":
+            ev = self._queue_event_for(ctx, key, res)
+            qname = ev.name + (".fifo" if ev.fifo and not ev.name.endswith(".fifo") else "")
+            label, kind = f"q-{qname}", "aws_sqs_queue"
+        elif res.type == "topic":
+            label, kind = f"t-{name}", "aws_sns_topic"
         else:
-            if not doc.has_resource("aws_sns_topic", label):
-                doc.resource("aws_sns_topic", label, {"name": ev.name, "tags": ctx.tags()})
-            topic = f"aws_sns_topic.{tf_id(label)}"
+            return None
+        return ("data." if res.external else "") + f"{kind}.{tf_id(label)}"
+
+    def _resources(self, doc: TerraformDoc, ctx: RenderContext) -> None:
+        """Create managed resources no event creates, and look up external ones bound by name."""
+        cfg = ctx.config
+        standalone = {key for key, _ in self.standalone(cfg)}
+        for key, res in sorted(cfg.resources.items()):
+            if res.type not in RESOURCE_ACTIONS:
+                continue
+            if not res.external and key not in standalone:
+                continue  # the event that uses it creates it
+            if res.external and (res.conn("arn") or not cfg.resource_functions(key)):
+                continue
+            name = res.native_name(key)
+            if res.type == "storage":
+                self._bucket(doc, ctx, name, res.external)
+            elif res.type == "queue":
+                self._queue_ref(doc, ctx, self._queue_event_for(ctx, key, res), cfg.provider.timeout)
+            else:
+                self._topic_ref(doc, ctx, name, res.external)
+
+    def resource_refs(self, ctx: RenderContext, key: str, res: ResourceConfig) -> Dict[str, str]:
+        target = self._resource_target(ctx, key, res)
+        if target is None:
+            return {}
+        addr = target.split(".")
+        refs = {"ARN": tf_ref(*addr, "arn")}
+        if res.type == "queue":
+            refs["URL"] = tf_ref(*addr, "url")
+        return refs
+
+    def _resource_statements(self, ctx: RenderContext, functions: List[str]) -> List[Dict[str, Any]]:
+        arns: Dict[str, List[str]] = {}
+        for fname in functions:
+            for key, res in ctx.config.resources_for(fname):
+                if res.type not in RESOURCE_ACTIONS:
+                    continue
+                target = self._resource_target(ctx, key, res)
+                arn = ref(target, "arn") if target is not None else escape(res.conn("arn"))
+                resources = [arn, arn + "/*"] if res.type == "storage" else [arn]
+                bucket = arns.setdefault(res.type, [])
+                bucket.extend(r for r in resources if r not in bucket)
+        return [
+            {"Effect": "Allow", "Action": RESOURCE_ACTIONS[kind], "Resource": arns[kind]}
+            for kind in ("storage", "queue", "topic")
+            if arns.get(kind)
+        ]
+
+    def _topic(self, doc: TerraformDoc, ctx: RenderContext, name: str, lam: str, ev: Any) -> None:
+        topic = self._topic_ref(doc, ctx, ev.name, ev.existing)
         sub: Dict[str, Any] = {"topic_arn": ref(topic, "arn"), "protocol": "lambda", "endpoint": ref(lam, "arn")}
         if ev.filter:
             sub["filter_policy"] = escape(json.dumps(ev.filter))

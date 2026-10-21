@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -208,11 +209,10 @@ def test_http_invoke_schedule_queue_storage_topic_workflow(make_project, tmp_pat
         )
         assert all_path.read_text(encoding="utf-8")
 
-        status, workflow = _json("POST", base + "/__pskit/workflows/ping", {"order": 1})
+        status, workflow = _json("POST", base + "/__pskit/workflows/ping?wait=true", {"order": 1})
         assert status == 200
-        body = workflow if "output" in workflow else workflow
-        assert body["status"] == "SUCCEEDED"
-        assert body["output"]["seen"] is True
+        assert workflow["status"] == "SUCCEEDED" and workflow["execution_id"]
+        assert workflow["output"]["seen"] is True
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -244,3 +244,222 @@ def test_health_url_uses_loopback_when_the_process_binds_every_interface():
     assert health_url({"host": "::", "port": 8080}) == "http://127.0.0.1:8080/__pskit/health"
     assert health_url({"host": "10.0.1.12", "port": 9090}) == "http://10.0.1.12:9090/__pskit/health"
     assert health_url({"host": "::1", "port": 9090}) == "http://[::1]:9090/__pskit/health"
+
+
+SLOW_HANDLERS = HANDLERS + """
+
+def slow(event: Event, ctx: Context):
+    import time
+    print("slow step", event.data)
+    ctx.logger.info("slow working", extra={"n": 1})
+    time.sleep(float((event.data or {}).get("sleep", 0)))
+    return dict(event.data or {}, slow=True)
+
+
+def boom(event: Event, ctx: Context):
+    raise RuntimeError("kaboom")
+"""
+
+WORKFLOW_CONFIG = (
+    CONFIG.replace(
+        "  step:\n    handler: app.handlers.step\n",
+        "  step:\n    handler: app.handlers.step\n  slow:\n    handler: app.handlers.slow\n"
+        "  boom:\n    handler: app.handlers.boom\n",
+    )
+    + """
+  slowflow:
+    start_at: Slow
+    states:
+      Slow: {{type: task, function: slow, next: Pause}}
+      Pause: {{type: wait, seconds: 30, next: Done}}
+      Done: {{type: pass, end: true}}
+  failing:
+    start_at: Boom
+    states:
+      Boom: {{type: task, function: boom, end: true}}
+"""
+)
+
+
+def _workflow_host(make_project, tmp_path: Path):
+    text = WORKFLOW_CONFIG.format(
+        data=(tmp_path / "data").as_posix(),
+        buckets=(tmp_path / "buckets").as_posix(),
+        out=(tmp_path / "out.txt").as_posix(),
+        all_path=(tmp_path / "all.txt").as_posix(),
+    )
+    project = make_project(text, files={"app/handlers.py": SLOW_HANDLERS})
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    root = project.work_dir / "onprem_app"
+    activate_layout(root)
+    host = Host(root)
+    host.open()
+    return host, root
+
+
+def _wait_for(fn, timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = fn()
+        if value:
+            return value
+        time.sleep(0.05)
+    raise AssertionError("condition not met in time")
+
+
+def _execution(base, execution_id):
+    return _json("GET", base + f"/__pskit/executions/{execution_id}")[1]
+
+
+def _finished(base, execution_id):
+    return _wait_for(lambda: (lambda r: r if r["status"] != "RUNNING" else None)(_execution(base, execution_id)))
+
+
+def _expect_http_error(code, method, url, body=None):
+    try:
+        _json(method, url, body)
+    except HTTPError as exc:
+        assert exc.code == code
+        return
+    raise AssertionError(f"expected HTTP {code}")
+
+
+def test_workflow_start_is_async_and_tracked(make_project, tmp_path):
+    host, _root = _workflow_host(make_project, tmp_path)
+    httpd, base = _server(host)
+    try:
+        status, started = _json("POST", base + "/__pskit/workflows/ping", {"order": 7})
+        assert status == 202 and started["status"] == "RUNNING"
+        execution_id = started["execution_id"]
+        assert started["status_url"] == f"/__pskit/executions/{execution_id}"
+        record = _finished(base, execution_id)
+        assert record["status"] == "SUCCEEDED" and record["output"] == {"order": 7, "seen": True}
+        assert record["input"] == {"order": 7}
+        assert [h["event"] for h in record["history"]] == ["enter", "exit"]
+
+        # The orchestrator's own user route is tracked the same way.
+        status, started2 = _json("POST", base + "/workflows/ping", {"order": 8})
+        assert status == 202
+        assert _finished(base, started2["execution_id"])["status"] == "SUCCEEDED"
+
+        _status, failed = _json("POST", base + "/__pskit/workflows/failing", {})
+        record = _finished(base, failed["execution_id"])
+        assert record["status"] == "FAILED" and record["error"] == "RuntimeError" and "kaboom" in record["cause"]
+
+        status, listing = _json("GET", base + "/__pskit/executions?workflow=ping&limit=1")
+        assert status == 200 and listing["total"] == 2 and len(listing["items"]) == 1
+        assert listing["items"][0]["execution_id"] == started2["execution_id"]  # newest first
+        _status, page2 = _json("GET", base + "/__pskit/executions?workflow=ping&limit=1&offset=1")
+        assert page2["items"][0]["execution_id"] == execution_id
+        _status, only_failed = _json("GET", base + "/__pskit/executions?status=failed")
+        assert [i["workflow"] for i in only_failed["items"]] == ["failing"]
+        _expect_http_error(404, "GET", base + "/__pskit/executions/not-an-id")
+        _expect_http_error(404, "POST", base + "/__pskit/workflows/nope", {})
+        _expect_http_error(400, "GET", base + "/__pskit/executions?limit=x")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        host.executor.shutdown()
+
+
+def test_workflow_cancel_and_restart_recovery(make_project, tmp_path):
+    host, root = _workflow_host(make_project, tmp_path)
+    httpd, base = _server(host)
+    try:
+        _status, started = _json("POST", base + "/__pskit/workflows/slowflow", {"sleep": 0})
+        execution_id = started["execution_id"]
+        _wait_for(lambda: _execution(base, execution_id)["current_state"] == "Pause")
+        status, record = _json("POST", base + f"/__pskit/executions/{execution_id}/cancel")
+        assert status == 200 and record["cancel_requested"] is True
+        assert _finished(base, execution_id)["status"] == "CANCELLED"
+
+        _status, other = _json("POST", base + "/__pskit/workflows/slowflow", {"sleep": 0})
+        _wait_for(lambda: _execution(base, other["execution_id"])["current_state"] == "Pause")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    host.executor.shutdown()
+    path = tmp_path / "data" / "executions" / f"{other['execution_id']}.json"
+    _wait_for(lambda: json.loads(path.read_text("utf-8"))["status"] != "RUNNING")
+    # Simulate a crash: the record on disk still says RUNNING.
+    stale = json.loads(path.read_text("utf-8"))
+    stale["status"] = "RUNNING"
+    path.write_text(json.dumps(stale), "utf-8")
+    again = Host(root)
+    again.open()
+    try:
+        record = again.executor.get(other["execution_id"])
+        assert record["status"] == "ABORTED" and record["cause"] == "host restarted"
+        assert any("marked ABORTED" in note for note in again.notes)
+    finally:
+        again.executor.shutdown()
+        again.logs.close()
+
+
+def test_logs_and_stats(make_project, tmp_path):
+    host, root = _workflow_host(make_project, tmp_path)
+    httpd, base = _server(host)
+    try:
+        _json("GET", base + "/hello?name=Ada")
+        _json("POST", base + "/__pskit/workflows/ping?wait=1", {"x": 1})
+        _expect_http_error(500, "POST", base + "/__pskit/invoke/boom", {})
+
+        status, logs = _json("GET", base + "/__pskit/logs")
+        assert status == 200
+        invocations = [e for e in logs["entries"] if e["source"] == "invocation"]
+        assert any(e["function"] == "hello" and e["fields"]["status"] == 200 for e in invocations)
+        assert any(e["function"] == "step" for e in invocations)
+        boom = [e for e in invocations if e["function"] == "boom"]
+        assert boom and boom[0]["level"] == "ERROR" and "kaboom" in boom[0]["message"]
+
+        last = logs["next"]
+        _status, errors = _json("GET", base + "/__pskit/logs?level=error")
+        assert errors["entries"] and all(e["level"] in ("ERROR", "CRITICAL") for e in errors["entries"])
+        _status, only_hello = _json("GET", base + "/__pskit/logs?function=hello&source=invocation")
+        assert {e["function"] for e in only_hello["entries"]} == {"hello"}
+        _status, tail = _json("GET", base + f"/__pskit/logs?since={last}")
+        assert tail["entries"] == [] and tail["next"] == last
+        _json("GET", base + "/hello")
+        _status, tail = _json("GET", base + f"/__pskit/logs?since={last}&source=invocation")
+        assert [e["function"] for e in tail["entries"]] == ["hello"] and tail["next"] > last
+        first = tail["entries"][0]["seq"]
+        _status, older = _json("GET", base + f"/__pskit/logs?before={first}&limit=2")
+        assert len(older["entries"]) == 2 and older["entries"][-1]["seq"] < first
+        _expect_http_error(400, "GET", base + "/__pskit/logs?limit=abc")
+
+        _status, stats = _json("GET", base + "/__pskit/stats")
+        assert stats["functions"]["hello"]["invocations"] == 2
+        assert stats["functions"]["boom"]["errors"] == 1 and "kaboom" in stats["functions"]["boom"]["last_error"]
+        assert stats["functions"]["tick"]["invocations"] == 0
+        assert stats["queues"] == {"jobs": 0, "jobs-dlq": 0}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        host.executor.shutdown()
+        host.logs.close()
+    # Entries survive a restart (JSON-lines file) and seq keeps increasing.
+    again = Host(root)
+    try:
+        assert again.logs.last_seq >= last
+        assert again.logs.query(function="hello")["entries"]
+    finally:
+        again.logs.close()
+
+
+def test_captured_print_and_logging_are_tagged(make_project, tmp_path):
+    from py_serverless_kit import Event
+    from py_serverless_kit.runtime import hostlog
+
+    host, _root = _workflow_host(make_project, tmp_path)
+    hostlog.install(host.logs, capture_streams=True)
+    try:
+        host.invoke("slow", Event(type="invoke", data={"sleep": 0}))
+    finally:
+        hostlog.uninstall()
+        host.executor.shutdown()
+        host.logs.close()
+    entries = host.logs.query(function="slow")["entries"]
+    printed = [e for e in entries if e["source"] == "stdout"]
+    logged = [e for e in entries if e["source"] == "function" and e["message"] == "slow working"]
+    assert printed and printed[0]["message"].startswith("slow step") and printed[0]["request_id"]
+    assert logged and logged[0]["fields"]["n"] == 1

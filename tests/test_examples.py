@@ -67,6 +67,10 @@ HTTP_CASES = [
     ("15-ci-cd-deploy", "health", "GET", "/health", None, 200),
     ("16-on-premises", "hello", "GET", "/hello?name=Ada", None, 200),
     ("17-on-premises-remote", "hello", "GET", "/hello?name=Ada", None, 200),
+    ("18-resources", "api", "GET", "/bindings", None, 200),
+    ("19-custom-drivers", "enqueue", "POST", "/jobs", {"task": "resize"}, 202),
+    ("19-custom-drivers", "enqueue", "POST", "/jobs", {"nope": 1}, 400),
+    ("20-onprem-external-clouds", "status", "GET", "/status", None, 200),
 ]
 
 WORKFLOW_CASES = [
@@ -103,7 +107,7 @@ def _errors(project: Project) -> list:
 
 def test_every_example_is_discovered():
     names = {_id(p) for p in PROJECT_DIRS}
-    assert len(names) == 17, names
+    assert len(names) == 20, names
 
 
 @pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)
@@ -203,3 +207,70 @@ def test_stage_overrides(tmp_path):
     assert prod.provider.environment["TABLE_NAME"] == "shop-config-prod-orders"
     assert prod.functions["config"].concurrency == 100
     assert prod.provider.state.backend == "s3"
+
+
+def test_custom_drivers_example_runs_in_the_onprem_host(tmp_path):
+    """examples/19: SqliteQueue + FolderStorage feed handlers; failures retry, then dead-letter."""
+    import time
+
+    from py_serverless_kit import Event
+    from py_serverless_kit.runtime import hostlog
+    from py_serverless_kit.runtime.onprem_host import Host, activate_layout
+
+    root = _copy(EXAMPLES / "19-custom-drivers", tmp_path)
+    project = Project.load(cwd=root)
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    app_root = project.work_dir / "onprem_app"
+    activate_layout(app_root)
+    host = Host(app_root)
+    host.open()
+    hostlog.install(host.logs, capture_streams=False)  # what serve_forever() does
+    try:
+        broker = host.broker
+        assert type(broker.queue_driver("jobs").inner).__name__ == "SqliteQueue"
+        assert (app_root / "data" / "queues.sqlite3").is_file()  # relative to the host root
+
+        resp = host.invoke("enqueue", Event(type="http", http=_http("POST", "/jobs", {"task": "resize"})))
+        assert resp.status == 202 and json.loads(resp.render()[2])["queued"]
+        broker.submit_queue("jobs", {"task": "explode"})
+        assert broker.queue_depth("jobs") == 2
+
+        now = time.time()
+        for attempt in range(3):  # max_receive: 3
+            host.pump_queues(now + attempt)
+        assert broker.queue_depth("jobs") == 0
+        assert broker.queue_depth("jobs-dlq") == 1
+        host.pump_queues(now + 10)  # dead-letters consumes the DLQ
+        assert broker.queue_depth("jobs-dlq") == 0
+        stats = host.stats()["functions"]
+        assert stats["worker"]["invocations"] == 3 and stats["dead-letters"]["invocations"] == 1
+
+        inbox = app_root / "data" / "inbox"
+        broker.put_object("inbox", "reports/a.csv", b"x,y")
+        assert (inbox / "reports" / "a.csv").read_bytes() == b"x,y"
+        host.pump_storage(time.time())
+        (inbox / "reports" / "a.csv").unlink()
+        host.pump_storage(time.time())
+        actions = [
+            e["fields"].get("action")
+            for e in host.logs.query(function="on-file", source="function")["entries"]
+            if e["message"] == "file event"
+        ]
+        assert actions == ["created", "deleted"]
+        dead = [e for e in host.logs.query(function="dead-letters")["entries"] if e["message"] == "dead letter"]
+        assert dead and "explode" in dead[0]["fields"]["body"]
+    finally:
+        hostlog.uninstall()
+        host.executor.shutdown()
+        host.logs.close()
+
+
+def _http(method, path, body):
+    from py_serverless_kit import Headers, HttpRequest
+
+    return HttpRequest(
+        method=method,
+        path=path,
+        headers=Headers({"content-type": "application/json"}),
+        body=json.dumps(body).encode(),
+    )

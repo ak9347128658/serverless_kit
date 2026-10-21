@@ -371,6 +371,11 @@ provider:
     data_dir: .pskit/onprem-data             # default .pskit/onprem-data/<service>-<stage> (local); <path>/data on SSH
     poll_seconds: 0.5
     admin_token: "${env:PSKIT_ADMIN_TOKEN, }"  # header x-pskit-token on /__pskit/* except health
+    execution_retention: 500   # finished workflow executions kept under <data_dir>/executions
+    workflow_workers: 8        # workflow runs executing at once; further starts wait for a worker
+    log_buffer: 5000           # log entries kept in memory for /__pskit/logs (min 100)
+    log_level: INFO            # minimum level captured from `logging`
+    capture_output: true       # also record print() / stdout / stderr lines
     services:
       schedule: builtin                        # the only schedule implementation
       queue: builtin                           # or {use: directory, path: /var/pskit/queues}
@@ -404,9 +409,54 @@ Publish from outside the process:
 | `POST /__pskit/topics/<name>` | publish, then deliver. `{"message", "attributes"}` sets attributes when those are the only keys |
 | `PUT` / `DELETE /__pskit/storage/<bucket>/<key>` | write or remove an object, then deliver |
 | `POST /__pskit/invoke/<function>` | in-process invoke |
-| `POST /__pskit/workflows/<name>` | run the embedded workflow |
+| `POST /__pskit/workflows/<name>` | start the embedded workflow: `202 {"execution_id", ...}`. `?wait=true` returns the result |
+| `GET /__pskit/executions`, `GET /__pskit/executions/<id>`, `POST /__pskit/executions/<id>/cancel` | list, inspect and cancel runs ([workflow executions](workflow-executions.md)) |
+| `GET /__pskit/logs` | captured logs ([below](#logs-and-stats)) |
+| `GET /__pskit/stats` | invocation counters per function and queue depths |
 
 From a handler in that process (`PSKIT_ONPREM_ROOT` is set), call `submit_queue`, `submit_topic`, `put_object` or `delete_object` in `py_serverless_kit.runtime.onprem_host`.
+
+A queue, bucket or topic can live in a service you already run: declare it under [`resources:`](resources.md) with `options.driver`. Queues take `directory` or `redis`, storage takes `directory` or `s3` (MinIO and other S3-compatible stores), and topics take `directory`. `pskit dashboard --serve` shows the host's health, stats, logs and workflow executions.
+
+### Logs and stats
+
+The host records everything into one log:
+
+- `logging` records: `ctx.logger` and any `logging.getLogger(...)`, at `INFO` and above by default (set `PSKIT_LOG_LEVEL` in the environment that starts the host process to change it);
+- `print()` / `sys.stdout` lines (source `stdout`, level `INFO`) and `sys.stderr` lines (source `stderr`, level `WARNING`);
+- one `invocation` entry per handler call: function, event type, duration, and for HTTP the method, path and status. Failures (an exception, or HTTP status ≥ 500) are `ERROR`;
+- host notes (source `host`): failed schedules, unreachable Redis/S3, runs aborted by a restart, the listen address.
+
+Entries written during an invocation carry its `function` and `request_id`. The newest 5000 (`options.log_buffer`) are kept in memory and every entry is appended to `<data_dir>/logs/host.jsonl`. That file rotates at 10 MiB, keeping three old files, and the history is reloaded on restart. Messages longer than 16 KiB are truncated.
+
+```bash
+pskit logs                          # newest 100 entries
+pskit logs -f --function worker     # follow one function
+pskit logs --level error --source invocation -n 500
+pskit logs -q timeout --json        # one JSON object per line
+```
+
+`GET /__pskit/logs` (admin token when set):
+
+| Parameter | Meaning |
+|---|---|
+| `since=N` | entries after `seq` N, oldest first: poll again with the returned `next` for a live tail. `0` or absent: the newest `limit` entries |
+| `before=N` | the `limit` entries just before `seq` N (scroll back) |
+| `limit` | default 200, max 2000 |
+| `level` | minimum level: `DEBUG`, `INFO`, `WARNING` (`WARN`), `ERROR`, `CRITICAL` |
+| `function`, `source` | exact match. Source is `function`, `host`, `stdout`, `stderr` or `invocation` |
+| `q` | case-insensitive text search in the message |
+
+```json
+{"entries": [{"seq": 42, "ts": "2026-10-21T06:30:21.557+00:00", "level": "INFO", "source": "invocation",
+              "function": "hello", "request_id": "f51c91a1...", "message": "GET /hello -> 200 (8.89 ms)",
+              "fields": {"event_type": "http", "method": "GET", "path": "/hello", "status": 200, "duration_ms": 8.89}}],
+ "next": 42, "oldest": 1, "more": false}
+```
+
+`next` advances past filtered-out entries, so polling with filters doesn't stall. `gap: true` (on `since` queries) means older entries were dropped from memory before you read them. `more` (on tail and `before` queries) means older matching entries exist.
+
+`GET /__pskit/stats` returns `{"started_at", "uptime_s", "functions": {name: {"invocations", "errors", "avg_duration_ms", "last_duration_ms", "last_at", "last_error"}}, "queues": {name: depth}}`. Counters reset when the host restarts.
 
 **Deploy targets** (`options.deploy`)
 

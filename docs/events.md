@@ -198,6 +198,24 @@ Example: [`examples/06-pubsub-topic`](../examples/06-pubsub-topic).
 
 ---
 
+## Events backed by a resource
+
+`queue`, `storage` and `topic` events can point at a [`resources:`](resources.md) entry instead of naming the queue, bucket or topic:
+
+```yaml
+resources:
+  jobs: {type: queue}
+  uploads: {type: storage, external: true, name: legacy-uploads}
+functions:
+  worker:
+    handler: app.jobs.work
+    events:
+      - queue:   {resource: jobs, batch_size: 5}
+      - storage: {resource: uploads, prefix: in/}
+```
+
+The event uses the resource's native name and `existing: <external>`. The functions also get the resource's connection details. On premises, a resource can move the queue to Redis or the bucket to an S3-compatible store.
+
 ## Provider-specific behaviour worth knowing
 
 ### GCP: multi-trigger functions are split automatically

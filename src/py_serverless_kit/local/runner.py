@@ -86,6 +86,8 @@ class LocalRunner:
         }
         env.update(cfg.provider.environment)
         if function and function in cfg.functions:
+            env.update(cfg.binding_environment(function))
+            env.update(cfg.provider.environment)
             env.update(cfg.functions[function].environment)
             env["PSKIT_FUNCTION"] = function
             env["PSKIT_HANDLER"] = cfg.functions[function].handler

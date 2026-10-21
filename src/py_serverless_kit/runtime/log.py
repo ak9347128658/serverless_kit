@@ -41,7 +41,9 @@ def _configure() -> None:
     logger = logging.getLogger("pskit")
     level = os.environ.get("PSKIT_LOG_LEVEL") or os.environ.get("LOG_LEVEL") or "INFO"
     logger.setLevel(level.upper() if isinstance(level, str) else level)
-    handler = logging.StreamHandler(sys.stdout)
+    # The on-prem host tees stdout into its log buffer and records log calls itself;
+    # write to the real stream so records are not captured twice.
+    handler = logging.StreamHandler(getattr(sys.stdout, "pskit_passthrough", sys.stdout))
     if os.environ.get("PSKIT_LOG_FORMAT", "json").lower() == "text":
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     else:

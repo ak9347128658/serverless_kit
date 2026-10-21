@@ -35,14 +35,16 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..config.schema import ServiceConfig
+from ..config.schema import ResourceConfig, ServiceConfig
 from ..runtime.cron import CronError, next_cron, resolve_zone
+from ..runtime.drivers import S3_PRESETS
 from .base import HTTP, QUEUE, SCHEDULE, STORAGE, TOPIC, Issue, Provider, RenderContext
 from .onprem_remote import dockerfile_text, launcher_text, systemd_unit_text
 from .onprem_spec import (
@@ -57,6 +59,25 @@ from .terraform_doc import TerraformDoc
 
 APP_DIR = "onprem_app"
 _SERVICE_KINDS = ("schedule", "queue", "storage", "topic", "workflow")
+# Host tuning passed straight into pskit_host.json: (kind, minimum).
+_TUNING = {
+    "execution_retention": ("int", 1),  # finished workflow executions kept on disk (default 500)
+    "workflow_workers": ("int", 1),  # workflow runs executing at once (default 8)
+    "log_buffer": ("int", 100),  # log entries kept in memory for /__pskit/logs (default 5000)
+    "log_level": ("level", 0),  # minimum level captured from `logging` (default INFO)
+    "capture_output": ("bool", 0),  # record print()/stdout/stderr lines (default true)
+}
+# Backends a `resources:` entry can select with options.driver (or connection.driver).
+DRIVERS = {
+    "queue": ("builtin", "directory", "redis", "sqs", "azure_queue", "pubsub", "mns", "cloudflare_queue", "custom"),
+    "storage": ("builtin", "directory", "s3", "azure_blob", "gcs", "custom") + S3_PRESETS,
+    "topic": ("builtin", "directory"),
+}
+_CLASS_RE = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
+_S3_KEYS = ("region", "endpoint", "prefix", "namespace", "account_id", "signing_region")
+_AWS_KEYS = ("access_key", "secret_key", "session_token")
+_AZURE_KEYS = ("account", "account_key", "sas_token", "connection_string", "endpoint")
+_GCP_KEYS = ("access_token", "token_command", "endpoint", "emulator", "project")
 _FOREIGN_PREFIXES = (
     "aws_",
     "google_",
@@ -179,6 +200,7 @@ class OnPremProvider(Provider):
     extra_requirements = ["tzdata"]
     max_timeout = 3600
     warn_on_embedded_workflow = False
+    standalone_resources = True
     notes = (
         "Runs a long-lived Python process. Default `options.deploy.method` is `local` "
         "(this machine). `ssh` and `scp` pack one archive, copy it with OpenSSH, and "
@@ -232,6 +254,19 @@ class OnPremProvider(Provider):
         issues: List[Issue] = []
         options = config.provider.options
         known = {"host", "port", "advertise", "data_dir", "services", "poll_seconds", "admin_token", "deploy"}
+        known |= set(_TUNING)
+        for key, (kind, low) in _TUNING.items():
+            if key not in options:
+                continue
+            value = options[key]
+            if kind == "int" and (isinstance(value, bool) or not isinstance(value, int) or value < low):
+                issues.append(Issue("error", f"options.{key} must be an integer >= {low}", f"provider.options.{key}"))
+            if kind == "bool" and not isinstance(value, bool):
+                issues.append(Issue("error", f"options.{key} must be true or false", f"provider.options.{key}"))
+            if kind == "level" and str(value).upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+                issues.append(
+                    Issue("error", f"options.{key} must be DEBUG, INFO, WARNING or ERROR", f"provider.options.{key}")
+                )
         for key in options:
             if key not in known:
                 issues.append(Issue("warning", f"unknown option {key!r} is ignored", f"provider.options.{key}"))
@@ -322,6 +357,15 @@ class OnPremProvider(Provider):
                 self._services(config, Path("."))
             except ValueError as exc:
                 issues.append(Issue("error", str(exc), "provider.options.services"))
+            for key, res in sorted(config.resources.items()):
+                try:
+                    self._driver(key, res, Path("."), spec)
+                except ValueError as exc:
+                    issues.append(Issue("error", str(exc), f"resources.{key}"))
+                if res.type in DRIVERS:
+                    bad_name = _safe_name(res.native_name(key), res.type)
+                    if bad_name:
+                        issues.append(Issue("error", bad_name, f"resources.{key}.name"))
         for name, fn in config.functions.items():
             for ev in fn.events_of("http"):
                 if ev.auth != "none":
@@ -472,6 +516,76 @@ class OnPremProvider(Provider):
             target = root / target
         return str(target)
 
+    def _driver(self, key: str, res: ResourceConfig, root: Path, spec: Any) -> Optional[Dict[str, Any]]:
+        """Backend the host uses for resource ``key`` (None for database/cache/custom)."""
+        allowed = DRIVERS.get(res.type)
+        raw = res.options.get("driver") or res.conn("driver") or "builtin"
+        if allowed is None:
+            if "driver" in res.options:
+                raise ValueError(f"options.driver is not used for {res.type} resources")
+            return None
+        params: Dict[str, Any] = {}
+        if isinstance(raw, dict):
+            params = dict(raw)
+            raw = params.pop("use", None) or "builtin"
+        use = str(raw).strip().lower()
+        if use not in allowed:
+            raise ValueError(f"on-premises {res.type} driver must be one of {', '.join(allowed)}; got {use!r}")
+
+        def get(name: str, default: Any = "") -> Any:
+            for source in (params, res.options):
+                if source.get(name) not in (None, ""):
+                    return source[name]
+            return res.conn(name) or default
+
+        native = res.native_name(key)
+        if use == "builtin":
+            return {"use": "builtin"}
+        if use == "directory":
+            path = get("path")
+            if not path:
+                raise ValueError(f"resource {key!r}: the directory driver needs `path`")
+            return {"use": "directory", "path": self._resolve_path(str(path), root, spec)}
+        if use == "redis":
+            url = str(get("url"))
+            if get("url_env"):
+                return {"use": "redis", "url_env": str(get("url_env")), "key": str(get("key", native))}
+            if not url.lower().startswith(("redis://", "rediss://")):
+                raise ValueError(f"resource {key!r}: the redis driver needs `url: redis://host:6379/0` (or rediss://)")
+            return {"use": "redis", "url": url, "key": str(get("key", native))}
+        if use == "custom":
+            return self._custom_driver(key, res, params)
+        return _remote_driver(key, use, get, native)
+
+    def _custom_driver(self, key: str, res: ResourceConfig, params: Dict[str, Any]) -> Dict[str, Any]:
+        options = {k: v for k, v in res.options.items() if k != "driver"}
+        options.update(params)
+        cls = str(options.pop("class", "") or "")
+        if not _CLASS_RE.match(cls):
+            raise ValueError(
+                f"resource {key!r}: the custom driver needs `class: package.module:ClassName` (got {cls!r})"
+            )
+        for name in options:
+            if name in ("use", "resource"):
+                raise ValueError(f"resource {key!r}: `{name}` is reserved and cannot be passed to a custom driver")
+        return {"use": "custom", "class": cls, **options}
+
+    def _resource_spec(self, ctx: RenderContext, spec: Any) -> Dict[str, Any]:
+        cfg = ctx.config
+        out: Dict[str, Any] = {}
+        for key, res in sorted(cfg.resources.items()):
+            item: Dict[str, Any] = {
+                "type": res.type,
+                "external": res.external,
+                "name": res.native_name(key),
+                "functions": cfg.resource_functions(key),
+            }
+            driver = self._driver(key, res, ctx.root, spec)
+            if driver is not None:
+                item["driver"] = driver
+            out[key] = item
+        return out
+
     def _spec(self, ctx: RenderContext) -> Dict[str, Any]:
         cfg = ctx.config
         options = cfg.provider.options
@@ -486,6 +600,7 @@ class OnPremProvider(Provider):
             host = "0.0.0.0"  # noqa: S104 - container must listen on the published interface
         endpoint = advertise_host(options, spec, str(options.get("host") or "127.0.0.1"), port)
         services = self._services(cfg, ctx.root)
+        resources = self._resource_spec(ctx, spec)
         functions: Dict[str, Any] = {}
         for name, fn in ctx.function_items():
             events = []
@@ -494,6 +609,9 @@ class OnPremProvider(Provider):
                 body["type"] = ev.type
                 if ev.type == "queue" and body.get("visibility_timeout") is None:
                     body["visibility_timeout"] = max(30, 6 * cfg.timeout_of(fn))
+                res_key = body.get("resource")
+                if res_key and res_key in resources and "driver" in resources[res_key]:
+                    body["driver"] = resources[res_key]["driver"]
                 events.append(body)
             functions[name] = {
                 "handler": fn.handler,
@@ -511,8 +629,10 @@ class OnPremProvider(Provider):
             "endpoint": endpoint,
             "data_dir": self._data_dir_str(cfg, ctx.root, spec),
             "poll_seconds": float(options.get("poll_seconds") or 0.5),
+            **{key: options[key] for key in _TUNING if key in options},
             "admin_token": str(options.get("admin_token") or ""),
             "services": services,
+            "resources": resources,
             "functions": functions,
             "deploy": spec.as_json(),
             "unit_name": unit,
@@ -612,6 +732,156 @@ class OnPremProvider(Provider):
         doc = self.init_doc(ctx)
         self.render_resources(doc, ctx)
         return doc
+
+
+def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> Dict[str, Any]:
+    """Validate and build the binding of a driver that talks to an external service.
+
+    Secrets may be given as ``<name>_env: VAR``; those stay unresolved here and are read
+    from the host's environment when the driver starts.
+    """
+    where = f"resource {key!r}"
+
+    def value(name: str) -> Any:
+        found = get(name)
+        return None if found in (None, "") else found
+
+    def has(name: str) -> bool:
+        return value(name) is not None or value(name + "_env") is not None
+
+    def pick(*names: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for name in names:
+            if value(name) is not None:
+                out[name] = value(name)
+            if value(name + "_env") is not None:
+                out[name + "_env"] = str(value(name + "_env"))
+        return out
+
+    def need(*names: str) -> None:
+        missing = [n for n in names if not has(n)]
+        if missing:
+            raise ValueError(f"{where}: the {use} driver needs {', '.join(missing)} (or <name>_env)")
+
+    def pair(a: str, b: str) -> None:
+        if has(a) != has(b):
+            raise ValueError(f"{where}: set both {a} and {b} (or neither)")
+
+    def number(name: str, low: int, high: int) -> None:
+        raw = value(name)
+        if raw is None:
+            return
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{where}: {name} must be an integer") from None
+        if not low <= n <= high:
+            raise ValueError(f"{where}: {name} must be between {low} and {high}")
+
+    def encoding() -> None:
+        if value("message_encoding") not in (None, "base64", "text"):
+            raise ValueError(f"{where}: message_encoding must be base64 or text")
+
+    endpoint = value("endpoint")
+    if endpoint is not None and not str(endpoint).lower().startswith(("http://", "https://")):
+        raise ValueError(f"{where}: endpoint must be an http(s) URL")
+
+    if use == "s3" or use in S3_PRESETS:
+        provider = use if use in S3_PRESETS else str(value("provider") or "").lower()
+        if provider not in ("",) + S3_PRESETS:
+            raise ValueError(f"{where}: s3 provider must be one of {', '.join(S3_PRESETS)}")
+        pair("access_key", "secret_key")
+        if provider == "minio":
+            need("endpoint")
+        required = {
+            "oss": ("region",),
+            "cos": ("region",),
+            "obs": ("region",),
+            "ibm_cos": ("region",),
+            "spaces": ("region",),
+            "oci": ("region", "namespace"),
+            "r2": ("account_id",),
+        }.get(provider, ())
+        need(*required)
+        bucket = str(value("bucket") or native)
+        if use == "s3" and provider == "" and endpoint is not None:
+            # Self-hosted S3-compatible server (MinIO, Ceph, ...): the original binding shape.
+            path_style = value("path_style")
+            if isinstance(path_style, str):
+                path_style = path_style.strip().lower() not in ("0", "false", "no", "")
+            binding = {
+                "use": "s3",
+                "endpoint": str(endpoint).rstrip("/"),
+                "bucket": bucket,
+                "region": str(value("region") or "us-east-1"),
+                "access_key": str(value("access_key") or ""),
+                "secret_key": str(value("secret_key") or ""),
+                "session_token": str(value("session_token") or ""),
+                "prefix": str(value("prefix") or ""),
+                "path_style": True if path_style is None else bool(path_style),
+            }
+            binding.update({k: v for k, v in pick(*_AWS_KEYS).items() if k.endswith("_env")})
+            return binding
+        binding = {"use": use, "bucket": bucket, **pick(*_S3_KEYS, *_AWS_KEYS)}
+        if provider and use == "s3":
+            binding["provider"] = provider
+        if value("path_style") is not None:
+            binding["path_style"] = value("path_style")
+        return binding
+
+    if use == "sqs":
+        if not has("queue_url"):
+            need("account_id", "region")
+        pair("access_key", "secret_key")
+        number("wait_seconds", 0, 20)
+        binding = {"use": "sqs", **pick("queue_url", "account_id", "region", "endpoint", *_AWS_KEYS)}
+        binding.update(pick("wait_seconds", "message_group_id"))
+        if not has("queue_url"):
+            binding["name"] = str(value("name") or native)
+        return binding
+
+    if use in ("azure_queue", "azure_blob"):
+        if not has("connection_string"):
+            if not has("account") and endpoint is None:
+                raise ValueError(f"{where}: the {use} driver needs account, endpoint or connection_string")
+            if not (has("account_key") or has("sas_token")):
+                raise ValueError(f"{where}: the {use} driver needs account_key, sas_token or connection_string")
+        if use == "azure_queue":
+            encoding()
+            return {"use": use, "queue": str(value("queue") or native), **pick(*_AZURE_KEYS, "message_encoding")}
+        return {"use": use, "container": str(value("container") or native), **pick(*_AZURE_KEYS, "prefix")}
+
+    if use in ("pubsub", "gcs"):
+        command = value("token_command")
+        if command is not None and not isinstance(command, (str, list)):
+            raise ValueError(f"{where}: token_command must be a list of strings or one command line")
+        if use == "pubsub":
+            sub = str(value("subscription") or native)
+            topic = str(value("topic") or "")
+            for kind, name in (("subscription", sub), ("topic", topic)):
+                if name and not name.startswith("projects/") and not has("project"):
+                    raise ValueError(f"{where}: pubsub {kind} {name!r} needs `project` (or a projects/... path)")
+            binding = {"use": use, "subscription": sub, **pick(*_GCP_KEYS, "topic", "return_immediately")}
+            return binding
+        return {"use": use, "bucket": str(value("bucket") or native), **pick(*_GCP_KEYS, "prefix")}
+
+    if use == "mns":
+        if endpoint is None:
+            need("account_id", "region")
+        need("access_key", "secret_key")
+        number("wait_seconds", 0, 30)
+        encoding()
+        return {
+            "use": use,
+            "queue": str(value("queue") or native),
+            **pick("endpoint", "account_id", "region", "access_key", "secret_key", "wait_seconds", "message_encoding"),
+        }
+
+    if use == "cloudflare_queue":
+        need("account_id", "queue_id", "api_token")
+        return {"use": use, **pick("account_id", "queue_id", "api_token", "endpoint")}
+
+    raise ValueError(f"{where}: unsupported driver {use!r}")
 
 
 def _foreign_names(extra: Any) -> List[str]:

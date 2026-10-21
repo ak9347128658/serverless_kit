@@ -16,9 +16,9 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Dict, FrozenSet, List, Optional
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Tuple
 
-from ..config.schema import FunctionConfig, ServiceConfig, WorkflowConfig
+from ..config.schema import EVENT_RESOURCE_TYPES, FunctionConfig, ResourceConfig, ServiceConfig, WorkflowConfig
 from .terraform_doc import TerraformDoc
 
 # Capability flags ------------------------------------------------------------
@@ -112,9 +112,19 @@ class RenderContext:
             "PSKIT_FUNCTION": name,
             "PSKIT_HANDLER": fn.handler,
         }
+        env.update(self.resource_environment(name))
         env.update(self.config.provider.environment)
         env.update(fn.environment)
         return env
+
+    def resource_environment(self, name: str) -> Dict[str, str]:
+        """``PSKIT_RESOURCE_<KEY>_*`` variables for the resources bound to function ``name``.
+
+        Values are plain strings (providers escape them). Terraform references a
+        provider adds through :meth:`Provider.resource_refs` use the ``${tf:...}``
+        form, which :func:`escape` turns into a live reference.
+        """
+        return self.config.binding_environment(name, lambda key, res: self.provider.resource_refs(self, key, res))
 
     def function_items(self) -> List[tuple]:
         return sorted(self.config.functions.items())
@@ -140,6 +150,8 @@ class Provider(ABC):
     vendor_dependencies: ClassVar[bool] = True
     extra_requirements: ClassVar[List[str]] = []
     max_timeout: ClassVar[int] = 900
+    # Managed storage/queue/topic resources that no event uses are created by this provider.
+    standalone_resources: ClassVar[bool] = False
     # Embedded workflows on a cloud function are capped by that function's timeout.
     # A long-running host (on-premises) sets this to False.
     warn_on_embedded_workflow: ClassVar[bool] = True
@@ -253,8 +265,48 @@ class Provider(ABC):
                         f"workflows.{name}",
                     )
                 )
+        issues.extend(self.resource_validation(config))
         issues.extend(self.extra_validation(config))
         return issues
+
+    def resource_validation(self, config: ServiceConfig) -> List[Issue]:
+        issues: List[Issue] = []
+        used = config.event_resources()
+        for key, res in sorted(config.resources.items()):
+            where = f"resources.{key}"
+            if res.external or res.type not in EVENT_RESOURCE_TYPES or key in used:
+                continue
+            if not self.standalone_resources:
+                issues.append(
+                    Issue(
+                        "error",
+                        f"managed {res.type} resources that no event uses are not supported on {self.display_name} "
+                        "yet; create it outside pskit and set `external: true`",
+                        where,
+                    )
+                )
+            elif res.type not in self.capabilities:
+                issues.append(
+                    Issue("error", f"{self.display_name} does not support {res.type} resources in pskit", where)
+                )
+        return issues
+
+    def resource_refs(self, ctx: RenderContext, key: str, res: ResourceConfig) -> Dict[str, str]:
+        """Extra binding values the provider knows (``{"ARN": "${tf:...}", "URL": ...}``).
+
+        Use the ``${tf:<expression>}`` form; only providers that escape environment
+        values may return references.
+        """
+        return {}
+
+    def standalone(self, config: ServiceConfig) -> List[Tuple[str, ResourceConfig]]:
+        """Managed storage/queue/topic resources no event creates: the provider must create them."""
+        used = config.event_resources()
+        return [
+            (key, res)
+            for key, res in sorted(config.resources.items())
+            if not res.external and res.type in EVENT_RESOURCE_TYPES and key not in used
+        ]
 
     def extra_validation(self, config: ServiceConfig) -> List[Issue]:
         return []

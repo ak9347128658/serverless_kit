@@ -26,6 +26,7 @@ extends: base.yml               # inherit another file (see below)
 | `package` | mapping | see [package](#package) | |
 | `functions` | map name → [function](#functions) | `{}` | names: start with a letter, letters/digits/`-`/`_`, max 63 |
 | `workflows` | map name → workflow | `{}` | see [workflows.md](workflows.md) |
+| `resources` | map name → resource | `{}` | buckets, queues, topics, databases, caches, other services; see [resources](#resources) |
 | `hooks` | map hook → list of shell commands | `{}` | see [hooks](#hooks) |
 | `custom` | any mapping | `{}` | only for `${self:custom...}` |
 
@@ -113,6 +114,35 @@ functions:
 Event syntax is in [events.md](events.md). Deployed functions are named `<service>-<stage>-<function>`, lowercased, with invalid characters replaced and long names shortened with a stable hash.
 
 Two functions can't declare the same `METHOD /path`.
+
+## `resources`
+
+Services the functions use, created by pskit (managed) or already existing (`external: true`). Every bound function gets `PSKIT_RESOURCE_<KEY>_*` variables, and handlers read them with `resource("key")`.
+
+```yaml
+resources:
+  jobs: {type: queue}                       # managed
+  uploads:
+    type: storage
+    external: true
+    name: legacy-uploads-bucket             # existing bucket
+  orders-db:
+    type: database                          # database / cache / custom: always external
+    external: true
+    connection: {host: db.internal, port: 5432, password_env: ORDERS_DB_PASSWORD}
+    functions: [api]                        # default: every user function
+```
+
+| Key | Default | |
+|---|---|---|
+| `type` | — | `storage`, `queue`, `topic`, `database`, `cache`, `custom` |
+| `external` | `false` | pskit never creates or destroys an external resource |
+| `name` | the key (or the tail of `connection.arn`) | native name |
+| `connection` | `{}` | scalar values exposed to handlers |
+| `functions` | all user functions | which functions get the binding |
+| `options` | `{}` | provider-specific (on-prem `driver`, AWS queue settings) |
+
+`queue`, `storage` and `topic` events can name a resource instead of a queue/bucket: `- queue: {resource: jobs}`. The event then uses the resource's native name and `existing: <external>`. Full reference: [resources.md](resources.md).
 
 ## `package`
 

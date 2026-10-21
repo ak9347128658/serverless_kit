@@ -24,6 +24,9 @@ by changing only the provider (`pskit deploy --provider gcp`).
 | 15 | [ci-cd-deploy](15-ci-cd-deploy) | GitHub Actions per-stage deploys with OIDC, remote state, dashboard artifact | AWS, GCP, Azure |
 | 16 | [on-premises](16-on-premises) | one process on this machine: HTTP, schedule, queue, directory storage, topic, embedded workflow | on-premises |
 | 17 | [on-premises-remote](17-on-premises-remote) | SSH/SCP or Docker onto a server, with a `.pem` and a bundled CPython when it has no Python | on-premises |
+| 18 | [resources](18-resources) | `resources:`: a managed bucket, queue and topic, an external database, `resource()` bindings, Redis/MinIO drivers on premises | AWS, GCP, Azure |
+| 19 | [custom-drivers](19-custom-drivers) | `driver: custom`: your own queue/storage class (SQLite queue with dead-letter, folder storage) plus RabbitMQ and Kafka templates | On-premises |
+| 20 | [onprem-external-clouds](20-onprem-external-clouds) | one on-prem host watching SQS, Azure Queue/Blob, Pub/Sub, GCS, MNS, Cloudflare Queues, R2 and MinIO; secrets via `*_env` | On-premises |
 
 \* Azure blob triggers can't fire on deletions; the example's `providers.azure` block
 handles that explicitly.

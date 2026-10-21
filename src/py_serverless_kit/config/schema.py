@@ -8,7 +8,7 @@ renderer reads and the others ignore.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Literal, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Type, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -26,6 +26,11 @@ PROVIDERS = (
     "onprem",
 )
 EVENT_TYPES = ("http", "schedule", "queue", "storage", "topic")
+RESOURCE_TYPES = ("storage", "queue", "topic", "database", "cache", "custom")
+# Resource types an event of the same name can consume.
+EVENT_RESOURCE_TYPES = ("queue", "storage", "topic")
+_CONN_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
+_RESERVED_CONN_KEYS = ("type", "name", "external")
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY")
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,62}$")
 _HANDLER_RE = re.compile(r"^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*[.:][A-Za-z_][\w]*$")
@@ -102,7 +107,8 @@ class ScheduleEvent(_Model):
 
 
 class QueueEvent(_Model):
-    name: str
+    name: str = ""
+    resource: Optional[str] = Field(None, description="key of a `resources:` entry of type queue")
     existing: bool = False
     batch_size: int = Field(10, ge=1, le=10000)
     batch_window: int = Field(0, ge=0, le=300, description="seconds to wait to fill a batch")
@@ -111,19 +117,39 @@ class QueueEvent(_Model):
     max_receive: int = 5
     fifo: bool = False
 
+    @model_validator(mode="after")
+    def _source(self) -> QueueEvent:
+        if not self.name and not self.resource:
+            raise ValueError("queue event needs `name` or `resource`")
+        return self
+
 
 class StorageEvent(_Model):
-    bucket: str
+    bucket: str = ""
+    resource: Optional[str] = Field(None, description="key of a `resources:` entry of type storage")
     existing: bool = False
     events: List[Literal["created", "deleted"]] = Field(default=["created"])
     prefix: Optional[str] = None
     suffix: Optional[str] = None
 
+    @model_validator(mode="after")
+    def _source(self) -> StorageEvent:
+        if not self.bucket and not self.resource:
+            raise ValueError("storage event needs `bucket` or `resource`")
+        return self
+
 
 class TopicEvent(_Model):
-    name: str
+    name: str = ""
+    resource: Optional[str] = Field(None, description="key of a `resources:` entry of type topic")
     existing: bool = False
     filter: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _source(self) -> TopicEvent:
+        if not self.name and not self.resource:
+            raise ValueError("topic event needs `name` or `resource`")
+        return self
 
 
 EventConfig = Union[HttpEvent, ScheduleEvent, QueueEvent, StorageEvent, TopicEvent]
@@ -146,6 +172,8 @@ class EventSpec(_Model):
     @classmethod
     def _from_yaml(cls, raw: Any) -> Any:
         if isinstance(raw, dict) and set(raw) == {"type", "config"}:
+            if isinstance(raw["config"], dict) and raw["type"] in _EVENT_MODELS:  # a dumped config
+                return {"type": raw["type"], "config": _EVENT_MODELS[raw["type"]].model_validate(raw["config"])}
             return raw
         if not isinstance(raw, dict) or len(raw) != 1:
             raise ValueError(
@@ -393,6 +421,78 @@ class WorkflowConfig(WorkflowDefinition):
 WorkflowState.model_rebuild()
 
 
+# ------------------------------------------------------------------ resources
+
+
+def env_key(text: str) -> str:
+    """``my-bucket`` -> ``MY_BUCKET`` (the form used in ``PSKIT_RESOURCE_<KEY>_*`` variables)."""
+    return re.sub(r"[^A-Za-z0-9]", "_", text).upper()
+
+
+class ResourceConfig(_Model):
+    """A storage bucket, queue, topic, database, cache or any other service functions use.
+
+    ``external: true`` means it already exists (or runs outside pskit): pskit never
+    creates or destroys it and only hands its connection details to handlers.
+    """
+
+    type: Literal["storage", "queue", "topic", "database", "cache", "custom"]
+    external: bool = False
+    name: Optional[str] = Field(None, description="native name; defaults to the resource key")
+    connection: Dict[str, Any] = Field(default_factory=dict, description="values exposed to handlers")
+    functions: Optional[List[str]] = Field(None, description="functions that get the binding (default: all)")
+    options: Dict[str, Any] = Field(default_factory=dict, description="provider-specific settings")
+
+    @field_validator("connection", mode="before")
+    @classmethod
+    def _connection(cls, v: Any) -> Any:
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            raise ValueError("connection must be a mapping of names to scalar values")
+        out: Dict[str, str] = {}
+        for raw_key, val in v.items():
+            key = str(raw_key)
+            if not _CONN_KEY_RE.match(key):
+                raise ValueError(f"connection key {key!r} must start with a letter and use letters, digits or _")
+            if key.lower() in _RESERVED_CONN_KEYS:
+                raise ValueError(f"connection key {key!r} is reserved (set `{key.lower()}` on the resource itself)")
+            if isinstance(val, (dict, list)):
+                raise ValueError(f"connection.{key} must be a scalar (string, number or boolean)")
+            if isinstance(val, bool):
+                out[key] = "true" if val else "false"
+            else:
+                out[key] = "" if val is None else str(val)
+        lowered = [k.lower() for k in out]
+        if len(set(lowered)) != len(lowered):
+            raise ValueError("connection keys must be unique ignoring case")
+        return out
+
+    @model_validator(mode="after")
+    def _managed(self) -> ResourceConfig:
+        if self.type not in EVENT_RESOURCE_TYPES and not self.external:
+            raise ValueError(
+                f"pskit does not create `{self.type}` resources; set `external: true` and describe it in `connection`"
+            )
+        return self
+
+    def conn(self, key: str, default: str = "") -> str:
+        """Connection value by case-insensitive key."""
+        for k, v in self.connection.items():
+            if k.lower() == key.lower():
+                return str(v)
+        return default
+
+    def native_name(self, key: str) -> str:
+        """Bucket / queue / topic name in the cloud: ``name``, else the tail of ``connection.arn``, else the key."""
+        if self.name:
+            return self.name
+        arn = self.conn("arn")
+        if arn:
+            return arn.rsplit(":", 1)[-1]
+        return key
+
+
 # ------------------------------------------------------------------ root
 
 
@@ -402,6 +502,7 @@ class ServiceConfig(_Model):
     package: PackageConfig = Field(default_factory=PackageConfig)
     functions: Dict[str, FunctionConfig] = Field(default_factory=dict)
     workflows: Dict[str, WorkflowConfig] = Field(default_factory=dict)
+    resources: Dict[str, ResourceConfig] = Field(default_factory=dict)
     hooks: Dict[str, List[str]] = Field(default_factory=dict)
     custom: Dict[str, Any] = Field(default_factory=dict, description="free-form values for ${self:custom.x}")
 
@@ -412,7 +513,7 @@ class ServiceConfig(_Model):
             raise ValueError("service must be 2-32 chars of lowercase letters, digits and dashes")
         return v
 
-    @field_validator("functions", "workflows")
+    @field_validator("functions", "workflows", "resources")
     @classmethod
     def _names(cls, v: Dict[str, Any]) -> Dict[str, Any]:
         for name in v:
@@ -429,8 +530,20 @@ class ServiceConfig(_Model):
             raise ValueError(f"unknown hooks {sorted(unknown)}; allowed: {sorted(allowed)}")
         return v
 
+    @field_validator("resources")
+    @classmethod
+    def _resource_keys(cls, v: Dict[str, ResourceConfig]) -> Dict[str, ResourceConfig]:
+        seen: Dict[str, str] = {}
+        for name in v:
+            key = env_key(name)
+            if key in seen:
+                raise ValueError(f"resources {seen[key]!r} and {name!r} map to the same variable prefix {key}")
+            seen[key] = name
+        return v
+
     @model_validator(mode="after")
     def _cross_refs(self) -> ServiceConfig:
+        self._resolve_resources()
         for wf_name, wf in self.workflows.items():
             for fn in wf.task_functions():
                 if fn not in self.functions:
@@ -443,6 +556,90 @@ class ServiceConfig(_Model):
                     raise ValueError(f"route {key} is used by both {seen[key]!r} and {fn_name!r}")
                 seen[key] = fn_name
         return self
+
+    def _resolve_resources(self) -> None:
+        orchestrators = {f"{w}-orchestrator" for w in self.workflows}
+        for res_name, declared in self.resources.items():
+            for fn in declared.functions or []:
+                if fn not in self.functions and fn not in orchestrators:
+                    raise ValueError(f"resource {res_name!r} lists unknown function {fn!r}")
+        for fn_name, fn_cfg in self.functions.items():
+            for ev in fn_cfg.events:
+                if ev.type not in EVENT_RESOURCE_TYPES or not ev.config.resource:
+                    continue
+                key = ev.config.resource
+                res = self.resources.get(key)
+                if res is None:
+                    known = ", ".join(sorted(self.resources)) or "<none>"
+                    raise ValueError(f"function {fn_name!r} uses unknown resource {key!r}; known: {known}")
+                if res.type != ev.type:
+                    raise ValueError(
+                        f"function {fn_name!r} has a {ev.type} event on resource {key!r}, which is a {res.type}"
+                    )
+                attr = "bucket" if ev.type == "storage" else "name"
+                native = res.native_name(key)
+                current = getattr(ev.config, attr)
+                if current and current != native:
+                    raise ValueError(
+                        f"function {fn_name!r}: set either `{attr}` or `resource` on the {ev.type} event, not both"
+                    )
+                setattr(ev.config, attr, native)
+                ev.config.existing = res.external
+
+    def resources_for(self, fn_name: str) -> List[Tuple[str, ResourceConfig]]:
+        """``[(key, resource)]`` bound to function ``fn_name``, sorted by key.
+
+        Without ``functions:`` a resource is bound to every user function but not to
+        generated ones (embedded workflow orchestrators).
+        """
+        fn = self.functions.get(fn_name)
+        generated = fn is not None and fn.handler.startswith("py_serverless_kit.")
+        out: List[Tuple[str, ResourceConfig]] = []
+        for key, res in sorted(self.resources.items()):
+            if res.functions is None:
+                if not generated:
+                    out.append((key, res))
+            elif fn_name in res.functions:
+                out.append((key, res))
+        return out
+
+    def binding_environment(
+        self,
+        fn_name: str,
+        refs: Optional[Callable[[str, ResourceConfig], Dict[str, str]]] = None,
+    ) -> Dict[str, str]:
+        """``PSKIT_RESOURCES`` and ``PSKIT_RESOURCE_<KEY>_*`` variables for function ``fn_name``.
+
+        ``refs`` adds provider-known values (``ARN``, ``URL``, ``ID``); connection
+        entries with the same key win.
+        """
+        bound = self.resources_for(fn_name)
+        if not bound:
+            return {}
+        env = {"PSKIT_RESOURCES": ",".join(key for key, _ in bound)}
+        for key, res in bound:
+            prefix = f"PSKIT_RESOURCE_{env_key(key)}_"
+            env[prefix + "TYPE"] = res.type
+            env[prefix + "NAME"] = res.native_name(key)
+            env[prefix + "EXTERNAL"] = "true" if res.external else "false"
+            for ckey, value in res.connection.items():
+                env[prefix + env_key(ckey)] = str(value)
+            for field_name, value in (refs(key, res) if refs else {}).items():
+                env.setdefault(prefix + env_key(field_name), value)
+        return env
+
+    def resource_functions(self, key: str) -> List[str]:
+        """Functions bound to resource ``key``."""
+        return [name for name in sorted(self.functions) if any(k == key for k, _ in self.resources_for(name))]
+
+    def event_resources(self) -> Dict[str, List[str]]:
+        """``{resource key: [function names]}`` for resources consumed by an event."""
+        used: Dict[str, List[str]] = {}
+        for fn_name, fn_cfg in sorted(self.functions.items()):
+            for ev in fn_cfg.events:
+                if ev.type in EVENT_RESOURCE_TYPES and ev.config.resource:
+                    used.setdefault(ev.config.resource, []).append(fn_name)
+        return used
 
     # convenience -----------------------------------------------------
     def memory_of(self, fn: FunctionConfig) -> int:

@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
-from ..config.schema import FunctionConfig, ServiceConfig
+from ..config.schema import FunctionConfig, ResourceConfig, ServiceConfig
 from ..runtime.adapters.base import envelope
 from ..workflows import definition_dict
 from ..workflows.gcp import compile_gcp
@@ -134,6 +134,7 @@ class GcpProvider(Provider):
     vendor_dependencies = False
     extra_requirements = ["functions-framework>=3.5"]
     max_timeout = 3600
+    standalone_resources = True
     notes = "Cloud Functions gen2 (Cloud Run). Requires options.project. Queues map to Pub/Sub topics."
 
     # ------------------------------------------------------------------ bundle
@@ -263,6 +264,7 @@ class GcpProvider(Provider):
                 )
             )
 
+        self._resources(doc, ctx)
         fn_out: Dict[str, Dict[str, Any]] = {}
         urls: Dict[str, str] = {}
         for name, fn in ctx.function_items():
@@ -325,6 +327,35 @@ class GcpProvider(Provider):
         )
 
     # ------------------------------------------------------------------ pieces
+    def _bucket(self, doc: TerraformDoc, ctx: RenderContext, name: str) -> str:
+        label = f"b-{name}"
+        if not doc.has_resource("google_storage_bucket", label):
+            doc.resource(
+                "google_storage_bucket",
+                label,
+                {
+                    "name": name,
+                    "location": ctx.region.upper(),
+                    "uniform_bucket_level_access": True,
+                    "labels": labels(ctx.tags()),
+                },
+            )
+        return f"google_storage_bucket.{tf_id(label)}"
+
+    def _resources(self, doc: TerraformDoc, ctx: RenderContext) -> None:
+        """Managed resources no event creates: a bucket, or a Pub/Sub topic for queues and topics."""
+        for key, res in self.standalone(ctx.config):
+            if res.type == "storage":
+                self._bucket(doc, ctx, res.native_name(key))
+            else:
+                self._topic(doc, ctx, res.native_name(key), False)
+
+    def resource_refs(self, ctx: RenderContext, key: str, res: ResourceConfig) -> Dict[str, str]:
+        if res.external or res.type not in ("queue", "topic"):
+            return {}
+        # Queues are Pub/Sub topics on GCP; the event or _resources creates t-<name>.
+        return {"ID": "${tf:google_pubsub_topic." + tf_id(f"t-{res.native_name(key)}") + ".id}"}
+
     def _topic(self, doc: TerraformDoc, ctx: RenderContext, name: str, existing: bool) -> str:
         label = f"t-{name}"
         if existing:
@@ -388,19 +419,7 @@ class GcpProvider(Provider):
                     env["PSKIT_STORAGE_SUFFIX"] = ev.suffix
                 bucket_name = ev.bucket
                 if not ev.existing:
-                    label = f"b-{ev.bucket}"
-                    if not doc.has_resource("google_storage_bucket", label):
-                        doc.resource(
-                            "google_storage_bucket",
-                            label,
-                            {
-                                "name": ev.bucket,
-                                "location": ctx.region.upper(),
-                                "uniform_bucket_level_access": True,
-                                "labels": labels(ctx.tags()),
-                            },
-                        )
-                    bucket_name = ref("google_storage_bucket", tf_id(label), "name")
+                    bucket_name = ref(self._bucket(doc, ctx, ev.bucket), "name")
                 et["event_type"] = STORAGE_EVENTS[dep.action or "created"]
                 et["event_filters"] = [{"attribute": "bucket", "value": bucket_name}]
             body["event_trigger"] = et

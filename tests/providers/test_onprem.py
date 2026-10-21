@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import full_config
 
 CONFIG = """
@@ -327,3 +329,161 @@ def test_remote_docker_pem_is_stored_absolute(make_project, render):
 def test_local_pip_platform_stays_native(make_project):
     project = make_project(CONFIG)
     assert project.provider.pip_platform_for(project.config) == []
+
+
+def test_host_tuning_options_reach_the_spec_and_are_validated(make_project):
+    import json as _json
+
+    from py_serverless_kit.core.deployer import Deployer
+
+    project = make_project(
+        """
+        service: tune
+        provider:
+          name: onprem
+          options: {execution_retention: 50, workflow_workers: 2, log_buffer: 1000, log_level: debug, capture_output: false}
+        functions: {a: {handler: app.handlers.hello}}
+        """
+    )
+    assert not [i for i in project.validate() if i.level == "error"]
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    spec = _json.loads((project.work_dir / "onprem_app" / "pskit_host.json").read_text("utf-8"))
+    assert spec["execution_retention"] == 50 and spec["workflow_workers"] == 2 and spec["capture_output"] is False
+    bad = make_project(
+        """
+        service: tune
+        provider:
+          name: onprem
+          options: {workflow_workers: 0, log_level: loud, capture_output: "no"}
+        functions: {a: {handler: app.handlers.hello}}
+        """
+    )
+    errors = {i.where for i in bad.validate() if i.level == "error"}
+    assert {"provider.options.workflow_workers", "provider.options.log_level", "provider.options.capture_output"} <= errors
+
+
+def _driver_project(make_project, kind, options):
+    import json as _json
+
+    event = {"queue": "queue", "storage": "storage"}[kind]
+    return make_project(
+        f"""
+        service: drv
+        provider: {{name: onprem}}
+        resources:
+          res: {{type: {kind}, external: true, options: {_json.dumps(options)}}}
+        functions:
+          w: {{handler: app.handlers.worker, events: [{{{event}: {{resource: res}}}}]}}
+        """
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,options,message",
+    [
+        ("queue", {"driver": "sqs"}, "needs account_id, region"),
+        ("queue", {"driver": "sqs", "queue_url": "https://x/1/q", "access_key": "a"}, "set both access_key and secret_key"),
+        ("queue", {"driver": "sqs", "queue_url": "https://x/1/q", "wait_seconds": 99}, "wait_seconds must be between"),
+        ("queue", {"driver": "azure_queue"}, "needs account, endpoint or connection_string"),
+        ("queue", {"driver": "azure_queue", "account": "a"}, "needs account_key, sas_token or connection_string"),
+        ("queue", {"driver": "azure_queue", "connection_string": "x", "message_encoding": "hex"}, "base64 or text"),
+        ("queue", {"driver": "pubsub"}, "needs `project`"),
+        ("queue", {"driver": "pubsub", "project": "p", "token_command": 5}, "token_command must be"),
+        ("queue", {"driver": "mns", "access_key": "a", "secret_key": "b"}, "needs account_id, region"),
+        ("queue", {"driver": "mns", "endpoint": "https://x"}, "needs access_key, secret_key"),
+        ("queue", {"driver": "cloudflare_queue", "account_id": "a"}, "needs queue_id, api_token"),
+        ("queue", {"driver": "custom"}, "needs `class: package.module:ClassName`"),
+        ("queue", {"driver": "custom", "class": "app.x:Y", "resource": "z"}, "`resource` is reserved"),
+        ("queue", {"driver": "sqs", "queue_url": "https://x/1/q", "endpoint": "ftp://x"}, "endpoint must be an http(s) URL"),
+        ("storage", {"driver": "oci", "region": "r"}, "needs namespace"),
+        ("storage", {"driver": "r2"}, "needs account_id"),
+        ("storage", {"driver": "minio"}, "needs endpoint"),
+        ("storage", {"driver": "s3", "provider": "dropbox"}, "s3 provider must be one of"),
+        ("storage", {"driver": "azure_blob", "account": "a"}, "needs account_key, sas_token"),
+        ("storage", {"driver": "gcs", "token_command": {"x": 1}}, "token_command must be"),
+        ("storage", {"driver": "kafka"}, "driver must be one of"),
+    ],
+)
+def test_external_driver_validation(make_project, kind, options, message):
+    project = _driver_project(make_project, kind, options)
+    errors = [i.message for i in project.validate() if i.level == "error"]
+    assert any(message in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    "kind,options,expected",
+    [
+        (
+            "queue",
+            {"driver": "sqs", "queue_url": "https://sqs.eu-west-1.amazonaws.com/1/q", "access_key_env": "AK",
+             "secret_key_env": "SK", "wait_seconds": 5},
+            {"use": "sqs", "queue_url": "https://sqs.eu-west-1.amazonaws.com/1/q", "access_key_env": "AK",
+             "secret_key_env": "SK", "wait_seconds": 5},
+        ),
+        (
+            "queue",
+            {"driver": "azure_queue", "connection_string_env": "AZ_CONN"},
+            {"use": "azure_queue", "queue": "res", "connection_string_env": "AZ_CONN"},
+        ),
+        (
+            "queue",
+            {"driver": "pubsub", "project": "p", "token_command": ["gcloud", "auth", "print-access-token"]},
+            {"use": "pubsub", "subscription": "res", "project": "p",
+             "token_command": ["gcloud", "auth", "print-access-token"]},
+        ),
+        (
+            "queue",
+            {"driver": "mns", "account_id": "123", "region": "cn-hangzhou", "access_key": "a", "secret_key_env": "S"},
+            {"use": "mns", "queue": "res", "account_id": "123", "region": "cn-hangzhou", "access_key": "a",
+             "secret_key_env": "S"},
+        ),
+        (
+            "queue",
+            {"driver": "cloudflare_queue", "account_id": "a", "queue_id": "q", "api_token_env": "CF"},
+            {"use": "cloudflare_queue", "account_id": "a", "queue_id": "q", "api_token_env": "CF"},
+        ),
+        (
+            "queue",
+            {"driver": "custom", "class": "app.backends:Q", "url": "amqp://x", "password_env": "PW"},
+            {"use": "custom", "class": "app.backends:Q", "url": "amqp://x", "password_env": "PW"},
+        ),
+        (
+            "storage",
+            {"driver": "s3", "region": "eu-west-1"},
+            {"use": "s3", "bucket": "res", "region": "eu-west-1"},
+        ),
+        (
+            "storage",
+            {"driver": "cos", "region": "ap-guangzhou", "bucket": "media-1250000000", "access_key_env": "A",
+             "secret_key_env": "B"},
+            {"use": "cos", "bucket": "media-1250000000", "region": "ap-guangzhou", "access_key_env": "A",
+             "secret_key_env": "B"},
+        ),
+        (
+            "storage",
+            {"driver": "s3", "provider": "r2", "account_id": "abc"},
+            {"use": "s3", "bucket": "res", "account_id": "abc", "provider": "r2"},
+        ),
+        (
+            "storage",
+            {"driver": "azure_blob", "account": "acct", "sas_token_env": "SAS", "prefix": "in/"},
+            {"use": "azure_blob", "container": "res", "account": "acct", "sas_token_env": "SAS", "prefix": "in/"},
+        ),
+        (
+            "storage",
+            {"driver": "gcs", "bucket": "b", "access_token_env": "TOK"},
+            {"use": "gcs", "bucket": "b", "access_token_env": "TOK"},
+        ),
+    ],
+)
+def test_external_driver_bindings_keep_secrets_as_env_names(make_project, kind, options, expected):
+    import json as _json
+
+    from py_serverless_kit.core.deployer import Deployer
+
+    project = _driver_project(make_project, kind, options)
+    assert not [i for i in project.validate() if i.level == "error"]
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    spec = _json.loads((project.work_dir / "onprem_app" / "pskit_host.json").read_text("utf-8"))
+    assert spec["resources"]["res"]["driver"] == expected
+    assert spec["functions"]["w"]["events"][0]["driver"] == expected

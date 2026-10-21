@@ -100,7 +100,8 @@ Generate the HTML dashboard from every `.pskit/*/deployment.json`. It doesn't ta
 |---|---|---|
 | `-d, --dir` | `.` | project root |
 | `-o, --output FILE` | `.pskit/dashboard/index.html` | where to write the HTML |
-| `--serve` | | serve it over HTTP on 127.0.0.1 |
+| `--serve` | | serve the live dashboard (page + JSON API: host health, logs, workflow executions) |
+| `--host` | `127.0.0.1` | bind address for `--serve`. A non-loopback address prints a warning |
 | `--port` | `8765` | port for `--serve` |
 | `--open` | | open in the browser |
 
@@ -151,6 +152,46 @@ pskit workflow show NAME [--format auto|asl|gcp|json]
 
 - `run` executes the workflow locally on the embedded engine. `wait` states are skipped unless `--sleep` is given. A failed run prints `FAILED <error>: <cause>` and exits with code 2.
 - `show` prints the compiled definition. `auto` picks ASL for AWS, Cloud Workflows for GCP, and the portable JSON otherwise.
+
+Deployed workflows (on-premises host, AWS Step Functions, Google Cloud Workflows; AWS/GCP need `pip install "py-serverless-kit[aws]"` / `[gcp]`). These read `.pskit/<provider>-<stage>/deployment.json`, so deploy first:
+
+```bash
+pskit workflow start NAME [-i JSON|@file] [--wait] [--json]
+pskit workflow executions [NAME] [--status S] [-n LIMIT] [--offset N] [--token T] [--json]
+pskit workflow status EXECUTION_ID [-w NAME] [--history] [--watch] [--json]
+pskit workflow cancel EXECUTION_ID [-w NAME]
+```
+
+| Command | Flags |
+|---|---|
+| `start` | `-i, --input` JSON or `@file.json`. `--wait`: wait for the result (on-premises; native engines return at once; an embedded cloud orchestrator is always synchronous). Prints `execution_id`, status and a console link |
+| `executions` | newest first. `--status` is `RUNNING`, `SUCCEEDED`, `FAILED`, `TIMED_OUT`, `CANCELLED` or `ABORTED`. `-n, --limit` (default 20). `--offset` pages on premises; `--token` (printed after a page) pages AWS/GCP |
+| `status` | `-w, --workflow` helps AWS/GCP resolve the id. `--history` prints every state event. `--watch` polls every 2 s until the run finishes |
+| `cancel` | stops the run before its next state (embedded) or calls `StopExecution` / `cancel` (AWS / GCP) |
+
+See [workflow-executions.md](workflow-executions.md).
+
+## `pskit logs`
+
+Show the logs of the deployed **on-premises** host: handler logging, `print` output, one entry per invocation, and host notes. For cloud providers, use the console link from `pskit info`.
+
+| Flag | Default | |
+|---|---|---|
+| `-f, --follow` | | keep printing new entries (polls every second) |
+| `-n, --lines` | `100` | how many recent entries to show first |
+| `--function NAME` | | only this function |
+| `--level LEVEL` | | minimum level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `--source` | | `function`, `host`, `stdout`, `stderr` or `invocation` |
+| `-q, --grep TEXT` | | only entries containing this text (case-insensitive) |
+| `--json` | | one JSON object per line |
+
+```bash
+pskit logs -f
+pskit logs --function worker --level warning -n 500
+pskit logs --stage prod --source invocation --json | jq .fields.duration_ms
+```
+
+The admin token comes from the generated `pskit_host.json`. See [providers.md](providers.md#logs-and-stats).
 
 ## `pskit providers`
 

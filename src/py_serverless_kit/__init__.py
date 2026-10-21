@@ -21,6 +21,7 @@ from .runtime.errors import (
 )
 from .runtime.event import Event, EventType, Headers, HttpRequest, Record
 from .runtime.invoke import invoke
+from .runtime.resources import Resource, resource, resources
 from .runtime.response import Response
 
 __all__ = [
@@ -39,9 +40,12 @@ __all__ = [
     "MethodNotAllowed",
     "NotFound",
     "Record",
+    "Resource",
     "Response",
     "TooManyRequests",
     "Unauthorized",
     "UnprocessableEntity",
     "invoke",
+    "resource",
+    "resources",
 ]

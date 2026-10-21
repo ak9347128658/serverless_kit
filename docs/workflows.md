@@ -54,7 +54,7 @@ Full example: [`examples/07-workflow-orders`](../examples/07-workflow-orders).
 | `states` | — | map of state name → state |
 | `description` | `""` | |
 | `engine` | `auto` | `auto` = native where supported (aws, gcp), embedded elsewhere; `native` errors on clouds without native support; `embedded` forces the engine everywhere |
-| `timeout` | — | AWS `TimeoutSeconds`; embedded orchestrator function timeout (capped at the provider's max) |
+| `timeout` | — | AWS `TimeoutSeconds`; embedded orchestrator function timeout (capped at the provider's max), also enforced by the embedded engine (the run ends `TIMED_OUT`) |
 | `options.type` | `STANDARD` | AWS only: `STANDARD` or `EXPRESS` |
 | `options.http` | `true` | embedded only: `false` removes the orchestrator's HTTP trigger |
 
@@ -140,7 +140,8 @@ Error names are the **Python exception class names** your handler raises (e.g. `
 ### Embedded orchestrator
 
 - Invoke it with `POST /workflows/<workflow>` and the JSON input as the body (when the provider supports HTTP and `options.http` isn't `false`), or invoke it directly.
-- Success response: `{"workflow": ..., "status": "SUCCEEDED", "output": ..., "duration_ms": ...}`. Failure: HTTP 500 `{"status": "FAILED", "error": ..., "cause": ...}`.
+- Every run has an `execution_id`. On a cloud the response is synchronous: `{"execution_id": ..., "workflow": ..., "status": "SUCCEEDED", "output": ..., "duration_ms": ...}`, or HTTP 500 `{"execution_id": ..., "status": "FAILED", "error": ..., "cause": ...}`.
+- On premises the run is tracked by the host. `POST /workflows/<workflow>` answers `202` with the `execution_id` at once (`?wait=true` returns the result), and the run can be listed, followed and cancelled. See [Workflow executions](workflow-executions.md).
 - The **whole run must fit in one function invocation**: total time ≤ the provider's max timeout (e.g. 900 s on AWS/Huawei/Tencent, 600 s on Azure, 120 s on IBM). Long `wait` states don't fit; use a native engine or split the workflow. `pskit validate` warns about this.
 - The HTTP route is public when the provider's HTTP is public. Set `options.http: false` for sensitive workflows.
 
@@ -159,6 +160,17 @@ pskit workflow show order-pipeline --format asl                 # asl | gcp | js
 ```
 
 `workflow run` exits with code 2 when the run fails.
+
+Deployed workflows:
+
+```bash
+pskit workflow start order-pipeline -i '{"amount": 50}'          # prints the execution_id
+pskit workflow executions order-pipeline --status RUNNING
+pskit workflow status <execution_id> --watch --history
+pskit workflow cancel <execution_id>
+```
+
+These work against the on-premises host, AWS Step Functions and Google Cloud Workflows. See [Workflow executions](workflow-executions.md).
 
 ## Migrating Step Functions ASL
 

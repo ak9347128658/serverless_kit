@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-21
+
+### Added
+- On-premises drivers that watch queues and buckets in other providers: `sqs` (AWS, JSON protocol + SigV4), `azure_queue` and `azure_blob` (Shared Key, SAS or connection string; Azurite), `pubsub` (pull subscription) and `gcs` (access token, `token_command` or the metadata server; emulators), `mns` (Alibaba Cloud) and `cloudflare_queue` (HTTP pull consumer). Leases use each service's own visibility timeout, so delivery stays at-least-once. See the provider matrix in `docs/resources.md`.
+- S3 storage presets `aws`, `oss`, `cos`, `obs`, `oci`, `ibm_cos`, `spaces`, `r2` and `minio` (or `driver: s3` + `provider:`). `s3` without `endpoint` now targets AWS (virtual-host style), and credentials fall back to the `AWS_*` environment variables.
+- `custom` queue and storage drivers: `class: package.module:ClassName` from your app, constructed with the remaining options. Import errors, constructor errors and missing methods are reported with the class name. `docs/resources.md` has a RabbitMQ example (AMQP with manual acks).
+- Any on-prem driver parameter can be written as `<name>_env: VARIABLE`, read from the host's environment at start, so secrets stay out of `pskit_host.json` and Terraform state.
+- `examples/19-custom-drivers`: runnable `custom` drivers (`SqliteQueue` with visibility timeout, receive counts and a dead-letter table; `FolderStorage` for local/NFS/SMB folders) plus RabbitMQ (pika) and Kafka (kafka-python) templates, all at-least-once.
+- `examples/20-onprem-external-clouds`: one on-prem host consuming SQS, Azure Storage Queue, Pub/Sub, MNS and Cloudflare Queues and watching S3, Azure Blob, GCS, R2 and MinIO, with every secret read through `*_env`.
+
+### Fixed
+- The on-premises host makes the app importable before building its queue/storage drivers, so a `custom` driver class from the app loads at start.
+- The on-premises host sets `PSKIT_ONPREM_ROOT` before building its drivers, so relative paths in driver options resolve against the host directory.
+
+## [0.6.0] - 2026-10-21
+
+### Added
+- **`resources:`** for storage, queues, topics, databases, caches and custom services. A resource is managed (pskit creates it) or `external: true` (pskit only attaches it). Bound functions get `PSKIT_RESOURCES` and `PSKIT_RESOURCE_<KEY>_TYPE/NAME/EXTERNAL/<connection key>` variables, plus `ARN`/`URL` on AWS and `ID` for Pub/Sub on GCP. `functions:` limits which functions get a binding. `queue`, `storage` and `topic` events accept `resource: <key>`. Standalone managed resources are created on AWS, GCP, Azure and on premises; other providers report a validation error. AWS roles get a `pskit-resources` policy for the bound resources. See `docs/resources.md`.
+- On-premises `provider.options` `execution_retention`, `workflow_workers`, `log_buffer`, `log_level` and `capture_output` to tune the host's execution store, workflow concurrency and log capture.
+- `resource()`, `resources()` and `Resource` in `py_serverless_kit`, to read bindings the same way on every cloud.
+- On-premises drivers for resources: `redis` queues (stdlib RESP client; `<key>`, `<key>:processing` and `<key>:claims`, with crash recovery) and `s3` storage (SigV4, MinIO and any S3-compatible store, `prefix`, `path_style`, `session_token`), plus a per-resource `directory`. Unreachable backends become host notes and the host keeps running.
+- Workflow execution ids everywhere. The on-premises host tracks runs in `<data_dir>/executions/`: status, current state, history (`enter`/`exit`/`caught`/`retry`/`fail`), input, output and error. `GET /__pskit/executions[/<id>]` and `POST /__pskit/executions/<id>/cancel` inspect and control runs. Cancel stops before the next state and wakes `wait` states. `workflows.<name>.timeout` is enforced by the embedded engine (`TIMED_OUT`), and runs interrupted by a restart become `ABORTED`. Cloud orchestrators return `execution_id` with their synchronous result. See `docs/workflow-executions.md`.
+- `pskit workflow start | executions | status | cancel` for deployed workflows on the on-premises host, AWS Step Functions (`pip install "py-serverless-kit[aws]"`) and Google Cloud Workflows (new `[gcp]` extra: `google-cloud-workflows`).
+- On-premises logs: the host captures logging, `print`/stdout/stderr, one entry per invocation and host notes, tagged with function and request id, in memory and in `<data_dir>/logs/host.jsonl` (rotated). `GET /__pskit/logs` (`since`, `before`, `limit`, `level`, `function`, `source`, `q`), `GET /__pskit/stats` (invocations, errors and durations per function, queue depths), and `pskit logs [-f]`.
+- A new React + Vite dashboard (single self-contained page) with sortable, paginated tables, deployment tabs (Functions, Workflows, Executions, Logs, Resources, Outputs) and light/dark themes. `pskit dashboard --serve` (new `--host`) adds a JSON API for live host health and stats, a log tail, and workflow executions (list, start, follow, cancel). The API checks the Host header and same-origin POSTs and keeps admin tokens server-side.
+- `docs/scenarios.md`: step-by-step guides by use case.
+
+### Changed
+- **Breaking (on premises):** `POST /workflows/<name>` and `POST /__pskit/workflows/<name>` start the workflow in the background and answer `202 {"execution_id", "status": "RUNNING", "status_url", ...}`. Add `?wait=true` (or `Prefer: wait`, or `x-pskit-wait: true`) to get the old synchronous result. That result now also includes `execution_id`, `started_at` and `stopped_at`.
+- `deployment.json` (and `pskit info --json`) include the deployment `key` (`<provider>-<stage>`) and `resources` (connection key names only).
+
+### Fixed
+- The on-premises host drains the request body before answering `401` for a missing admin token. On Windows the client previously saw a connection reset instead of the 401.
+- Re-validating a dumped config no longer leaves each event's config as a plain dict.
+
+Redeploy to pick up the new runtime. Handler code is unchanged.
+
 ## [0.5.2] - 2026-10-19
 
 ### Fixed

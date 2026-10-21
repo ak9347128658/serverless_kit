@@ -85,9 +85,21 @@ def project_yaml(name: str) -> str:
         }
     if "topic" in caps:
         functions["subscriber"] = {"handler": "app.handlers.job", "events": [{"topic": "pskit-validate-events"}]}
+    resources: dict = {"db": {"type": "database", "external": True, "connection": {"host": "db.internal"}}}
+    if get_provider(name).standalone_resources:
+        # Managed resources no event uses, plus external ones bound by name (looked up with data sources).
+        resources.update(
+            {
+                "files": {"type": "storage", "name": "pskit-validate-files-1250000000"},
+                "tasks": {"type": "queue", "name": "pskit-validate-tasks"},
+                "alerts": {"type": "topic", "name": "pskit-validate-alerts"},
+                "shared": {"type": "queue", "external": True, "name": "pskit-validate-shared"},
+            }
+        )
     config = {
         "service": "pskit-validate",
         "provider": {"name": name, "options": DUMMY_OPTIONS.get(name, {})},
+        "resources": resources,
         "functions": functions,
         "workflows": {
             "flow": {

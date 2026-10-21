@@ -18,6 +18,10 @@ htmlcov/
 .terraform/
 *.tfstate
 *.tfstate.*
+node_modules/
+# Dashboard UI (source in dashboard-ui/, build output is src/py_serverless_kit/dashboard/template.html)
+dashboard-ui/node_modules/
+dashboard-ui/dist/
 
 # Secrets
 .env

@@ -58,6 +58,22 @@ jobs:
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           python scripts/validate_all_providers.py --provider ${{ matrix.provider }}
 
+  dashboard-ui:
+    name: dashboard UI build is committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard-ui/package-lock.json
+      - name: Build
+        working-directory: dashboard-ui
+        run: npm ci && npm run build
+      - name: template.html matches dashboard-ui/
+        run: git diff --exit-code src/py_serverless_kit/dashboard/template.html
+
   build:
     runs-on: ubuntu-latest
     steps:

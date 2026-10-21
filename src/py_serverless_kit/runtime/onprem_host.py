@@ -10,8 +10,19 @@ path you already have instead.
   sets attributes used by topic filters.
 * ``PUT`` / ``DELETE /__pskit/storage/<bucket>/<key>`` writes an object and emits
   ``created`` / ``deleted``. Dropping a file in the bucket directory does the same.
-* ``POST /__pskit/invoke/<function>`` and ``POST /__pskit/workflows/<name>`` call
-  functions and the embedded workflow engine.
+* ``POST /__pskit/invoke/<function>`` calls a function.
+* ``POST /__pskit/workflows/<name>`` starts a workflow and answers ``202`` with its
+  ``execution_id`` (``?wait=true`` waits and returns the result).
+  ``GET /__pskit/executions[?workflow=&status=&limit=&offset=]``,
+  ``GET /__pskit/executions/<id>`` and ``POST /__pskit/executions/<id>/cancel``
+  inspect and control runs; records live under ``<data_dir>/executions``.
+* ``GET /__pskit/logs?since=&limit=&level=&function=&q=&source=&before=`` returns
+  captured logs (handler logging, print output, one entry per invocation, host
+  notes); ``GET /__pskit/stats`` returns per-function invocation counters.
+
+Queue, storage and topic events may carry a ``driver`` binding (from a
+``resources:`` entry). ``directory`` moves that queue/bucket to its own path;
+``redis`` (queues) and ``s3`` (storage) use the drivers in ``runtime/drivers``.
 """
 
 from __future__ import annotations
@@ -33,14 +44,17 @@ from urllib.error import URLError
 from urllib.parse import parse_qsl, unquote, urlsplit
 from urllib.request import urlopen
 
+from . import hostlog
 from .batch import BatchResult
 from .context import Context
 from .cron import CronError, next_cron, rate_seconds, resolve_zone
 from .dispatch import execute
 from .event import Event, EventType, Headers, HttpRequest, Record
+from .executions import Executor, FileExecutionStore, valid_id
 from .manifest import load_manifest, set_manifest
 from .response import Response, dumps
 from .routing import match_path, method_matches
+from .workflow import install_executor, wants_wait
 
 _BROKER: Optional[Broker] = None
 _MAX_BODY = 64 * 1024 * 1024
@@ -140,6 +154,51 @@ class Broker:
         self.data_dir = Path(spec["data_dir"])
         self.services = spec.get("services") or {}
         self._lock = threading.RLock()
+        # Per-queue / per-bucket overrides from `driver` bindings on events.
+        self._queue_paths: Dict[str, Path] = {}
+        self._bucket_paths: Dict[str, Path] = {}
+        self._queue_drivers: Dict[str, Any] = {}
+        self._storage_drivers: Dict[str, Any] = {}
+        self._bind_drivers(spec.get("functions") or {})
+
+    def _bind_drivers(self, functions: Dict[str, Any]) -> None:
+        for fn in functions.values():
+            for ev in fn.get("events") or []:
+                binding = ev.get("driver")
+                if not isinstance(binding, dict):
+                    continue
+                kind = ev.get("type")
+                if kind == "queue":
+                    self._bind(binding, str(ev["name"]), "queue")
+                elif kind == "storage":
+                    self._bind(binding, str(ev["bucket"]), "storage")
+                elif kind == "topic":
+                    self._bind(binding, str(ev["name"]), "topic")
+
+    def _bind(self, binding: Dict[str, Any], name: str, kind: str) -> None:
+        driver = str(binding.get("driver") or binding.get("use") or binding.get("type") or "builtin").lower()
+        if driver == "directory" and binding.get("path"):
+            target = self._queue_paths if kind in ("queue", "topic") else self._bucket_paths
+            target[name] = Path(str(binding["path"]))
+            return
+        if driver in ("builtin", "directory"):
+            return
+        from .drivers import make_queue_driver, make_storage_driver
+
+        if kind == "queue" and name not in self._queue_drivers:
+            queue = make_queue_driver(binding, name)
+            if queue is not None:
+                self._queue_drivers[name] = queue
+        elif kind == "storage" and name not in self._storage_drivers:
+            storage = make_storage_driver(binding, name)
+            if storage is not None:
+                self._storage_drivers[name] = storage
+
+    def queue_driver(self, name: str) -> Any:
+        return self._queue_drivers.get(name)
+
+    def storage_driver(self, bucket: str) -> Any:
+        return self._storage_drivers.get(bucket)
 
     def path_for(self, kind: str) -> Path:
         service = self.services.get(kind) or {}
@@ -149,12 +208,21 @@ class Broker:
         return self.data_dir / kind
 
     def queue_dir(self, name: str) -> Path:
+        override = self._queue_paths.get(name)
+        if override is not None:
+            return override
         return self.path_for("queue") / _segment(name, "queue")
 
     def bucket_dir(self, bucket: str) -> Path:
+        override = self._bucket_paths.get(bucket)
+        if override is not None:
+            return override
         return self.path_for("storage") / _segment(bucket, "bucket")
 
     def topic_dir(self, name: str) -> Path:
+        override = self._queue_paths.get(name)
+        if override is not None:
+            return override
         return self.path_for("topic") / _segment(name, "topic")
 
     def ensure(self, functions: Dict[str, Any]) -> List[str]:
@@ -164,11 +232,14 @@ class Broker:
             for ev in fn.get("events") or []:
                 kind = ev.get("type")
                 if kind == "queue":
-                    notes.extend(self._ensure_named(self.queue_dir(ev["name"]), ev, "queue"))
-                    if ev.get("dead_letter"):
-                        notes.extend(self._ensure_named(self.queue_dir(ev["dead_letter"]), {"existing": False}, "queue"))
+                    if ev["name"] not in self._queue_drivers:
+                        notes.extend(self._ensure_named(self.queue_dir(ev["name"]), ev, "queue"))
+                    dead = ev.get("dead_letter")
+                    if dead and dead not in self._queue_drivers:
+                        notes.extend(self._ensure_named(self.queue_dir(dead), {"existing": False}, "queue"))
                 elif kind == "storage":
-                    notes.extend(self._ensure_named(self.bucket_dir(ev["bucket"]), ev, "bucket"))
+                    if ev["bucket"] not in self._storage_drivers:
+                        notes.extend(self._ensure_named(self.bucket_dir(ev["bucket"]), ev, "bucket"))
                 elif kind == "topic":
                     notes.extend(self._ensure_named(self.topic_dir(ev["name"]) / "pending", ev, "topic"))
         return notes
@@ -190,6 +261,9 @@ class Broker:
 
     # ---------------------------------------------------------------- queue
     def submit_queue(self, name: str, message: Any, attributes: Optional[Dict[str, Any]] = None) -> str:
+        driver = self._queue_drivers.get(name)
+        if driver is not None:
+            return str(driver.submit(_body_text(message), dict(attributes or {})))
         with self._lock:
             directory = self.queue_dir(name) / "messages"
             directory.mkdir(parents=True, exist_ok=True)
@@ -208,12 +282,19 @@ class Broker:
             return ident
 
     def queue_depth(self, name: str) -> int:
+        driver = self._queue_drivers.get(name)
+        if driver is not None:
+            return int(driver.depth())
         directory = self.queue_dir(name) / "messages"
         if not directory.is_dir():
             return 0
         return sum(1 for _ in directory.glob("*.json"))
 
     def claim_queue(self, ev: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
+        driver = self._queue_drivers.get(ev["name"])
+        if driver is not None:
+            visibility = float(ev.get("visibility_timeout") or 30)
+            return list(driver.claim(int(ev.get("batch_size") or 1), visibility, now))
         with self._lock:
             directory = self.queue_dir(ev["name"]) / "messages"
             if not directory.is_dir():
@@ -253,6 +334,13 @@ class Broker:
         failed_ids = {str(item) for item in failed}
         max_receive = int(ev.get("max_receive") or 5)
         dead = ev.get("dead_letter")
+        driver = self._queue_drivers.get(ev["name"])
+        if driver is not None:
+            target = None
+            if dead:
+                target = self._queue_drivers.get(str(dead)) or _BuiltinQueue(self, str(dead), str(ev["name"]))
+            driver.settle(claimed, failed_ids, max_receive, target, now)
+            return
         with self._lock:
             for msg in claimed:
                 path = Path(msg["path"])
@@ -325,7 +413,11 @@ class Broker:
             _write_json(path, current)
 
     # ---------------------------------------------------------------- storage
-    def put_object(self, bucket: str, key: str, data: bytes) -> Path:
+    def put_object(self, bucket: str, key: str, data: bytes) -> Optional[Path]:
+        driver = self._storage_drivers.get(bucket)
+        if driver is not None:
+            driver.put("/".join(_key_parts(key)), data)
+            return None
         parts = _key_parts(key)
         path = self.bucket_dir(bucket)
         for part in parts:
@@ -334,7 +426,19 @@ class Broker:
         path.write_bytes(data)
         return path
 
+    def get_object(self, bucket: str, key: str) -> bytes:
+        driver = self._storage_drivers.get(bucket)
+        if driver is not None:
+            return bytes(driver.get("/".join(_key_parts(key))))
+        path = self.bucket_dir(bucket)
+        for part in _key_parts(key):
+            path = path / part
+        return path.read_bytes()
+
     def delete_object(self, bucket: str, key: str) -> bool:
+        driver = self._storage_drivers.get(bucket)
+        if driver is not None:
+            return bool(driver.delete("/".join(_key_parts(key))))
         parts = _key_parts(key)
         path = self.bucket_dir(bucket)
         for part in parts:
@@ -344,9 +448,12 @@ class Broker:
         path.unlink()
         return True
 
-    def scan_bucket(self, bucket: str) -> Dict[str, Tuple[int, int]]:
+    def scan_bucket(self, bucket: str) -> Dict[str, Tuple[Any, int]]:
+        driver = self._storage_drivers.get(bucket)
+        if driver is not None:
+            return {str(k): (v[0], int(v[1])) for k, v in driver.scan().items()}
         root = self.bucket_dir(bucket)
-        found: Dict[str, Tuple[int, int]] = {}
+        found: Dict[str, Tuple[Any, int]] = {}
         if not root.is_dir():
             return found
         for path in root.rglob("*"):
@@ -356,6 +463,20 @@ class Broker:
             stat = path.stat()
             found[rel] = (stat.st_mtime_ns, stat.st_size)
         return found
+
+
+class _BuiltinQueue:
+    """Dead-letter target for a driver queue whose DLQ is a builtin queue."""
+
+    def __init__(self, broker: Broker, name: str, source: str) -> None:
+        self._broker = broker
+        self._name = name
+        self._source = source
+
+    def submit(self, body: str, attributes: Dict[str, Any]) -> str:
+        attrs: Dict[str, Any] = {"pskit_source_queue": self._source}
+        attrs.update(attributes or {})
+        return self._broker.submit_queue(self._name, body, attrs)
 
 
 def _filter_match(policy: Optional[Dict[str, Any]], attributes: Dict[str, Any], body: Any) -> bool:
@@ -393,6 +514,10 @@ class Host:
         self.spec = json.loads((self.root / "pskit_host.json").read_text("utf-8"))
         self.spec["root"] = str(self.root)
         self.app_dir = self.root / "app"
+        # `custom` drivers import classes from the app while the broker is built, and may
+        # resolve relative paths against the host root.
+        self._prepare_imports()
+        os.environ["PSKIT_ONPREM_ROOT"] = str(self.root)
         self.broker = Broker(self.spec)
         self.notes: List[str] = []
         self._stop = threading.Event()
@@ -401,6 +526,15 @@ class Host:
         self._snapshot: Dict[str, Dict[str, Tuple[int, int]]] = {}
         self._sched = _read_json(self._sched_path(), {"origin": None, "last": {}})
         self._booted = False
+        self.started_at = time.time()
+        self.logs = hostlog.LogBuffer(
+            self.broker.data_dir / "logs" / "host.jsonl",
+            capacity=int(self.spec.get("log_buffer") or 5000),
+        )
+        self.executor: Optional[Executor] = None
+        self._stats: Dict[str, Dict[str, Any]] = {}
+        self._stats_lock = threading.Lock()
+        self._last_recover = 0.0
 
     # ---------------------------------------------------------------- lifecycle
     def open(self) -> None:
@@ -412,13 +546,54 @@ class Host:
         set_manifest(None)
         self.manifest = load_manifest(reload=True)
         install_broker(self.broker)
-        self.notes.extend(self.broker.ensure(self.spec.get("functions") or {}))
+        for note in self.broker.ensure(self.spec.get("functions") or {}):
+            self._note(note)
+        self._start_executor()
         self._baseline_storage()
         if not self._sched.get("origin"):
             self._sched["origin"] = time.time()
             self._sched.setdefault("last", {})
             self._save_sched()
         self._booted = True
+
+    def _start_executor(self) -> None:
+        if self.executor is not None:
+            self.executor.shutdown()
+        workflows: Dict[str, Dict[str, Any]] = {}
+        for name, wf in (self.manifest.workflows or {}).items():
+            entry: Dict[str, Any] = {"definition": wf.get("definition") or {}, "orchestrator": wf.get("orchestrator")}
+            if wf.get("timeout"):
+                entry["timeout"] = wf["timeout"]
+            workflows[name] = entry
+        store = FileExecutionStore(
+            self.broker.data_dir / "executions", retention=int(self.spec.get("execution_retention") or 500)
+        )
+        self.executor = Executor(
+            store,
+            workflows,
+            self._task_runner,
+            max_workers=int(self.spec.get("workflow_workers") or 8),
+        )
+        aborted = self.executor.recover()
+        if aborted:
+            self._note(f"{aborted} workflow execution(s) were still running when the host stopped; marked ABORTED")
+        install_executor(self.executor)
+
+    def _task_runner(self, function: str, data: Any) -> Any:
+        return self.invoke(function, Event(type=EventType.WORKFLOW, data=data, source="onprem.workflow"))
+
+    def orchestrated(self, function: str) -> Optional[str]:
+        """Workflow name when ``function`` is an embedded orchestrator."""
+        manifest = getattr(self, "manifest", None)
+        for name, wf in ((manifest.workflows if manifest else None) or {}).items():
+            if wf.get("orchestrator") == function:
+                return name
+        return None
+
+    def capture_output(self) -> None:
+        """Send this process's logging and stdout/stderr into the log buffer."""
+        level = str(self.spec.get("log_level") or os.environ.get("PSKIT_LOG_LEVEL") or "INFO")
+        hostlog.install(self.logs, level=level, capture_streams=bool(self.spec.get("capture_output", True)))
 
     def _prepare_imports(self) -> None:
         app = str(self.app_dir)
@@ -440,14 +615,17 @@ class Host:
         saved = _read_json(path, None)
         if isinstance(saved, dict):
             self._snapshot = {
-                bucket: {key: (int(pair[0]), int(pair[1])) for key, pair in files.items()}
+                bucket: {key: (pair[0], int(pair[1])) for key, pair in files.items()}
                 for bucket, files in saved.items()
                 if isinstance(files, dict)
             }
             return
         for ev in self._events("storage"):
             bucket = ev["bucket"]
-            self._snapshot.setdefault(bucket, self.broker.scan_bucket(bucket))
+            try:
+                self._snapshot.setdefault(bucket, self.broker.scan_bucket(bucket))
+            except Exception as exc:  # noqa: BLE001
+                self._note(f"storage {bucket}: {exc}")
         self._save_snapshot()
 
     def _save_snapshot(self) -> None:
@@ -479,14 +657,93 @@ class Host:
         event.function = function
         event.provider = "onprem"
         timeout = int(spec.get("timeout") or 30)
-        with self._call_env(function, spec):
-            ctx = Context(
-                request_id=uuid.uuid4().hex,
-                function=function,
-                provider="onprem",
-                deadline=time.time() + timeout,
-            )
-            return execute(event, ctx, function)
+        request_id = uuid.uuid4().hex
+        started = time.time()
+        t0 = time.perf_counter()
+        error: Optional[BaseException] = None
+        result: Any = None
+        with hostlog.invocation(function, request_id):
+            try:
+                with self._call_env(function, spec):
+                    ctx = Context(
+                        request_id=request_id,
+                        function=function,
+                        provider="onprem",
+                        deadline=started + timeout,
+                    )
+                    result = execute(event, ctx, function)
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                self._record_invocation(function, event, t0, result, error)
+        return result
+
+    def _record_invocation(
+        self, function: str, event: Event, t0: float, result: Any, error: Optional[BaseException]
+    ) -> None:
+        duration = round((time.perf_counter() - t0) * 1000, 2)
+        kind = getattr(event.type, "value", str(event.type))
+        fields: Dict[str, Any] = {"event_type": kind, "duration_ms": duration}
+        failed = error is not None
+        if event.http is not None:
+            status = result.status if isinstance(result, Response) else (500 if failed else 200)
+            fields.update(method=event.http.method, path=event.http.path, status=status)
+            failed = failed or status >= 500
+            summary = f"{event.http.method} {event.http.path} -> {status}"
+        else:
+            summary = f"{kind} -> {'error' if failed else 'ok'}"
+            if isinstance(result, BatchResult) and result.failed:
+                fields["failed_records"] = len(result.failed)
+        if error is not None:
+            fields["error"] = f"{type(error).__name__}: {error}"
+        message = f"{summary} ({duration} ms)"
+        if error is not None:
+            message += f" {fields['error']}"
+        self.logs.append("ERROR" if failed else "INFO", "invocation", message, fields=fields)
+        with self._stats_lock:
+            item = self._stats.setdefault(function, _empty_stats())
+            item["invocations"] += 1
+            item["total_ms"] += duration
+            item["last_duration_ms"] = duration
+            item["last_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if failed:
+                item["errors"] += 1
+                item["last_error"] = fields.get("error") or f"HTTP {fields.get('status')}"
+
+    def stats(self) -> Dict[str, Any]:
+        with self._stats_lock:
+            raw = {name: dict(item) for name, item in self._stats.items()}
+        for name in self.spec.get("functions") or {}:
+            raw.setdefault(name, _empty_stats())
+        functions = {}
+        for name, item in sorted(raw.items()):
+            count = item["invocations"]
+            functions[name] = {
+                "invocations": count,
+                "errors": item["errors"],
+                "avg_duration_ms": round(item["total_ms"] / count, 2) if count else None,
+                "last_duration_ms": item["last_duration_ms"],
+                "last_at": item["last_at"],
+                "last_error": item["last_error"],
+            }
+        queues: Dict[str, Any] = {}
+        for ev in self._events("queue"):
+            for name in (ev["name"], ev.get("dead_letter")):
+                if not name or name in queues:
+                    continue
+                try:
+                    depth = self.broker.queue_depth(name)
+                    queues[name] = depth if depth >= 0 else None  # -1: the service cannot tell
+                except Exception as exc:  # noqa: BLE001 - a remote queue may be down
+                    queues[name] = None
+                    self._note(f"queue {name}: depth unavailable: {exc}")
+        return {
+            "started_at": datetime.fromtimestamp(self.started_at, timezone.utc).isoformat(timespec="seconds"),
+            "uptime_s": round(time.time() - self.started_at, 1),
+            "functions": functions,
+            "queues": queues,
+        }
 
     def _call_env(self, function: str, spec: Dict[str, Any]):
         forced = {
@@ -613,7 +870,14 @@ class Host:
             if visibility is None:
                 ev = dict(ev)
                 ev["visibility_timeout"] = max(30, 6 * int(self.spec["functions"][function].get("timeout") or 30))
-            claimed = self.broker.claim_queue(ev, now)
+            driver = self.broker.queue_driver(queue)
+            try:
+                if driver is not None and now - self._last_recover >= 5:
+                    driver.recover(now, float(ev.get("visibility_timeout") or 30))
+                claimed = self.broker.claim_queue(ev, now)
+            except Exception as exc:  # noqa: BLE001 - an unreachable queue must not stop the others
+                self._note(f"queue {queue}: {exc}")
+                continue
             if not claimed:
                 continue
             self._rr[queue] = slot + 1
@@ -634,7 +898,12 @@ class Host:
                 failed = [str(msg.get("id")) for msg in claimed]
             else:
                 failed = list(result.failed) if isinstance(result, BatchResult) else []
-            self.broker.settle_queue(ev, claimed, failed, now)
+            try:
+                self.broker.settle_queue(ev, claimed, failed, now)
+            except Exception as exc:  # noqa: BLE001
+                self._note(f"queue {queue}: could not settle messages: {exc}")
+        if now - self._last_recover >= 5:
+            self._last_recover = now
 
     def pump_topics(self, now: float) -> None:
         del now
@@ -684,7 +953,11 @@ class Host:
                     listeners.setdefault(ev["bucket"], []).append((name, ev))
         changed = False
         for bucket, consumers in listeners.items():
-            current = self.broker.scan_bucket(bucket)
+            try:
+                current = self.broker.scan_bucket(bucket)
+            except Exception as exc:  # noqa: BLE001 - e.g. S3 endpoint unreachable
+                self._note(f"storage {bucket}: {exc}")
+                continue
             previous = self._snapshot.get(bucket) or {}
             events: List[Tuple[str, str, int]] = []
             for key, (mtime, size) in current.items():
@@ -723,6 +996,7 @@ class Host:
             return
         self.notes.append(text)
         del self.notes[:-50]
+        self.logs.append("WARNING", "host", text)
 
     # ---------------------------------------------------------------- http
     def make_server(self, port: Optional[int] = None) -> ThreadingHTTPServer:
@@ -735,14 +1009,20 @@ class Host:
     def serve_forever(self) -> None:
         if not self._booted:
             self.open()
+        self.capture_output()
         poller = threading.Thread(target=self._poll_loop, name="pskit-onprem", daemon=True)
         poller.start()
         server = self.make_server()
+        bound = server.server_address
+        self.logs.append("INFO", "host", f"listening on {bound[0]!s}:{bound[1]}")
         try:
             server.serve_forever()
         finally:
             self._stop.set()
+            if self.executor is not None:
+                self.executor.shutdown()
             server.server_close()
+            self.logs.close()
 
     def _poll_loop(self) -> None:
         interval = float(self.spec.get("poll_seconds") or 0.5)
@@ -816,17 +1096,26 @@ class Host:
                         return self._json(200, host.health())
                     if url.path.startswith("/__pskit/"):
                         if not self._admin_ok():
+                            # Drain the body first: closing with unread data resets the connection (Windows).
+                            self._read()
                             return self._json(401, {"error": "admin token required"})
-                        return self._admin(url.path)
+                        return self._admin(url)
                     self._user(url)
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)})
                 except Exception as exc:  # noqa: BLE001 - last-resort response
                     self._json(500, {"errorType": type(exc).__name__, "cause": str(exc)})
 
-            def _admin(self, path: str) -> None:
-                parts = [unquote(part) for part in path.split("/") if part][1:]
+            def _admin(self, url: Any) -> None:
+                parts = [unquote(part) for part in url.path.split("/") if part][1:]
+                query = dict(parse_qsl(url.query, keep_blank_values=True))
                 raw = self._read()
+                if parts == ["logs"]:
+                    return self._logs(query)
+                if parts == ["stats"]:
+                    return self._json(200, host.stats())
+                if parts and parts[0] == "executions":
+                    return self._executions(parts[1:], query)
                 if parts and parts[0] == "queues" and len(parts) == 2:
                     return self._queue(parts[1], raw)
                 if parts and parts[0] == "topics" and len(parts) == 2:
@@ -836,8 +1125,51 @@ class Host:
                 if parts and parts[0] == "invoke" and len(parts) == 2:
                     return self._invoke(parts[1], raw)
                 if parts and parts[0] == "workflows" and len(parts) == 2:
-                    return self._workflow(parts[1], raw)
+                    return self._workflow(parts[1], raw, query)
                 self._json(404, {"error": "unknown on-prem endpoint"})
+
+            def _logs(self, query: Dict[str, str]) -> None:
+                if self.command != "GET":
+                    return self._json(405, {"error": "GET logs"})
+                result = host.logs.query(
+                    since=_int_arg(query, "since", 0),
+                    limit=_int_arg(query, "limit", 200),
+                    level=query.get("level") or None,
+                    function=query.get("function") or None,
+                    q=query.get("q") or None,
+                    source=query.get("source") or None,
+                    before=_int_arg(query, "before", 0) or None,
+                )
+                return self._json(200, result)
+
+            def _executions(self, rest: List[str], query: Dict[str, str]) -> None:
+                executor = host.executor
+                if executor is None:
+                    return self._json(503, {"error": "workflow executor is not running"})
+                if not rest:
+                    if self.command != "GET":
+                        return self._json(405, {"error": "GET the execution list"})
+                    listed = executor.list(
+                        workflow=query.get("workflow") or None,
+                        status=query.get("status") or None,
+                        limit=_int_arg(query, "limit", 20),
+                        offset=_int_arg(query, "offset", 0),
+                    )
+                    return self._json(200, listed)
+                execution_id = rest[0]
+                if not valid_id(execution_id):
+                    return self._json(404, {"error": f"unknown execution {execution_id!r}"})
+                if len(rest) == 2 and rest[1] == "cancel":
+                    if self.command != "POST":
+                        return self._json(405, {"error": "POST to cancel"})
+                    record = executor.cancel(execution_id)
+                elif len(rest) == 1:
+                    record = executor.get(execution_id)
+                else:
+                    return self._json(404, {"error": "unknown on-prem endpoint"})
+                if record is None:
+                    return self._json(404, {"error": f"unknown execution {execution_id!r}"})
+                return self._json(200, record)
 
             def _queue(self, name: str, raw: bytes) -> None:
                 if self.command == "GET":
@@ -883,24 +1215,36 @@ class Host:
                     return self._send(status, headers, body, result.cookies)
                 self._json(200, {"result": result})
 
-            def _workflow(self, name: str, raw: bytes) -> None:
-                function = f"{name}-orchestrator"
+            def _workflow(self, name: str, raw: bytes, query: Dict[str, str]) -> None:
+                if self.command != "POST":
+                    return self._json(405, {"error": "POST the workflow input"})
                 req = HttpRequest(
                     method="POST",
                     path=f"/workflows/{name}",
-                    headers=Headers({"content-type": "application/json"}),
+                    headers=Headers(list(self.headers.items())),
+                    query=query,
                     body=raw,
                 )
-                try:
-                    result = host.invoke(function, Event(type=EventType.HTTP, http=req))
-                except KeyError:
+                return self._start_workflow(name, req)
+
+            def _start_workflow(self, name: str, req: HttpRequest) -> None:
+                executor = host.executor
+                if executor is None or not executor.knows(name):
                     return self._json(404, {"error": f"unknown workflow {name!r}"})
-                except Exception as exc:  # noqa: BLE001
-                    return self._json(500, {"errorType": type(exc).__name__, "cause": str(exc)})
-                if isinstance(result, Response):
-                    status, headers, body = result.render()
-                    return self._send(status, headers, body, result.cookies)
-                self._json(200, {"result": result})
+                if req.body:
+                    try:
+                        data = json.loads(req.body.decode("utf-8"))
+                    except ValueError:
+                        raise ValueError("workflow input must be JSON") from None
+                else:
+                    data = {k: v for k, v in req.query.items() if k != "wait"} or None
+                if not wants_wait(Event(type=EventType.HTTP, http=req)):
+                    started = executor.start(name, data)
+                    started["status_url"] = f"/__pskit/executions/{started['execution_id']}"
+                    return self._json(202, started)
+                record = executor.start(name, data, wait=True)
+                body = executor.result_body(record)
+                return self._json(200 if record.get("status") == "SUCCEEDED" else 500, body)
 
             def _user(self, url: Any) -> None:
                 routes = _routes(host)
@@ -918,6 +1262,10 @@ class Host:
                         source_ip=self.client_address[0],
                         route=pattern,
                     )
+                    workflow = host.orchestrated(function)
+                    if workflow is not None and self.command == "POST":
+                        # Through the executor directly: tracked, async by default, no env lock held.
+                        return self._start_workflow(workflow, req)
                     resp = host.invoke(function, Event(type=EventType.HTTP, http=req))
                     if not isinstance(resp, Response):
                         resp = Response.json(resp)
@@ -928,17 +1276,42 @@ class Host:
         return Handler
 
     def health(self) -> Dict[str, Any]:
+        manifest = getattr(self, "manifest", None)
         return {
             "ok": True,
             "service": self.spec.get("service"),
             "stage": self.spec.get("stage"),
             "endpoint": self.spec.get("endpoint"),
+            "pid": os.getpid(),
+            "started_at": datetime.fromtimestamp(self.started_at, timezone.utc).isoformat(timespec="seconds"),
+            "workflows": sorted((manifest.workflows if manifest else None) or {}),
             "services": {
                 kind: {"use": (svc or {}).get("use"), "path": (svc or {}).get("path")}
                 for kind, svc in (self.spec.get("services") or {}).items()
             },
             "notes": list(self.notes),
         }
+
+
+def _empty_stats() -> Dict[str, Any]:
+    return {
+        "invocations": 0,
+        "errors": 0,
+        "total_ms": 0.0,
+        "last_duration_ms": None,
+        "last_at": None,
+        "last_error": None,
+    }
+
+
+def _int_arg(query: Dict[str, str], key: str, default: int) -> int:
+    raw = query.get(key)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(str(raw))
+    except ValueError:
+        raise ValueError(f"{key} must be an integer") from None
 
 
 def _routes(host: Host) -> List[Tuple[str, str, str]]:

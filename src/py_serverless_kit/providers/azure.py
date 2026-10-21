@@ -69,6 +69,7 @@ class AzureProvider(Provider):
     vendor_dependencies = False
     extra_requirements = ["azure-functions"]
     max_timeout = 600
+    standalone_resources = True
     notes = "Linux Consumption Function App, Python v2 model. Workflows use the embedded engine."
 
     # ------------------------------------------------------------------ naming
@@ -328,21 +329,42 @@ class AzureProvider(Provider):
                 if key not in _PER_FUNCTION_ENV:
                     settings[key] = escape(value)
 
-        # queues / containers / service bus
-        for _name, fn in ctx.function_items():
-            for ev in fn.events_of("queue"):
-                if not ev.existing and not doc.has_resource("azurerm_storage_queue", f"q-{ev.name}"):
-                    doc.resource(
-                        "azurerm_storage_queue", f"q-{ev.name}", {"name": ev.name, "storage_account_id": ref(sa, "id")}
-                    )
-            for ev in fn.events_of("storage"):
-                if not ev.existing and not doc.has_resource("azurerm_storage_container", f"b-{ev.bucket}"):
-                    doc.resource(
-                        "azurerm_storage_container",
-                        f"b-{ev.bucket}",
-                        {"name": ev.bucket, "storage_account_id": ref(sa, "id"), "container_access_type": "private"},
-                    )
+        # queues / containers / service bus (events, then managed resources no event uses)
+        queues = [ev.name for _n, fn in ctx.function_items() for ev in fn.events_of("queue") if not ev.existing]
+        containers = [ev.bucket for _n, fn in ctx.function_items() for ev in fn.events_of("storage") if not ev.existing]
+        topics = [ev.name for _n, fn in ctx.function_items() for ev in fn.events_of("topic") if not ev.existing]
+        for key, res in self.standalone(cfg):
+            {"queue": queues, "storage": containers, "topic": topics}[res.type].append(res.native_name(key))
+        for qname in queues:
+            if not doc.has_resource("azurerm_storage_queue", f"q-{qname}"):
+                doc.resource(
+                    "azurerm_storage_queue", f"q-{qname}", {"name": qname, "storage_account_id": ref(sa, "id")}
+                )
+        for bucket in containers:
+            if not doc.has_resource("azurerm_storage_container", f"b-{bucket}"):
+                doc.resource(
+                    "azurerm_storage_container",
+                    f"b-{bucket}",
+                    {"name": bucket, "storage_account_id": ref(sa, "id"), "container_access_type": "private"},
+                )
         ns: Optional[str] = None
+        for tname in topics:
+            if ns is None:
+                ns = doc.resource(
+                    "azurerm_servicebus_namespace",
+                    "bus",
+                    {
+                        "name": f"{ctx.prefix[:40].rstrip('-')}-{stable_suffix(ctx.prefix, 'bus', length=6)}",
+                        "resource_group_name": rg_name,
+                        "location": loc,
+                        "sku": "Standard",
+                        "tags": tags,
+                    },
+                )
+                settings[SERVICEBUS_SETTING] = ref(ns, "default_primary_connection_string")
+            label = f"t-{tname}"
+            if not doc.has_resource("azurerm_servicebus_topic", label):
+                doc.resource("azurerm_servicebus_topic", label, {"name": tname, "namespace_id": ref(ns, "id")})
         for name, fn in ctx.function_items():
             for ev in fn.events_of("topic"):
                 label = f"t-{ev.name}"
@@ -353,23 +375,6 @@ class AzureProvider(Provider):
                         {"name": ev.name, "namespace_id": ctx.opt("servicebus_namespace_id")},
                     )
                 else:
-                    if ns is None:
-                        ns = doc.resource(
-                            "azurerm_servicebus_namespace",
-                            "bus",
-                            {
-                                "name": f"{ctx.prefix[:40].rstrip('-')}-{stable_suffix(ctx.prefix, 'bus', length=6)}",
-                                "resource_group_name": rg_name,
-                                "location": loc,
-                                "sku": "Standard",
-                                "tags": tags,
-                            },
-                        )
-                        settings[SERVICEBUS_SETTING] = ref(ns, "default_primary_connection_string")
-                    if not doc.has_resource("azurerm_servicebus_topic", label):
-                        doc.resource(
-                            "azurerm_servicebus_topic", label, {"name": ev.name, "namespace_id": ref(ns, "id")}
-                        )
                     topic = f"azurerm_servicebus_topic.{tf_id(label)}"
                 doc.resource(
                     "azurerm_servicebus_subscription",

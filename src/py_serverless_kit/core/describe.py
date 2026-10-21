@@ -30,7 +30,26 @@ def event_summary(ev: EventSpec) -> Dict[str, Any]:
     else:
         text = f"topic {c.name}"
         extra = {"name": c.name, "existing": c.existing}
+    if ev.type in ("queue", "storage", "topic") and c.resource:
+        text += f" <- resource {c.resource}" + (" (external)" if c.existing else "")
+        extra["resource"] = c.resource
     return {"type": ev.type, "summary": text, **extra}
+
+
+def resource_records(project: Project) -> List[Dict[str, Any]]:
+    """Bound resources, without connection values (they may hold secrets)."""
+    cfg = project.config
+    return [
+        {
+            "name": key,
+            "type": res.type,
+            "external": res.external,
+            "native_name": res.native_name(key),
+            "functions": cfg.resource_functions(key),
+            "connection_keys": sorted(res.connection),
+        }
+        for key, res in sorted(cfg.resources.items())
+    ]
 
 
 def function_record(project: Project, name: str, fn: FunctionConfig, out: Dict[str, Any]) -> Dict[str, Any]:
@@ -94,6 +113,7 @@ def build_record(
         )
     return {
         "schema": 1,
+        "key": f"{cfg.provider.name}-{cfg.provider.stage}",
         "status": status,
         "service": cfg.service,
         "stage": cfg.provider.stage,
@@ -108,5 +128,6 @@ def build_record(
         "artifact": artifact or {},
         "functions": functions,
         "workflows": workflows,
+        "resources": resource_records(project),
         "outputs": {k: v for k, v in outputs.items() if k != "pskit"},
     }

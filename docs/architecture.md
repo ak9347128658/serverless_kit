@@ -41,6 +41,7 @@ Key properties:
 artifact.zip
 ├── app/...                       your code (package.include/exclude + default excludes)
 ├── py_serverless_kit/            __init__.py, _version.py, runtime/  (no CLI, no pydantic/yaml/click)
+│                                 runtime/ includes executions.py, hostlog.py, resources.py, drivers/ (redis, s3)
 ├── pskit_manifest.json           functions -> handler, routes, CORS, timeout, physical names; embedded workflows
 ├── <shim>                        pskit_entry.py (aws) · main.py (gcp) · function_app.py + host.json (azure)
 │                                 index.py (alibaba/tencent/huawei) · __main__.py (ibm/do)
@@ -50,6 +51,8 @@ artifact.zip
 ```
 
 On-premises also writes `.pskit/onprem-<stage>/onprem_app/` (`pskit_host.json`, `onprem_ctl.py`, `onprem_deploy.py`, `pskit-run.sh` for SSH, the staged bundle, and a Dockerfile or systemd unit when those methods are selected). Terraform `local-exec` runs `onprem_deploy.py apply`. Local starts the host on this machine. SSH and `scp` pack `release.tar.gz`, copy it with the optional `.pem`, extract it on the server, restart the process or the systemd unit, and wait for `/__pskit/health`. Docker builds an image on this machine. A remote Docker target installs Docker on the server when it is missing, copies the image with the `.pem`, and waits until the container is healthy.
+
+At run time the host keeps its state under `data_dir`: `queues/`, `buckets/`, `topics/` (builtin services), `executions/<id>.json` (workflow runs), `logs/host.jsonl` (rotated at 10 MiB), `schedule-state.json` and `storage-snapshot.json`.
 
 ## Runtime flow
 
@@ -75,7 +78,11 @@ adapter: Response/result -> native response
 
 **The `__pskit` envelope.** Payloads that pskit itself produces are wrapped as `{"__pskit": "<schedule|workflow|invoke>", "data": ...}`. These are schedule inputs, workflow task inputs and `invoke()` calls. Because the adapter can recognise the envelope, the handler sees the right `event.type` even on clouds where everything arrives as HTTP (GCP, IBM, DigitalOcean, Cloudflare, Oracle). On those clouds, failures come back as `500 {"errorType", "cause"}` so native workflows can match errors by exception name.
 
-**Embedded workflows.** On clouds without a native engine, `core/project.py` adds a `<workflow>-orchestrator` function whose handler is `py_serverless_kit.runtime.workflow.orchestrate`. It runs the state machine from the manifest and calls task handlers in-process through the same dispatcher.
+**Embedded workflows.** On clouds without a native engine, `core/project.py` adds a `<workflow>-orchestrator` function whose handler is `py_serverless_kit.runtime.workflow.orchestrate`. It runs the state machine from the manifest and calls task handlers in-process through the same dispatcher. Every run gets an `execution_id`. Inside the on-premises host, `runtime/executions.py` (an `Executor` with a file-backed store) runs workflows in background threads, records status, current state and history in `<data_dir>/executions/<id>.json`, and supports cancel. On a cloud function the run stays synchronous and only the id is returned. `core/executions.py` gives the CLI and dashboard one interface over the host, AWS Step Functions (boto3) and Google Cloud Workflows.
+
+**Resources.** `resources:` entries become `PSKIT_RESOURCE_<KEY>_*` environment variables (`ServiceConfig.binding_environment`, plus provider-known ARNs/URLs/ids), and `runtime/resources.py` reads them back. On premises, an event's `driver` binding makes the host's `Broker` use `runtime/drivers/redis.py` (queues) or `runtime/drivers/s3.py` (storage) instead of directories.
+
+**On-premises observability.** `runtime/hostlog.py` captures logging, stdout/stderr, one entry per invocation, and host notes into a ring buffer plus `<data_dir>/logs/host.jsonl`, tagged per thread with the current function and request id. The host serves it at `/__pskit/logs`, with counters at `/__pskit/stats`. `pskit logs` and `pskit dashboard --serve` (`dashboard/server.py`) read those endpoints through `core/onprem_control.py`, which keeps the admin token server-side.
 
 ## State handling
 
