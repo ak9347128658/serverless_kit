@@ -29,6 +29,8 @@ Queue, storage and topic events may carry a ``driver`` binding (from a
 
 from __future__ import annotations
 
+import base64
+import inspect
 import json
 import os
 import shutil
@@ -537,6 +539,10 @@ class Host:
         self._stats: Dict[str, Dict[str, Any]] = {}
         self._stats_lock = threading.Lock()
         self._last_recover = 0.0
+        # Node.js services: one `node pskit_runtime/worker.js` per function (its own environment).
+        self.language = str(self.spec.get("language") or "python")
+        self._workers: Dict[str, Any] = {}
+        self._workers_lock = threading.Lock()
 
     # ---------------------------------------------------------------- lifecycle
     def open(self) -> None:
@@ -666,14 +672,18 @@ class Host:
         result: Any = None
         with hostlog.invocation(function, request_id):
             try:
-                with self._call_env(function, spec):
-                    ctx = Context(
-                        request_id=request_id,
-                        function=function,
-                        provider="onprem",
-                        deadline=started + timeout,
-                    )
-                    result = execute(event, ctx, function)
+                if self.language == "node":
+                    ctx = Context(request_id=request_id, function=function, provider="onprem", deadline=started + timeout)
+                    result = self._invoke_node(function, spec, event, ctx, timeout)
+                else:
+                    with self._call_env(function, spec):
+                        ctx = Context(
+                            request_id=request_id,
+                            function=function,
+                            provider="onprem",
+                            deadline=started + timeout,
+                        )
+                        result = execute(event, ctx, function)
             except BaseException as exc:
                 error = exc
                 raise
@@ -747,7 +757,107 @@ class Host:
             "queues": queues,
         }
 
-    def _call_env(self, function: str, spec: Dict[str, Any]):
+    # ---------------------------------------------------------------- Node.js
+    def _invoke_node(self, function: str, spec: Dict[str, Any], event: Event, ctx: Context, timeout: int) -> Any:
+        """Run one invocation in the function's Node.js worker and map the answer back.
+
+        Embedded workflow orchestrators stay in this (Python) process: the executor
+        runs the definition and calls each task function through its worker.
+        """
+        workflow = self.orchestrated(function)
+        if workflow is not None:
+            return self._orchestrate_node(workflow, event)
+        worker = self._worker(function, spec)
+        if ctx.memory_mb is None and spec.get("memory"):
+            ctx.memory_mb = int(spec["memory"])
+        reply = worker.call(function, event, ctx, timeout)
+        return node_result(reply)
+
+    def _orchestrate_node(self, workflow: str, event: Event) -> Any:
+        executor = self.executor
+        if executor is None or not executor.knows(workflow):
+            raise LookupError(f"unknown workflow {workflow!r}")
+        if event.http is not None:
+            data = event.http.json(default=None) if event.http.body else dict(event.http.query)
+        else:
+            data = event.data
+        if not wants_wait(event):
+            return Response.json(executor.start(workflow, data), 202)
+        record = executor.start(workflow, data, wait=True)
+        body = executor.result_body(record)
+        if record.get("status") != "SUCCEEDED":
+            if event.http is not None:
+                return Response.json(body, 500)
+            raise RuntimeError(f"{record.get('error') or 'States.Runtime'}: {record.get('cause') or ''}")
+        return body
+
+    def _node_bin(self) -> str:
+        rel = str(self.spec.get("node_bin") or "node")
+        if "/" in rel:
+            bundled = self.root / rel
+            if bundled.is_file():
+                return str(bundled)
+        found = shutil.which("node")
+        if not found:
+            raise RuntimeError(
+                "Node.js (`node`) is not on PATH on this machine; install it or redeploy with options.deploy.node: bundle"
+            )
+        return found
+
+    def _worker(self, function: str, spec: Dict[str, Any]) -> Any:
+        with self._workers_lock:
+            worker = self._workers.get(function)
+            if worker is not None and getattr(worker, "alive", True):
+                return worker
+            from .node_worker import NodeWorker
+
+            env = dict(os.environ)
+            env.update(self._function_env(function, spec))
+            env["PSKIT_BUNDLE_ROOT"] = str(self.app_dir)
+            env.setdefault("PSKIT_LOG_LEVEL", str(self.spec.get("log_level") or "INFO"))
+            kwargs: Dict[str, Any] = {"env": env, "node": self._node_bin()}
+            if "on_log" in inspect.signature(NodeWorker).parameters:
+                kwargs["on_log"] = lambda line, fn=function: self._worker_log(fn, line)
+            worker = NodeWorker(self.app_dir, **kwargs)
+            self._workers[function] = worker
+            return worker
+
+    def _worker_log(self, function: str, line: str) -> None:
+        """A stderr line of a worker: JSON from the pskit logger, or plain text (console output, crashes).
+
+        The worker moves handlers' stdout to stderr (stdout is the protocol), so plain lines
+        are recorded like ``print()`` output of Python handlers.
+        """
+        text = line.rstrip("\r\n")
+        if not text:
+            return
+        try:
+            entry = json.loads(text)
+        except ValueError:
+            entry = None
+        if not isinstance(entry, dict) or "message" not in entry:
+            self.logs.append("INFO", "stdout", text, function=function)
+            return
+        fields = {k: v for k, v in entry.items() if k not in ("ts", "level", "message", "function", "request_id")}
+        self.logs.append(
+            str(entry.get("level") or "INFO"),
+            "function",
+            str(entry.get("message")),
+            function=str(entry.get("function") or function),
+            request_id=entry.get("request_id"),
+            fields=fields or None,
+        )
+
+    def close_workers(self) -> None:
+        with self._workers_lock:
+            workers, self._workers = list(self._workers.values()), {}
+        for worker in workers:
+            try:
+                worker.close()
+            except Exception:  # noqa: BLE001, S110 - best effort at shutdown
+                pass
+
+    def _function_env(self, function: str, spec: Dict[str, Any]) -> Dict[str, str]:
         forced = {
             "PSKIT_PROVIDER": "onprem",
             "PSKIT_SERVICE": str(self.spec.get("service") or ""),
@@ -759,9 +869,12 @@ class Host:
             "PSKIT_MANIFEST": str(self.app_dir / "pskit_manifest.json"),
             "PSKIT_ENDPOINT": str(self.spec.get("endpoint") or ""),
         }
-        env = dict(spec.get("environment") or {})
+        env = {str(k): str(v) for k, v in (spec.get("environment") or {}).items()}
         env.update(forced)
-        return self._swap_env(env)
+        return env
+
+    def _call_env(self, function: str, spec: Dict[str, Any]):
+        return self._swap_env(self._function_env(function, spec))
 
     def _swap_env(self, env: Dict[str, str]):
         host = self
@@ -1023,6 +1136,7 @@ class Host:
             self._stop.set()
             if self.executor is not None:
                 self.executor.shutdown()
+            self.close_workers()
             server.server_close()
             self.logs.close()
 
@@ -1300,6 +1414,38 @@ class Host:
             },
             "notes": list(self.notes),
         }
+
+
+class NodeFunctionError(RuntimeError):
+    """A Node.js handler failed outside an HTTP request (the worker answered ``ok: false``)."""
+
+    def __init__(self, error: Dict[str, Any]) -> None:
+        self.error_type = str(error.get("type") or "Error")
+        self.stack = str(error.get("stack") or "")
+        super().__init__(f"{self.error_type}: {error.get('message') or ''}")
+
+
+def node_result(reply: Dict[str, Any]) -> Any:
+    """Worker response (``deploy_docs/NODE_RUNTIME.md``) -> what the Python dispatcher would return."""
+    if not reply.get("ok"):
+        raise NodeFunctionError(dict(reply.get("error") or {}))
+    kind = reply.get("kind")
+    if kind == "http":
+        body = base64.b64decode(reply.get("body_b64") or "")
+        headers: Dict[str, Any] = {}
+        cookies: List[str] = []
+        for key, value in dict(reply.get("headers") or {}).items():
+            if isinstance(value, list):
+                if key.lower() == "set-cookie":
+                    cookies.extend(str(v) for v in value)
+                else:
+                    headers[key] = ", ".join(str(v) for v in value)
+            else:
+                headers[key] = str(value)
+        return Response(int(reply.get("status") or 200), body, headers, cookies)
+    if kind == "batch":
+        return BatchResult(failed=[str(i) for i in reply.get("failed") or []])
+    return reply.get("value")
 
 
 def _empty_stats() -> Dict[str, Any]:

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-21
+
+### Added
+- **Node.js and TypeScript functions** (`provider.runtime: nodejs18 | nodejs20 | nodejs22 | nodejs24`) on every provider. A service is either Python or Node.js. Handlers use the same `module.function` form, and the `pskit` package (vendored as `pskit_runtime/`) has the same Event / Context / Response / BatchResult API in camelCase, plus `invoke()`, resources and the embedded workflow engine. TypeScript is compiled with `tsc` while packaging (`package.node`). The on-prem host and `pskit dev` / `pskit invoke` run Node.js handlers through a JSON-lines worker. See `docs/nodejs.md` and `deploy_docs/NODE_RUNTIME.md`.
+- `pskit remove --keep-resources`: destroy functions and triggers but keep managed buckets, queues and topics with their data (they leave the Terraform state). Studio's Deploy page has the matching switch.
+- Studio:
+  - **Project environment** creates `.venv` with a chosen interpreter and installs `requirements.txt`, or runs `npm install` for Node.js services.
+  - Full VS Code: pick Python and Node.js versions; studio builds a code-server image with them once.
+  - Triggers: **Create & select** adds a new queue, bucket or topic to Resources and selects it.
+  - JS/TS editing: highlighting, handler stubs in TypeScript or ESM/CommonJS JavaScript, and Node.js runtimes in the runtime pickers.
+  - On-prem deploy fields for Node.js (`node`, `node_url`, `node_sha256`, `host_python`).
+
 ## [0.9.0] - 2026-10-21
 
 ### Added

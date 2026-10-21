@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/lang-json";
 import { python } from "@codemirror/lang-python";
 import { yaml } from "@codemirror/lang-yaml";
@@ -29,13 +30,15 @@ import {
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 
-export type Language = "python" | "yaml" | "json" | "text";
+export type Language = "python" | "yaml" | "json" | "javascript" | "typescript" | "text";
 
 export function languageOf(path: string): Language {
   const p = path.toLowerCase();
   if (p.endsWith(".py") || p.endsWith(".pyi")) return "python";
   if (p.endsWith(".yml") || p.endsWith(".yaml")) return "yaml";
   if (p.endsWith(".json")) return "json";
+  if (/\.(ts|mts|cts|tsx)$/.test(p)) return "typescript";
+  if (/\.(js|mjs|cjs|jsx)$/.test(p)) return "javascript";
   return "text";
 }
 
@@ -43,6 +46,8 @@ function languageExt(lang: Language): Extension {
   if (lang === "python") return [python(), indentUnit.of("    ")];
   if (lang === "yaml") return [yaml(), indentUnit.of("  ")];
   if (lang === "json") return [json(), indentUnit.of("  ")];
+  if (lang === "typescript") return [javascript({ typescript: true }), indentUnit.of("  ")];
+  if (lang === "javascript") return [javascript(), indentUnit.of("  ")];
   return indentUnit.of("    ");
 }
 

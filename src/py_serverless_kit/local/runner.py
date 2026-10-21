@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import sys
 import time
 from contextlib import contextmanager
@@ -19,6 +20,8 @@ from ..runtime.event import Event, EventType, Headers, HttpRequest, Record
 from ..runtime.manifest import BundleManifest, set_manifest
 from ..runtime.workflow import WorkflowEngine, in_process_runner
 from ..workflows import definition_dict
+
+LOCAL_NODE_DIR = "local-node"
 
 
 def load_dotenv(path: Path) -> Dict[str, str]:
@@ -54,7 +57,14 @@ class LocalRunner:
             name: {"orchestrator": f"{name}-orchestrator", "definition": definition_dict(wf)}
             for name, wf in project.config.workflows.items()
         }
+        self.manifest_dict = manifest
         self.manifest = BundleManifest.from_dict(manifest)
+        self.language = project.config.language
+        # Node.js: one worker per function (each gets its own environment), rebuilt on reload.
+        self._workers: Dict[str, Any] = {}
+        self._node_root: Optional[Path] = None
+        if self.language == "node":
+            return
         self._purge_foreign_modules()
 
     def _purge_foreign_modules(self) -> None:
@@ -74,8 +84,8 @@ class LocalRunner:
         dispatch._HANDLERS.clear()
 
     # ---------------------------------------------------------------- env
-    @contextmanager
-    def environment(self, function: Optional[str] = None) -> Iterator[None]:
+    def function_env(self, function: Optional[str] = None) -> Dict[str, str]:
+        """The environment a function sees locally (provider + bindings + function + ``.env``)."""
         cfg = self.project.config
         env: Dict[str, str] = {
             "PSKIT_PROVIDER": "local",
@@ -93,6 +103,11 @@ class LocalRunner:
             env["PSKIT_HANDLER"] = cfg.functions[function].handler
         if self.env_file is not None:
             env.update(load_dotenv(self.env_file))
+        return env
+
+    @contextmanager
+    def environment(self, function: Optional[str] = None) -> Iterator[None]:
+        env = self.function_env(function)
         saved = {k: os.environ.get(k) for k in env}
         os.environ.update(env)
         added_path = str(self.source)
@@ -116,14 +131,71 @@ class LocalRunner:
             raise KeyError(f"unknown function {function!r}; known: {known}")
         event.function = function
         event.provider = "local"
+        if self.language == "node":
+            return self._invoke_node(function, event)
         with self.environment(function):
             return dispatch.execute(event, Context(function=function, provider="local"), function)
+
+    # ---------------------------------------------------------------- Node.js
+    def node_root(self) -> Path:
+        """Build (once per reload) ``.pskit/local-node``: sources (TypeScript compiled), runtime, manifest."""
+        if self._node_root is None:
+            from ..packaging import node
+            from ..packaging.builder import BuildError
+
+            root = self.project.root / ".pskit" / LOCAL_NODE_DIR
+            if root.exists():
+                shutil.rmtree(root)
+            root.mkdir(parents=True)
+            try:
+                node.prepare_tree(self.project, root, self.manifest_dict, log=lambda _m: None, node_modules_runtime=True)
+            except node.NodeBuildError as exc:
+                raise BuildError(str(exc)) from None
+            self._node_root = root
+        return self._node_root
+
+    def _worker(self, function: str) -> Any:
+        worker = self._workers.get(function)
+        if worker is None:
+            from ..packaging.node import node_exe
+            from ..runtime.node_worker import NodeWorker
+
+            root = self.node_root()
+            env = dict(os.environ)
+            env.update(self.function_env(function))
+            env["PSKIT_BUNDLE_ROOT"] = str(root)
+            worker = NodeWorker(root, env=env, node=node_exe())
+            self._workers[function] = worker
+        return worker
+
+    def _invoke_node(self, function: str, event: Event) -> Any:
+        """Run a Node.js function in its worker: a Response, BatchResult or value; handler errors raise
+        :class:`~py_serverless_kit.runtime.node_worker.NodeFunctionError` (``.error`` = JS error name)."""
+        timeout = float(self.project.config.timeout_of(self.project.config.functions[function]))
+        ctx = Context(function=function, provider="local", deadline=time.time() + timeout)
+        return self._worker(function).execute(function, event, ctx, timeout + 5)
+
+    def close(self) -> None:
+        """Stop Node.js workers (no-op for Python services)."""
+        for worker in self._workers.values():
+            try:
+                worker.close()
+            except Exception:  # noqa: BLE001, S110 - best effort on shutdown
+                pass
+        self._workers.clear()
 
     def run_workflow(self, name: str, data: Any, *, sleep: bool = False) -> Dict[str, Any]:
         wf = self.project.config.workflows.get(name)
         if wf is None:
             known = ", ".join(sorted(self.project.config.workflows)) or "<none>"
             raise KeyError(f"unknown workflow {name!r}; known: {known}")
+        if self.language == "node":
+
+            def task(function: str, payload: Any) -> Any:
+                return self.invoke(function, Event(type=EventType.WORKFLOW, function=function, data=payload))
+
+            engine = WorkflowEngine(definition_dict(wf), task, sleep=time.sleep if sleep else (lambda _seconds: None))
+            return {"output": engine.run(data), "history": engine.history}
         engine = WorkflowEngine(
             definition_dict(wf),
             in_process_runner("local"),
@@ -135,6 +207,10 @@ class LocalRunner:
 
     def reload(self) -> None:
         """Forget imported user modules so edited code is picked up (dev server)."""
+        if self.language == "node":
+            self.close()
+            self._node_root = None
+            return
         src = str(self.source)
         for name, module in list(sys.modules.items()):
             path = getattr(module, "__file__", None) or ""

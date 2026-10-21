@@ -8,6 +8,8 @@ import { useConfirm, useToast } from "../components/Feedback";
 import { Segmented, TextInput } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { useJob } from "../jobs";
+import { useStudio } from "../store";
+import { asObject, str } from "../util";
 import { href, navigate } from "../route";
 import type { FileEntry, VsCodeState } from "../types";
 import { safeUrl } from "../../format";
@@ -317,6 +319,11 @@ function VsCodePanel() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [image, setImage] = useState("");
   const [busy, setBusy] = useState(false);
+  const { draft } = useStudio();
+  const runtime = str(asObject(draft.provider).runtime);
+  // Default: the project's own runtime (python3.12 -> 3.12, nodejs20 -> 20).
+  const [python, setPython] = useState<string>(() => (runtime.startsWith("python") ? runtime.slice(6) : ""));
+  const [node, setNode] = useState<string>(() => (runtime.startsWith("nodejs") ? runtime.slice(6) : ""));
   const job = useJob(jobId);
 
   const refresh = useCallback(() => {
@@ -325,6 +332,10 @@ function VsCodePanel() {
         setState(s);
         setError(null);
         setImage((i) => i || s.image);
+        if (s.running && (s.python || s.node)) {
+          setPython(s.python || "");
+          setNode(s.node || "");
+        }
         if (s.log_job && !jobId) setJobId(s.log_job);
       },
       (exc: unknown) => setError(errorMessage(exc)),
@@ -346,7 +357,7 @@ function VsCodePanel() {
   const start = async () => {
     setBusy(true);
     try {
-      const r = await api.vscodeStart(image && image !== state?.image ? image : undefined);
+      const r = await api.vscodeStart(image && image !== state?.image ? image : undefined, python || undefined, node || undefined);
       setJobId(r.job_id);
     } catch (exc) {
       toast(errorMessage(exc), "err");
@@ -407,12 +418,39 @@ function VsCodePanel() {
           <span className="muted small">image</span>
           <TextInput mono value={image} onChange={setImage} disabled={state.running} />
         </label>
+        <label className="row-gap" title="CPython installed in the editor container (uv python install)">
+          <span className="muted small">Python</span>
+          <select className="select select-sm" value={python} onChange={(e) => setPython(e.target.value)}>
+            <option value="">image default</option>
+            {(state.python_versions || ["3.13", "3.12", "3.11", "3.10", "3.9"]).map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="row-gap" title="Official Node.js build installed in the editor container">
+          <span className="muted small">Node.js</span>
+          <select className="select select-sm" value={node} onChange={(e) => setNode(e.target.value)}>
+            <option value="">none</option>
+            {(state.node_versions || ["24", "22", "20", "18"]).map((v) => (
+              <option key={v} value={v}>
+                {v}.x
+              </option>
+            ))}
+          </select>
+        </label>
         {state.running ? (
           <>
             {url && (
               <a className="btn" href={url} target="_blank" rel="noopener noreferrer">
                 Open in new tab ↗
               </a>
+            )}
+            {((state.python || "") !== python || (state.node || "") !== node) && (
+              <button type="button" className="btn btn-primary" disabled={busy || job.status === "running"} onClick={() => void start()} title="Recreate the editor container with the runtimes picked here (your files are kept)">
+                Restart with these runtimes
+              </button>
             )}
             <button type="button" className="btn btn-danger" disabled={busy} onClick={() => void stop()}>
               Stop
@@ -431,7 +469,11 @@ function VsCodePanel() {
       ) : (
         <JobConsole
           job={job}
-          emptyText="Press start. Docker pulls the image the first time; progress shows here."
+          emptyText={
+            python || node
+              ? `Press start. Docker pulls the image, then builds it once with ${[python && `Python ${python}`, node && `Node.js ${node}`].filter(Boolean).join(" and ")} (a few minutes); progress shows here.`
+              : "Press start. Docker pulls the image the first time; progress shows here."
+          }
         />
       )}
       {state.running && <p className="muted small">The container only listens on 127.0.0.1. Files you save in VS Code are the project files; the built-in editor sees them on reload.</p>}

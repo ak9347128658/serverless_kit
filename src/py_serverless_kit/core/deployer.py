@@ -133,20 +133,37 @@ class Deployer:
         self.run_hook("after_deploy")
         return record
 
-    def remove(self, *, auto_approve: bool = True) -> None:
+    def remove(self, *, auto_approve: bool = True, keep_resources: bool = False) -> List[str]:
+        """Destroy the stage. With ``keep_resources`` managed buckets, queues and topics stay in the
+        cloud (they are dropped from the Terraform state first). Returns the kept addresses."""
+        from .retain import kept_addresses, supports
+
         project = self.project
         if not (project.work_dir / "main.tf.json").is_file():
             # Re-render so terraform knows the provider configuration.
             self.package(skip_deps=True)
         self.run_hook("before_remove")
         self.runner.init()
+        kept: List[str] = []
+        if keep_resources:
+            provider = project.config.provider.name
+            if not supports(provider):
+                self.echo(f"  {project.provider.display_name}: no managed buckets, queues or topics to keep")
+            else:
+                kept = kept_addresses(provider, self.runner.state_list())
+                for address in kept:
+                    self.echo(f"  keeping {address} (no longer managed by pskit)")
+                self.runner.state_rm(kept)
         self.runner.destroy(auto_approve=auto_approve)
         record_path = project.work_dir / RECORD_FILE
         if record_path.is_file():
             record = json.loads(record_path.read_text("utf-8"))
             record["status"] = "removed"
+            if kept:
+                record["kept_resources"] = kept
             record_path.write_text(json.dumps(record, indent=2), "utf-8")
         self.run_hook("after_remove")
+        return kept
 
     def refresh_info(self) -> Dict[str, Any]:
         outputs = self.runner.output()

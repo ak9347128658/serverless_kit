@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..config.loader import LoadedConfig, load_config
-from ..config.schema import EventSpec, FunctionConfig, HttpEvent, ServiceConfig
-from ..providers.base import HTTP, ORCHESTRATOR_HANDLER, Issue, Provider
+from ..config.schema import EventSpec, FunctionConfig, HttpEvent, ServiceConfig, is_generated_handler
+from ..providers.base import HTTP, Issue, Provider, orchestrator_handler
 from ..providers.registry import get_provider
 from ..workflows import definition_dict
 
@@ -74,11 +74,16 @@ class Project:
         if not source.is_dir():
             issues.append(Issue("error", f"package.source {source} is not a directory", "package.source"))
         for name, fn in self.config.functions.items():
-            if fn.handler == ORCHESTRATOR_HANDLER:
+            if is_generated_handler(fn.handler):
                 continue
             module = fn.handler.replace(":", ".").rsplit(".", 1)[0]
             rel = Path(*module.split("."))
-            if not ((source / rel).with_suffix(".py").is_file() or (source / rel / "__init__.py").is_file()):
+            if self.config.language == "node":
+                exts = (".ts", ".mts", ".js", ".mjs", ".cjs")
+                found = any((source / rel).with_suffix(e).is_file() or (source / rel / f"index{e}").is_file() for e in exts)
+            else:
+                found = (source / rel).with_suffix(".py").is_file() or (source / rel / "__init__.py").is_file()
+            if not found:
                 issues.append(
                     Issue("warning", f"handler module {module!r} not found under {source}", f"functions.{name}.handler")
                 )
@@ -142,7 +147,7 @@ def expand(config: ServiceConfig, provider: Provider) -> tuple[ServiceConfig, Di
         if HTTP in provider.capabilities and wf.options.get("http", True):
             events.append(EventSpec(type="http", config=HttpEvent(method="POST", path=f"/workflows/{name}")))
         functions[orch] = FunctionConfig(
-            handler=ORCHESTRATOR_HANDLER,
+            handler=orchestrator_handler(config.language),
             description=f"Embedded orchestrator for workflow {name}",
             timeout=min(wf.timeout or provider.max_timeout, provider.max_timeout),
             events=events,

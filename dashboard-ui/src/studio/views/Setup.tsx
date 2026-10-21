@@ -3,12 +3,12 @@ import { ErrorBanner, Spinner } from "../../components/Feedback";
 import { api, errorMessage } from "../api";
 import { JobConsole } from "../components/Console";
 import { useToast } from "../components/Feedback";
-import { ComboInput, FieldForm, FormRow, Section, Segmented, TextInput } from "../components/Forms";
+import { ComboInput, FieldForm, FormRow, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { useJob } from "../jobs";
 import { href } from "../route";
 import { useStudio } from "../store";
-import type { EnvHint, JsonObject, SetupCheck, SetupResult } from "../types";
+import type { DevEnvStatus, EnvHint, JsonObject, SetupCheck, SetupResult } from "../types";
 import { asObject, getIn, str } from "../util";
 
 type Os = "windows" | "macos" | "linux";
@@ -161,6 +161,7 @@ export function SetupView() {
           <EnvForm hints={result.env} onSaved={load} />
         </div>
       )}
+      <ProjectEnv />
       {provider === "onprem" && <OnPremConnection />}
     </div>
   );
@@ -386,6 +387,94 @@ function OnPremConnection() {
         More deploy settings (remote path, install mode, image…) are on <a href={href("overview")}>Overview &amp; provider</a>. Save
         pskit.yml after changing them.
       </p>
+    </Section>
+  );
+}
+
+/** The project's own environment: `.venv` + requirements.txt (Python) or `npm install` (Node.js). */
+function ProjectEnv() {
+  const { draft } = useStudio();
+  const toast = useToast();
+  const [env, setEnv] = useState<DevEnvStatus | null>(null);
+  const [python, setPython] = useState("");
+  const [recreate, setRecreate] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const job = useJob(jobId);
+  const node = str(asObject(draft.provider).runtime).startsWith("nodejs");
+  const load = useCallback(() => {
+    api.env().then(
+      (r) => {
+        setEnv(r);
+        setPython((p) => p || r.interpreters[0]?.path || "");
+      },
+      (exc: unknown) => toast(errorMessage(exc), "err"),
+    );
+  }, [toast]);
+  useEffect(load, [load]);
+  useEffect(() => {
+    if (job.status === "succeeded" || job.status === "failed") load();
+  }, [job.status, load]);
+  const run = (language: "python" | "node") =>
+    api.envSetup({ language, python: language === "python" ? python || undefined : undefined, recreate }).then(
+      (r) => setJobId(r.job_id),
+      (exc: unknown) => toast(errorMessage(exc), "err"),
+    );
+  return (
+    <Section title="Project environment" hint={node ? "npm install" : ".venv + requirements"}>
+      {!env ? (
+        <Spinner label="Looking at the project…" />
+      ) : (
+        <div className="form">
+          {!node && (
+            <>
+              <FormRow label="Virtual environment" help={env.venv.path}>
+                {env.venv.exists ? (
+                  <span className="badge badge-ok">Python {env.venv.python || "?"}</span>
+                ) : (
+                  <span className="badge badge-off">not created</span>
+                )}
+              </FormRow>
+              <FormRow label="Requirements" help={env.requirements.exists ? `${env.requirements.path} is installed into the venv.` : `No ${env.requirements.path}: only pip is updated.`}>
+                <span className={`badge badge-${env.requirements.exists ? "ok" : "off"}`}>{env.requirements.exists ? "found" : "missing"}</span>
+              </FormRow>
+              <FormRow label="Python" help="Interpreters found on this machine.">
+                <select className="select select-full" value={python} onChange={(e) => setPython(e.target.value)}>
+                  {env.interpreters.map((i) => (
+                    <option key={i.path} value={i.path}>
+                      Python {i.version} · {i.path}
+                    </option>
+                  ))}
+                </select>
+              </FormRow>
+              <FormRow label="Recreate">
+                <Toggle checked={recreate} onChange={setRecreate} label={recreate ? "delete and recreate .venv" : "reuse .venv if it exists"} />
+              </FormRow>
+              <div className="row-gap">
+                <button type="button" className="btn btn-primary" disabled={job.status === "running" || !env.interpreters.length} onClick={() => void run("python")}>
+                  {env.venv.exists && !recreate ? "Install requirements" : "Create .venv and install"}
+                </button>
+                {env.venv.exists && <span className="muted small">VS Code / your editor: select {env.venv.path} as the interpreter.</span>}
+              </div>
+            </>
+          )}
+          {(node || env.package_json) && (
+            <>
+              <FormRow label="Node.js" help={env.node.path || "not on PATH: install it from https://nodejs.org/"}>
+                <span className={`badge badge-${env.node.version ? "ok" : "err"}`}>{env.node.version ? `v${env.node.version}` : "missing"}</span>
+              </FormRow>
+              <FormRow label="Dependencies" help={env.package_json ? "npm ci when package-lock.json exists, else npm install." : "No package.json in the project."}>
+                <span className={`badge badge-${env.node_modules ? "ok" : "off"}`}>{env.node_modules ? "node_modules present" : "not installed"}</span>
+              </FormRow>
+              <div>
+                <button type="button" className="btn btn-primary" disabled={job.status === "running" || !env.node.npm || !env.package_json} onClick={() => void run("node")}>
+                  npm install
+                </button>
+              </div>
+            </>
+          )}
+          {jobId && <JobConsole job={job} />}
+        </div>
+      )}
     </Section>
   );
 }

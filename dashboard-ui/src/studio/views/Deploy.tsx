@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, errorMessage } from "../api";
 import { JobConsole } from "../components/Console";
 import { useConfirm, useToast } from "../components/Feedback";
-import { EnumSelect, FormRow, JsonInput, Section, Segmented, TextInput } from "../components/Forms";
+import { EnumSelect, FormRow, JsonInput, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
@@ -26,6 +26,7 @@ export function DeployView() {
   const confirm = useConfirm();
   const [jobId, setJobId] = useState<string | null>(null);
   const [history, setHistory] = useState<Job[]>([]);
+  const [deleteData, setDeleteData] = useState(true);
   const job = useJob(jobId);
   const target = state.target || { provider: "aws", stage: "dev" };
   const targetMeta = meta.providers.find((p) => p.name === target.provider);
@@ -127,7 +128,9 @@ export function DeployView() {
         title: command === "remove" ? `Remove ${typed}?` : `Deploy to ${typed}?`,
         body:
           command === "remove"
-            ? "Every function, trigger and managed resource of this stage is destroyed. External resources are left alone."
+            ? deleteData
+              ? "Every function, trigger and managed resource of this stage is destroyed, including buckets, queues and topics and their data. External resources are left alone."
+              : "Functions, triggers and gateways are destroyed. Managed buckets, queues and topics are kept (with their data) and pskit stops managing them."
             : "This is a production stage.",
         typed,
         confirmLabel: command === "remove" ? "Remove" : "Deploy",
@@ -166,11 +169,19 @@ export function DeployView() {
       <CompatPanel provider={target.provider} problems={problems} onDisableAll={() => replace(disableAll())} />
       <div className="action-grid">
         {ACTIONS.map((a) => (
-          <button key={a.command} type="button" className={`action-card btn ${a.tone}`} disabled={running} onClick={() => void run(a.command)} title={a.hint}>
+          <button key={a.command} type="button" className={`action-card btn ${a.tone}`} disabled={running} onClick={() => void run(a.command, a.command === "remove" && !deleteData ? { keep_resources: true } : undefined)} title={a.hint}>
             <b>{a.label}</b>
             <span className="small">{a.hint}</span>
           </button>
         ))}
+      </div>
+      <div className="row-gap remove-switch">
+        <Toggle
+          checked={deleteData}
+          onChange={setDeleteData}
+          label={deleteData ? "Remove also deletes buckets, queues and topics" : "Remove keeps buckets, queues and topics (and their data)"}
+        />
+        <span className="muted small">Applies to the Remove action. External resources are never deleted.</span>
       </div>
       <JobConsole job={job} onCancel={jobId ? () => void api.cancelJob(jobId).catch((exc: unknown) => toast(errorMessage(exc), "err")) : undefined} />
 

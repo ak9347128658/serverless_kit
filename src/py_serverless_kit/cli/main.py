@@ -15,7 +15,7 @@ import click
 
 from .._version import __version__
 from ..config.loader import ConfigError
-from ..config.schema import PROVIDERS
+from ..config.schema import NODE_RUNTIMES, PROVIDERS, PYTHON_RUNTIMES
 
 COMMON_ERRORS: tuple = ()
 
@@ -156,8 +156,31 @@ def cli() -> None:
 @click.option(
     "-t", "--template", default="http", type=click.Choice(["http", "events", "workflow", "full"]), show_default=True
 )
+@click.option(
+    "-l",
+    "--language",
+    default=None,
+    type=click.Choice(["python", "javascript", "typescript"]),
+    help="Handler language (default: python, or javascript with a nodejs --runtime).",
+)
+@click.option(
+    "--runtime",
+    default=None,
+    type=click.Choice(list(PYTHON_RUNTIMES + NODE_RUNTIMES)),
+    help="Runtime written to pskit.yml (default python3.12 / nodejs20).",
+)
+@click.option("--typescript", "--ts", "ts", is_flag=True, help="Shorthand for --language typescript.")
 @click.option("--force", is_flag=True, help="Overwrite existing files.")
-def init(directory: str, name: Optional[str], provider: str, template: str, force: bool) -> None:
+def init(
+    directory: str,
+    name: Optional[str],
+    provider: str,
+    template: str,
+    language: Optional[str],
+    runtime: Optional[str],
+    ts: bool,
+    force: bool,
+) -> None:
     """Scaffold a new project (pskit.yml, handlers, tests).
 
     
@@ -165,6 +188,8 @@ def init(directory: str, name: Optional[str], provider: str, template: str, forc
       pskit init my-api --provider aws
       pskit init . -p gcp -t workflow
       pskit init svc -p onprem -t full --name orders
+      pskit init api -p aws --typescript          # Node.js 20 + TypeScript
+      pskit init api -p gcp --runtime nodejs22    # JavaScript
     """
     import re
 
@@ -174,7 +199,15 @@ def init(directory: str, name: Optional[str], provider: str, template: str, forc
     service = name or re.sub(r"[^a-z0-9-]", "-", target.name.lower()).strip("-") or "my-service"
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", service):
         raise click.BadParameter(f"invalid service name {service!r}; use --name", param_hint="--name")
-    files = render(template, service, provider)
+    if ts:
+        language = "typescript"
+    if language is None:
+        language = "javascript" if runtime and runtime.startswith("nodejs") else "python"
+    node = language in ("javascript", "typescript")
+    if runtime and runtime.startswith("nodejs") != node:
+        raise click.BadParameter(f"runtime {runtime} does not match language {language}", param_hint="--runtime")
+    runtime = runtime or ("nodejs20" if node else "python3.12")
+    files = render(template, service, provider, runtime=runtime, typescript=language == "typescript")
     target.mkdir(parents=True, exist_ok=True)
     for rel, content in files.items():
         path = target / rel
@@ -182,12 +215,22 @@ def init(directory: str, name: Optional[str], provider: str, template: str, forc
             echo(f"  skip   {rel} (exists)")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, "utf-8")
+        if node:
+            path.write_bytes(content.encode("utf-8"))  # LF on every OS
+        else:
+            path.write_text(content, "utf-8")
         echo(f"  create {rel}")
-    ok(f"\nCreated service '{service}' for {provider} in {target}")
+    if node:
+        from ..packaging.node import write_types
+
+        if write_types(target) is not None:
+            echo("  create .pskit/types/pskit/index.d.ts (types for `import ... from \"pskit\"`)")
+    ok(f"\nCreated {language} service '{service}' for {provider} in {target}")
     echo("Next steps:")
     if directory != ".":
         echo(f"  cd {directory}")
+    if node:
+        echo("  npm install          # when you add dependencies to package.json")
     echo("  pskit dev            # local server with hot reload")
     echo("  pskit deploy         # deploy with terraform")
 
@@ -286,24 +329,33 @@ def deploy(project, skip_deps: bool, confirm: bool, upgrade: bool, no_dashboard:
 @cli.command()
 @project_options
 @click.option("-y", "--yes", is_flag=True, help="Do not ask for confirmation.")
-def remove(project, yes: bool) -> None:  # noqa: ANN001
+@click.option(
+    "--keep-resources",
+    is_flag=True,
+    help="Keep managed buckets, queues and topics (and their data); destroy only functions and triggers.",
+)
+def remove(project, yes: bool, keep_resources: bool) -> None:  # noqa: ANN001
     """Destroy every resource of this service/stage.
 
     
     Examples:
       pskit remove -s dev
       pskit remove -s dev --yes
+      pskit remove -s dev --keep-resources   # keep buckets, queues, topics
     """
     from ..core.deployer import Deployer
     from ..dashboard.generator import write_dashboard
 
     cfg = project.config
     if not yes:
+        what = "functions and triggers (keeping buckets, queues and topics)" if keep_resources else "ALL resources"
         click.confirm(
-            f"Destroy ALL resources of '{cfg.service}' stage '{cfg.provider.stage}' on {project.provider.display_name}?",
+            f"Destroy {what} of '{cfg.service}' stage '{cfg.provider.stage}' on {project.provider.display_name}?",
             abort=True,
         )
-    Deployer(project, echo=echo).remove(auto_approve=True)
+    kept = Deployer(project, echo=echo).remove(auto_approve=True, keep_resources=keep_resources)
+    if kept:
+        info(f"Kept {len(kept)} resource(s); they are no longer managed by pskit. Delete them in the console when done.")
     write_dashboard(project.root)
     ok("Removed.")
 
@@ -673,10 +725,19 @@ def invoke(
     runner = LocalRunner(project, env_file=env_file)
     try:
         result = runner.invoke(function, build_event(kind, payload, **http_kw))
-    except Exception as exc:  # noqa: BLE001 - user code failed; show it like the cloud would
-        traceback.print_exc()
-        fail(f"{function} raised {type(exc).__name__}: {exc}")
+    except _errors() as exc:
+        fail(f"Error: {exc}")
         sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - user code failed; show it like the cloud would
+        stack = getattr(exc, "stack", "")
+        if stack:
+            click.echo(stack, err=True)
+        else:
+            traceback.print_exc()
+        fail(f"{function} raised {getattr(exc, 'error', None) or type(exc).__name__}: {exc}")
+        sys.exit(1)
+    finally:
+        runner.close()
     click.echo(json.dumps(response_to_dict(result), indent=2, default=str))
 
 
@@ -721,6 +782,8 @@ def workflow_run(project, name: str, data: Optional[str], sleep: bool, history: 
         if history:
             click.echo(json.dumps(exc.history, indent=2))
         sys.exit(2)
+    finally:
+        runner.close()
     ok("SUCCEEDED")
     click.echo(json.dumps(result["output"], indent=2, default=str))
     if history:

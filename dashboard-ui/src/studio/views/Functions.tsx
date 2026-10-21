@@ -17,6 +17,8 @@ import {
   asArray,
   asObject,
   deepEqual,
+  languageOf,
+  runtimeLabel,
   defaultHandler,
   eventSummary,
   eventToRaw,
@@ -255,7 +257,8 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
   const functions = asObject(draft.functions);
   const original = existing ? asObject(functions[existing]) : null;
   const [name, setName] = useState(existing || uniqueName("my-function", Object.keys(functions)));
-  const [fn, setFn] = useState<JsonObject>(() => (original ? { ...original } : { handler: defaultHandler("my-function") }));
+  const language = languageOf(str(asObject(draft.provider).runtime, provider?.default_runtime || "python3.12"));
+  const [fn, setFn] = useState<JsonObject>(() => (original ? { ...original } : { handler: defaultHandler("my-function", language) }));
   const [handlerTouched, setHandlerTouched] = useState(!!existing);
   const [events, setEvents] = useState<NormalEvent[]>(() =>
     asArray(original?.events)
@@ -320,7 +323,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
 
   const updateName = (n: string) => {
     setName(n);
-    if (!handlerTouched) setFn((f) => ({ ...f, handler: defaultHandler(n) }));
+    if (!handlerTouched) setFn((f) => ({ ...f, handler: defaultHandler(n, language) }));
   };
 
   const setField = (key: string, value: Json | undefined) =>
@@ -455,7 +458,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
                   value={str(fn.runtime)}
                   allowEmpty
                   emptyLabel={`inherit (${str(asObject(draft.provider).runtime, provider?.default_runtime || "python3.12")})`}
-                  options={provider?.runtimes.length ? provider.runtimes : ["python3.10", "python3.11", "python3.12", "python3.13"]}
+                  options={(language === "node" ? provider?.node_runtimes || [] : provider?.runtimes.length ? provider.runtimes : ["python3.10", "python3.11", "python3.12", "python3.13"]).map((r) => ({ value: r, label: runtimeLabel(r) }))}
                   onChange={(v) => setField("runtime", v || undefined)}
                 />
               </FormRow>

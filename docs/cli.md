@@ -91,6 +91,13 @@ Hooks `before_package`, `after_package`, `before_deploy` and `after_deploy` run 
 | Flag | |
 |---|---|
 | `-y, --yes` | don't ask for confirmation |
+| `--keep-resources` | keep managed buckets, queues and topics (and their data); only functions, triggers and gateways are destroyed |
+
+With `--keep-resources` the kept resources are taken out of the Terraform state first, so pskit no longer manages
+them: delete them in the cloud console when you no longer need them, or import them into another stack. The
+code-upload bucket is not kept. On Azure the storage account, Service Bus namespace and resource group that hold kept
+queues, containers or topics are kept as well. Supported on AWS, GCP, Azure, Alibaba, Tencent, Huawei and Oracle; the
+other providers create no buckets, queues or topics.
 
 ## `pskit info`
 

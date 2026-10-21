@@ -13,7 +13,7 @@ authors = [{ name = "Asif Khan @ Kavion.ai" }]
 maintainers = [{ name = "Asif Khan @ Kavion.ai" }]
 keywords = ["serverless", "lambda", "terraform", "multi-cloud", "faas", "aws", "azure", "gcp", "step-functions", "on-premises"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",

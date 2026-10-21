@@ -103,8 +103,23 @@ export function snake(name: string): string {
   return /^[a-z_]/.test(s) ? s : `fn_${s}`;
 }
 
-export function defaultHandler(name: string): string {
-  return `app.handlers.${snake(name) || "handler"}`;
+export function defaultHandler(name: string, language: "python" | "node" = "python"): string {
+  return language === "node" ? `src.handlers.${camel(name) || "handler"}` : `app.handlers.${snake(name) || "handler"}`;
+}
+
+/** `my-function` -> `myFunction` (a valid JavaScript identifier). */
+export function camel(name: string): string {
+  const s = snake(name).replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+  return /^[A-Za-z_$]/.test(s) ? s : s ? `_${s}` : "";
+}
+
+/** `python` or `node`, from a runtime such as python3.12 / nodejs20. */
+export function languageOf(runtime: string): "python" | "node" {
+  return runtime.startsWith("nodejs") ? "node" : "python";
+}
+
+export function runtimeLabel(runtime: string): string {
+  return runtime.startsWith("nodejs") ? `Node.js ${runtime.slice(6)} (${runtime})` : `Python ${runtime.slice(6)} (${runtime})`;
 }
 
 export function uniqueName(base: string, taken: Iterable<string>): string {

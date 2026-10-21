@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .._version import __version__
-from ..config.schema import EventSpec, FunctionConfig
+from ..config.schema import EventSpec, FunctionConfig, is_generated_handler
 from .project import Project
 
 RECORD_FILE = "deployment.json"
@@ -66,7 +66,7 @@ def function_record(project: Project, name: str, fn: FunctionConfig, out: Dict[s
         "handler": fn.handler,
         "description": fn.description,
         "kind": fn.kind,
-        "generated": fn.handler.startswith("py_serverless_kit."),
+        "generated": is_generated_handler(fn.handler),
         "runtime": cfg.runtime_of(fn),
         "memory": cfg.memory_of(fn),
         "timeout": cfg.timeout_of(fn),

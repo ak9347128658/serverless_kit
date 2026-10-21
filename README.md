@@ -55,6 +55,7 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 ## Features
 
 - **10 clouds and an on-premises host:** AWS Lambda, Azure Functions, Google Cloud Functions (gen2), Alibaba Function Compute, Oracle Functions, IBM Code Engine, DigitalOcean Functions, Tencent SCF, Huawei FunctionGraph, Cloudflare Workers, plus a process on your own machine or a remote server (`onprem`: local, SSH/SCP of one archive with a `.pem`, or Docker — the image is built locally, Docker is installed on the server when it is missing, and deploy waits until the host is healthy — or a bundled CPython when the server has no Python).
+- **Python, JavaScript or TypeScript:** set `runtime: nodejs20` and write handlers in JS/TS with the same `Event`/`Context` API; pskit compiles TypeScript and bundles npm dependencies ([docs/nodejs.md](docs/nodejs.md)).
 - **Triggers:** HTTP (path params, CORS, auth), schedules (rate/cron, translated into each cloud's cron dialect), queues, object storage, pub/sub topics, and direct function-to-function `invoke()`.
 - **Workflows:** task / choice / wait / pass / parallel / map / succeed / fail with retry and catch. Native on AWS and GCP; an embedded engine on the other clouds; runnable locally with `pskit workflow run`. Every run returns an `execution_id`; `pskit workflow start|executions|status|cancel` and the dashboard list, follow and cancel runs (on premises, Step Functions, Cloud Workflows).
 - **Resources:** a `resources:` section for buckets, queues, topics, databases, caches or any service, created by pskit or attached as `external`. Handlers read them with `resource("name")` on every cloud. On premises, queues can live in Redis and storage in MinIO / any S3-compatible store.
@@ -67,19 +68,19 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 
 ## Supported providers
 
-| Provider | Tier | HTTP | Schedule | Queue | Storage | Topic | Workflows |
-|---|---|:-:|:-:|:-:|:-:|:-:|---|
-| AWS Lambda | stable | ✅ | ✅ | ✅ SQS | ✅ S3 | ✅ SNS | native (Step Functions) |
-| Google Cloud Functions | stable | ✅ | ✅ | ✅ Pub/Sub | ✅ GCS | ✅ Pub/Sub | native (Cloud Workflows) |
-| Azure Functions | stable | ✅ | ✅ | ✅ Storage Queue | ✅ Blob | ✅ Service Bus | embedded |
-| Alibaba Function Compute | beta | ✅ | ✅ | – | ✅ OSS | ✅ MNS | embedded |
-| Huawei FunctionGraph | beta | ✅ | ✅ | – | ✅ OBS | ✅ SMN | embedded |
-| Tencent SCF | beta | ✅ | ✅ | – | ✅ COS | – | embedded |
-| DigitalOcean Functions | beta | ✅ | ✅ | – | – | – | embedded |
-| IBM Code Engine | beta | ✅ | – | – | – | – | embedded |
-| Oracle Cloud Functions | experimental | ✅ | – | – | ✅ | – | embedded |
-| Cloudflare Workers (Python) | experimental | ✅ | ✅ | – | – | – | embedded |
-| On-premises | experimental | ✅ | ✅ | ✅ files | ✅ directory | ✅ files | embedded (local, SSH, or Docker) |
+| Provider | Tier | HTTP | Schedule | Queue | Storage | Topic | Workflows | Node.js |
+|---|---|:-:|:-:|:-:|:-:|:-:|---|---|
+| AWS Lambda | stable | ✅ | ✅ | ✅ SQS | ✅ S3 | ✅ SNS | native (Step Functions) | 18, 20, 22 |
+| Google Cloud Functions | stable | ✅ | ✅ | ✅ Pub/Sub | ✅ GCS | ✅ Pub/Sub | native (Cloud Workflows) | 18, 20, 22 |
+| Azure Functions | stable | ✅ | ✅ | ✅ Storage Queue | ✅ Blob | ✅ Service Bus | embedded | 18, 20, 22 |
+| Alibaba Function Compute | beta | ✅ | ✅ | – | ✅ OSS | ✅ MNS | embedded | 18, 20 |
+| Huawei FunctionGraph | beta | ✅ | ✅ | – | ✅ OBS | ✅ SMN | embedded | 18 |
+| Tencent SCF | beta | ✅ | ✅ | – | ✅ COS | – | embedded | 18 |
+| DigitalOcean Functions | beta | ✅ | ✅ | – | – | – | embedded | 18 |
+| IBM Code Engine | beta | ✅ | – | – | – | – | embedded | 18, 20 |
+| Oracle Cloud Functions | experimental | ✅ | – | – | ✅ | – | embedded | 18, 20 |
+| Cloudflare Workers | experimental | ✅ | ✅ | – | – | – | embedded | 18, 20, 22 |
+| On-premises | experimental | ✅ | ✅ | ✅ files | ✅ directory | ✅ files | embedded (local, SSH, or Docker) | 18–24 |
 
 Run `pskit providers` for the live matrix. If a config uses a trigger the target cloud can't support, **`pskit validate` fails with a clear message instead of deploying something half-working.**
 

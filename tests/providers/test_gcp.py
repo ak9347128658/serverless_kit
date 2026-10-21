@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
+
+import pytest
 
 from py_serverless_kit.providers.registry import get_provider
 from tests.conftest import full_config
@@ -210,3 +213,46 @@ def test_requirements_include_functions_framework(make_project, tmp_path):
     Deployer(project, echo=lambda _m: None).package(skip_deps=True)
     reqs = (project.work_dir / "build" / "requirements.txt").read_text().split()
     assert reqs == ["requests", "functions-framework>=3.5"]
+
+
+NODE_SKIP = pytest.mark.skipif(shutil.which("node") is None or shutil.which("npm") is None, reason="needs Node.js and npm")
+
+JS_HANDLERS = {"app/handlers.js": "exports.hello = async () => ({ ok: true });\nexports.tick = async () => null;\n"}
+
+
+def node_config(provider: str, options: str = "{}", extra: str = "") -> str:
+    return f"""
+service: demo
+provider:
+  name: {provider}
+  runtime: nodejs20
+  options: {options}
+functions:
+  hello:
+    handler: app.handlers.hello
+    events:
+      - http: "GET /hello/{{name}}"
+  tick:
+    handler: app.handlers.tick
+{extra}
+"""
+
+
+def test_node_shim_and_package(make_project):
+    project = make_project(node_config("gcp", "{project: p1}"), files=JS_HANDLERS)
+    files = project.provider.shim_files(project.config)
+    entry = files["pskit_entry.js"]
+    assert 'functions.http("pskit_http", pskit.http)' in entry
+    assert 'functions.cloudEvent("pskit_event", pskit.cloudEvent)' in entry
+    package = project.provider.node_package(project.config)
+    assert package["main"] == "pskit_entry.js"
+    assert "@google-cloud/functions-framework" in package["dependencies"]
+    assert project.provider.node_vendor_dependencies is False
+
+
+@NODE_SKIP
+def test_node_render_runtime_and_entry_points(make_project, render):
+    tf = render(make_project(node_config("gcp", "{project: p1}"), files=JS_HANDLERS))
+    fn = tf["resource"]["google_cloudfunctions2_function"]["hello"]
+    assert fn["build_config"]["runtime"] == "nodejs20"
+    assert fn["build_config"]["entry_point"] == "pskit_http"

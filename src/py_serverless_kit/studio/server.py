@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .._version import __version__
 from ..dashboard.server import _allowed_hosts, is_loopback
-from . import files, project, system
+from . import devenv, files, project, system
 from .discover import discover
 from .jobs import JobManager
 from .project import StudioError
@@ -250,6 +250,7 @@ def make_handler(app: Studio) -> type:
                     str(body.get("provider") or ""),
                     str(body.get("template") or "http"),
                     bool(body.get("force")),
+                    str(body.get("language") or "python"),
                 )
             if parts == ["files", "tree"] and method == "GET":
                 return 200, files.tree(root)
@@ -272,6 +273,29 @@ def make_handler(app: Studio) -> type:
                 return 200, discover(
                     root, provider, _param(params, "kind") or "", _param(params, "region"), app.raw_config()
                 )
+            if parts == ["env"] and method == "GET":
+                reqs = str((app.raw_config().get("package") or {}).get("requirements") or "requirements.txt")
+                return 200, devenv.status(root, reqs)
+            if parts == ["env", "setup"] and method == "POST":
+                body = _obj(self._body())
+                raw = app.raw_config()
+                runtime = str((raw.get("provider") or {}).get("runtime") or "")
+                language = str(body.get("language") or ("node" if runtime.startswith("nodejs") else "python"))
+                if language not in ("python", "node"):
+                    raise StudioError(400, "language must be python or node")
+                try:
+                    steps = devenv.plan(
+                        root,
+                        language=language,
+                        python=str(body["python"]) if body.get("python") else None,
+                        recreate=bool(body.get("recreate")),
+                        requirements=str((raw.get("package") or {}).get("requirements") or "requirements.txt"),
+                    )
+                except ValueError as exc:
+                    raise StudioError(400, str(exc)) from None
+                label = "npm install" if language == "node" else "Create .venv and install requirements"
+                job = app.jobs.run_callable("env", lambda j: devenv.run_steps(root, steps, j.emit), label=label)
+                return 202, {"job_id": job.id}
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":
@@ -342,6 +366,13 @@ def make_handler(app: Studio) -> type:
                     if any(c.isspace() for c in image) or image.startswith("-"):
                         raise StudioError(400, "invalid image name")
                     app.vscode.image = image
+                try:
+                    app.vscode.set_runtimes(
+                        str(body["python"]) if body.get("python") else None,
+                        str(body["node"]) if body.get("node") else None,
+                    )
+                except ValueError as exc:
+                    raise StudioError(400, str(exc)) from None
                 job = app.jobs.run_callable("vscode", app.vscode.start, label="VS Code (code-server)")
                 app.vscode.log_job = job.id
                 return 202, {"job_id": job.id}

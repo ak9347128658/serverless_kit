@@ -9,6 +9,7 @@ import type {
   Meta,
   ProjectState,
   SetupResult,
+  DevEnvStatus,
   ValidateResult,
   VsCodeState,
 } from "./types";
@@ -132,8 +133,8 @@ export const api = {
   parse: (text: string) => request<{ raw: JsonObject | null; issues: ValidateResult["issues"] }>("POST", "/api/project/parse", { text }),
   save: (raw: JsonObject, mtime?: number | null, force?: boolean) =>
     request<ProjectState>("PUT", "/api/project", { raw, mtime, force }),
-  init: (service: string, provider: string, template: string, force?: boolean) =>
-    request<ProjectState>("POST", "/api/project/init", { service, provider, template, force }),
+  init: (service: string, provider: string, template: string, force?: boolean, language?: string) =>
+    request<ProjectState>("POST", "/api/project/init", { service, provider, template, force, language }),
   tree: () => request<{ entries: FileEntry[] }>("GET", "/api/files/tree"),
   file: (path: string) => request<FileContent>("GET", "/api/files", undefined, { query: { path } }),
   writeFile: (path: string, text: string, mtime?: number | null) =>
@@ -166,7 +167,9 @@ export const api = {
   deleteLogs: (provider: string, stage: string, body: { ids?: string[]; all?: boolean; function?: string }) =>
     request<{ deleted: number; errors?: string[] }>("POST", "/api/logs/delete", body, { query: { provider, stage } }),
   vscode: () => request<VsCodeState>("GET", "/api/vscode"),
-  vscodeStart: (image?: string) => request<{ job_id: string }>("POST", "/api/vscode/start", { image }),
+  vscodeStart: (image?: string, python?: string, node?: string) => request<{ job_id: string }>("POST", "/api/vscode/start", { image, python, node }),
+  env: () => request<DevEnvStatus>("GET", "/api/env"),
+  envSetup: (body: { python?: string; recreate?: boolean; language?: string }) => request<{ job_id: string }>("POST", "/api/env/setup", body),
   vscodeStop: () => request<VsCodeState>("POST", "/api/vscode/stop", {}),
 };
 

@@ -16,6 +16,9 @@ from urllib.parse import unquote, urlsplit
 
 METHODS = ("local", "ssh", "docker")
 PYTHON_MODES = ("auto", "system", "bundle")
+NODE_MODES = ("auto", "system", "bundle")
+# The host process is Python even for Node.js services; this is its interpreter when not pinned.
+DEFAULT_HOST_PYTHON = "python3.12"
 INSTALLS = ("process", "systemd")
 TARGET_OS = ("auto", "linux", "windows", "darwin")
 TARGET_ARCH = ("auto", "x86_64", "arm64")
@@ -29,6 +32,21 @@ _STANDALONE = {
     "python3.12": ("3.12.12", "20251010"),
     "python3.13": ("3.13.8", "20251007"),
     "python3.14": ("3.14.0", "20251007"),
+}
+# Official Node.js builds (nodejs.org/dist) for `node: bundle`. Override with node_url.
+NODE_VERSIONS = {
+    "nodejs18": "18.20.8",
+    "nodejs20": "20.19.5",
+    "nodejs22": "22.20.0",
+    "nodejs24": "24.9.0",
+}
+_NODE_PLATFORM = {
+    ("linux", "x86_64"): ("linux-x64", "tar.gz"),
+    ("linux", "arm64"): ("linux-arm64", "tar.gz"),
+    ("darwin", "x86_64"): ("darwin-x64", "tar.gz"),
+    ("darwin", "arm64"): ("darwin-arm64", "tar.gz"),
+    ("windows", "x86_64"): ("win-x64", "zip"),
+    ("windows", "arm64"): ("win-arm64", "zip"),
 }
 _TRIPLE = {
     ("linux", "x86_64"): "x86_64-unknown-linux-gnu",
@@ -71,8 +89,28 @@ class DeploySpec:
     python_url: str = ""
     python_sha256: str = ""
     python_home: str = ""
+    # Node.js services: `runtime` above is then the host's Python, `node_runtime` the functions' runtime.
+    language: str = "python"
+    node: str = "system"
+    node_runtime: str = ""
+    node_url: str = ""
+    node_sha256: str = ""
+    node_home: str = ""
 
     def as_json(self) -> Dict[str, Any]:
+        out = self._json()
+        if self.language == "node":
+            out["language"] = "node"
+            out["node"] = self.node
+            out["node_runtime"] = self.node_runtime
+            out["node_bundle"] = {
+                "url": self.node_url or node_dist_url(self.node_runtime, self.target_os, self.target_arch),
+                "sha256": self.node_sha256,
+                "home": self.node_home,
+            }
+        return out
+
+    def _json(self) -> Dict[str, Any]:
         return {
             "method": self.method,
             "python": self.python,
@@ -122,6 +160,16 @@ def local_arch() -> str:
     if lowered in ("arm64", "aarch64"):
         return "arm64"
     return "x86_64"
+
+
+def node_dist_url(runtime: str, target_os: str, target_arch: str) -> str:
+    """Official nodejs.org archive for ``nodejs20`` on a target, or ``""`` when none is published."""
+    version = NODE_VERSIONS.get(runtime)
+    platform = _NODE_PLATFORM.get((target_os, target_arch))
+    if version is None or platform is None:
+        return ""
+    name, ext = platform
+    return f"https://nodejs.org/dist/v{version}/node-v{version}-{name}.{ext}"
 
 
 def standalone_url(runtime: str, target_os: str, target_arch: str) -> str:
@@ -200,12 +248,32 @@ def parse_deploy(
         nested.update(body["ssh"])
     if isinstance(body.get("docker"), dict):
         nested.update(body["docker"])
-    merged = {**nested, **{k: v for k, v in body.items() if k not in ("ssh", "docker", "python_bundle")}}
+    merged = {
+        **nested,
+        **{k: v for k, v in body.items() if k not in ("ssh", "docker", "python_bundle", "node_bundle")},
+    }
     if isinstance(body.get("python_bundle"), dict):
         bundle = body["python_bundle"]
         merged.setdefault("python_url", bundle.get("url"))
         merged.setdefault("python_sha256", bundle.get("sha256"))
         merged.setdefault("python_home", bundle.get("home"))
+    if isinstance(body.get("node_bundle"), dict):
+        bundle = body["node_bundle"]
+        merged.setdefault("node_url", bundle.get("url"))
+        merged.setdefault("node_sha256", bundle.get("sha256"))
+        merged.setdefault("node_home", bundle.get("home"))
+
+    # A Node.js service still runs the Python host; `runtime` becomes the host's interpreter.
+    language = "node" if str(runtime).startswith("nodejs") else "python"
+    node_runtime = ""
+    if language == "node":
+        node_runtime = runtime
+        runtime = _str(merged, "host_python", default=DEFAULT_HOST_PYTHON) or DEFAULT_HOST_PYTHON
+        if runtime not in _STANDALONE:
+            raise ValueError(f"options.deploy.host_python must be one of {', '.join(_STANDALONE)}")
+    node = _str(merged, "node", default="auto").lower() or "auto"
+    if node not in NODE_MODES:
+        raise ValueError(f"options.deploy.node must be one of {', '.join(NODE_MODES)}")
 
     method = _str(merged, "method", "via", default="local").lower() or "local"
     if method == "scp":
@@ -273,6 +341,12 @@ def parse_deploy(
         python_url=_str(merged, "python_url", "url"),
         python_sha256=_str(merged, "python_sha256", "sha256"),
         python_home=os.path.expanduser(_str(merged, "python_home")),
+        language=language,
+        node="system" if node == "auto" else node,
+        node_runtime=node_runtime,
+        node_url=_str(merged, "node_url"),
+        node_sha256=_str(merged, "node_sha256"),
+        node_home=os.path.expanduser(_str(merged, "node_home")),
     )
     args = merged.get("docker_args") or merged.get("args") or []
     if args:
@@ -355,6 +429,16 @@ def parse_deploy(
             if "sudo" not in merged:
                 spec.sudo = True
         spec.python = "system"
+        spec.node = "system"  # the image is built from an official node base
+
+    if language == "node" and spec.node == "bundle" and not spec.node_url and not spec.node_home:
+        url = node_dist_url(node_runtime, spec.target_os, spec.target_arch)
+        if not url:
+            raise ValueError(
+                f"no Node.js build is published for {node_runtime} on {spec.target_os}/{spec.target_arch}; "
+                "set options.deploy.node_url or node_home"
+            )
+        spec.node_url = url
 
     if spec.python == "bundle" and method == "local":
         if not spec.python_url and not spec.python_home:
@@ -417,6 +501,9 @@ def pip_flags(spec: DeploySpec, runtime: str) -> List[str]:
 
 
 def docker_base_image(runtime: str) -> str:
+    """Base image: ``python:3.x-slim`` for Python, the official ``node:NN-bookworm-slim`` for Node.js."""
+    if runtime.startswith("nodejs"):
+        return f"node:{runtime[6:]}-bookworm-slim"
     minor = runtime.replace("python", "")
     return f"python:{minor}-slim-bookworm"
 

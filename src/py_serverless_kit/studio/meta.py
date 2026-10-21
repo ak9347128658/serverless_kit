@@ -16,7 +16,8 @@ from pydantic_core import PydanticUndefined
 from .._version import __version__
 from ..config import schema
 from ..providers.onprem_catalog import DRIVER_CATALOG, field
-from ..providers.onprem_spec import INSTALLS, METHODS, PYTHON_MODES, TARGET_ARCH, TARGET_OS
+from ..providers.onprem_spec import INSTALLS, METHODS, NODE_MODES, PYTHON_MODES, TARGET_ARCH, TARGET_OS
+from .node_stubs import NODE_TEMPLATES
 
 # --------------------------------------------------------------------- pydantic → Field
 
@@ -317,6 +318,22 @@ def _deploy_fields() -> Dict[str, List[Dict[str, Any]]]:
         options=list(PYTHON_MODES),
         help="bundle ships a portable CPython for hosts without Python.",
     )
+    node = [
+        field(
+            "node",
+            "Node.js",
+            "enum",
+            default="auto",
+            options=list(NODE_MODES),
+            help="Node.js services only: system = node on the server, bundle = ship an official Node.js build.",
+        ),
+        field("node_url", "Node.js archive URL", help="Mirror of a nodejs.org archive (bundle)."),
+        field("node_sha256", "Node.js archive SHA-256"),
+        suggest(
+            field("host_python", "Host Python", default="python3.12", help="Interpreter of the host process (Node.js services)."),
+            [f"python3.{m}" for m in range(14, 8, -1)],
+        ),
+    ]
     target = [
         field("target_os", "Target OS", "enum", default="auto", options=list(TARGET_OS)),
         field("target_arch", "Target arch", "enum", default="auto", options=list(TARGET_ARCH)),
@@ -339,7 +356,7 @@ def _deploy_fields() -> Dict[str, List[Dict[str, Any]]]:
         field("sudo", "Use sudo", "bool", default=False),
     ]
     return {
-        "local": [python, *target],
+        "local": [python, *target, *node],
         "ssh": [
             *ssh_common,
             field("path", "Remote path", placeholder="/opt/pskit/<service>-<stage>"),
@@ -348,6 +365,7 @@ def _deploy_fields() -> Dict[str, List[Dict[str, Any]]]:
             *target,
             field("python_url", "CPython archive URL"),
             field("python_sha256", "CPython archive SHA-256"),
+            *node,
         ],
         "docker": [
             field("image", "Image", placeholder="pskit-<service>-<stage>:<stage>"),
@@ -531,6 +549,7 @@ def build_meta() -> Dict[str, Any]:
                 "default_region": DEFAULT_REGIONS.get(name) or desc.get("default_region") or "",
                 "capabilities": desc["capabilities"],
                 "runtimes": desc["runtimes"] or [f"python3.{m}" for m in range(9, 15)],
+                "node_runtimes": list(desc.get("node_runtimes") or []),
                 "default_runtime": prov.default_runtime,
                 "max_timeout": desc["max_timeout"],
                 "notes": desc["notes"],
@@ -574,4 +593,5 @@ def build_meta() -> Dict[str, Any]:
             "drivers": DRIVER_CATALOG,
         },
         "handler_templates": dict(HANDLER_TEMPLATES),
+        "node_handler_templates": {k: v.lstrip("\n") for k, v in NODE_TEMPLATES.items()},
     }

@@ -212,6 +212,9 @@ def build_artifact(project: Project, *, skip_deps: bool = False, log=print) -> A
     if build_dir.exists():
         shutil.rmtree(build_dir)
     build_dir.mkdir(parents=True)
+    if cfg.language == "node":
+        _build_node(project, build_dir, skip_deps, log)
+        return _finish(work, build_dir, log)
 
     source = (project.root / cfg.package.source).resolve()
     files = collect_sources(source, cfg.package.include, cfg.package.exclude)
@@ -244,9 +247,98 @@ def build_artifact(project: Project, *, skip_deps: bool = False, log=print) -> A
     else:
         (build_dir / "requirements.txt").write_text("\n".join(final_reqs) + ("\n" if final_reqs else ""), "utf-8")
 
+    return _finish(work, build_dir, log)
+
+
+def _finish(work: Path, build_dir: Path, log) -> Artifact:  # noqa: ANN001
     zip_path = work / "artifact.zip"
     count = _write_zip(build_dir, zip_path)
     sha_hex, sha_b64 = digest(zip_path)
     size = zip_path.stat().st_size
     log(f"  artifact {zip_path.name}: {count} files, {size / 1024:.1f} KiB, sha256 {sha_hex[:12]}")
     return Artifact(path=zip_path, sha256=sha_hex, sha256_b64=sha_b64, size=size, file_count=count, build_dir=build_dir)
+
+
+# --------------------------------------------------------------------- Node.js / TypeScript
+
+DEFAULT_NODE_BUNDLE_OPTIONS = ["--platform=node", "--format=cjs", "--target=node18"]
+
+
+def _build_node(project: Project, build_dir: Path, skip_deps: bool, log) -> None:  # noqa: ANN001
+    """Bundle a Node.js / TypeScript service (layout in deploy_docs/NODE_RUNTIME.md)."""
+    from . import node
+
+    cfg = project.config
+    provider = project.provider
+    try:
+        source = node.prepare_tree(project, build_dir, project.bundle_manifest(), log)
+        node.write_types(project.root)
+        shims = dict(provider.shim_files(cfg))
+        # A provider's package.json (e.g. `main` pointing at its entry) is merged over the user's below.
+        provider_package = shims.pop("package.json", None)
+        for rel, content in shims.items():
+            dest = build_dir / rel
+            if dest.exists():
+                log(f"  warning: {rel} in your sources is replaced by the {provider.display_name} entry file")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(content.encode("utf-8"))
+
+        package = node.read_package_json(project, source)
+        if package is None:
+            package = {"name": cfg.service, "version": "0.0.0", "private": True}
+        if provider_package:
+            try:
+                overlay = json.loads(provider_package)
+            except ValueError as exc:
+                raise BuildError(f"{provider.name}: shim package.json is not valid JSON: {exc}") from None
+            if package.get("main") and overlay.get("main") and package["main"] != overlay["main"]:
+                log(f"  note: package.json main {package['main']!r} -> {overlay['main']!r} ({provider.display_name} entry)")
+            package = _merge_json(package, overlay)
+        package_fn = getattr(provider, "node_package", None)
+        if callable(package_fn):
+            # e.g. `main` and the platform's framework dependency (@google-cloud/functions-framework, @azure/functions)
+            package = _merge_json(package, dict(package_fn(cfg) or {}))
+        vendor = provider.node_vendor_dependencies if cfg.package.node.install is None else cfg.package.node.install
+        deps = dict(package.get("dependencies") or {})
+        deps.pop("pskit", None)
+        if vendor:
+            if deps:
+                package["dependencies"] = deps
+            else:
+                package.pop("dependencies", None)
+            node.write_json(build_dir / "package.json", package)
+            lock = next((p for p in (source / "package-lock.json", project.root / "package-lock.json") if p.is_file()), None)
+            if lock is not None:
+                shutil.copy2(lock, build_dir / "package-lock.json")
+            if deps and not skip_deps:
+                node.npm_install(build_dir, list(cfg.package.node.npm_args), log)
+            node.copy_runtime(build_dir / "node_modules" / "pskit")
+        else:
+            deps["pskit"] = "file:./" + node.RUNTIME_DIR
+            package["dependencies"] = deps
+            node.write_json(build_dir / "package.json", package)
+            lock = build_dir / "package-lock.json"
+            if lock.exists():
+                lock.unlink()  # it can't list the local pskit package; the platform resolves afresh
+
+        if provider.node_bundle or cfg.package.node.bundle:
+            entries_fn = getattr(provider, "node_bundle_entries", None)
+            entries = entries_fn(cfg) if callable(entries_fn) else {}
+            if not entries:
+                entries = {rel: rel for rel in shims if rel.endswith((".js", ".mjs", ".cjs"))}
+            options = list(getattr(provider, "node_bundle_options", DEFAULT_NODE_BUNDLE_OPTIONS))
+            for out, entry in sorted(entries.items()):
+                node.esbuild_bundle(project.root, build_dir, entry, out, options, log)
+    except node.NodeBuildError as exc:
+        raise BuildError(str(exc)) from None
+
+
+def _merge_json(base: dict, overlay: dict) -> dict:
+    """Deep-merge ``overlay`` over ``base`` (overlay wins; nested objects merged)."""
+    out = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge_json(out[key], value)
+        else:
+            out[key] = value
+    return out

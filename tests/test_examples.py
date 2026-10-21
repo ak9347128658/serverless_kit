@@ -13,6 +13,8 @@ from py_serverless_kit.core.project import Project
 from py_serverless_kit.local import LocalRunner, http_event
 from py_serverless_kit.providers.registry import get_provider
 
+from .node_support import node_skip_reason, tool_path
+
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 PROJECT_DIRS = sorted(p.parent for p in EXAMPLES.rglob("pskit.yml") if ".pskit" not in p.parts)
 ALL_PROVIDERS = (
@@ -71,6 +73,11 @@ HTTP_CASES = [
     ("19-custom-drivers", "enqueue", "POST", "/jobs", {"task": "resize"}, 202),
     ("19-custom-drivers", "enqueue", "POST", "/jobs", {"nope": 1}, 400),
     ("20-onprem-external-clouds", "status", "GET", "/status", None, 200),
+    ("21-nodejs-typescript", "hello", "GET", "/hello?name=Ada", None, 200),
+    ("21-nodejs-typescript", "create-order", "POST", "/orders", {"item": "pen", "quantity": 2, "unitPrice": 1.5}, 201),
+    ("21-nodejs-typescript", "create-order", "POST", "/orders", {"item": ""}, 400),
+    ("21-nodejs-typescript", "get-order", "GET", "/orders/ord-1", None, 200),
+    ("21-nodejs-typescript", "get-order", "GET", "/orders/nope", None, 404),
 ]
 
 WORKFLOW_CASES = [
@@ -81,6 +88,8 @@ WORKFLOW_CASES = [
     ("13-migrate-from-aws-lambda/after", "order-processing", {"items": [{"qty": 0, "price": 1}]}, "OrderRejected"),
     ("14-testing", "scoring", {"vip": True}, "SUCCEEDED"),
     ("16-on-premises", "ping", {}, "SUCCEEDED"),
+    ("21-nodejs-typescript", "order-pipeline", "events/order.json", "SUCCEEDED"),
+    ("21-nodejs-typescript", "order-pipeline", "events/bad-order.json", "OrderRejected"),
 ]
 
 
@@ -90,8 +99,24 @@ def _id(path: Path) -> str:
 
 def _copy(example: Path, tmp_path: Path) -> Path:
     target = tmp_path / example.name
-    shutil.copytree(example, target, ignore=shutil.ignore_patterns(".pskit", "__pycache__", ".pytest_cache"))
+    shutil.copytree(
+        example, target, ignore=shutil.ignore_patterns(".pskit", "__pycache__", ".pytest_cache", "node_modules")
+    )
     return target
+
+
+@pytest.fixture(autouse=True)
+def _node_tools(monkeypatch):
+    monkeypatch.setenv("PATH", tool_path())
+
+
+def _require_node_if_needed(root: Path, run: bool = True) -> None:
+    """Node.js examples need node (and tsc for TypeScript) to build or run; skip cleanly without them."""
+    if "runtime: nodejs" not in (root / "pskit.yml").read_text("utf-8"):
+        return
+    reason = node_skip_reason(typescript=any(root.rglob("*.ts"))) if run else None
+    if reason:
+        pytest.skip(reason)
 
 
 def _require_provider(name: str) -> None:
@@ -107,12 +132,13 @@ def _errors(project: Project) -> list:
 
 def test_every_example_is_discovered():
     names = {_id(p) for p in PROJECT_DIRS}
-    assert len(names) == 20, names
+    assert len(names) == 21, names
 
 
 @pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)
 def test_validates_and_packages(example: Path, tmp_path: Path):
     root = _copy(example, tmp_path)
+    _require_node_if_needed(root)
     project = Project.load(cwd=root)
     _require_provider(project.config.provider.name)
     assert _errors(project) == []
@@ -135,7 +161,9 @@ def test_portable_to_big_three(example: Path, provider: str, tmp_path: Path):
 @pytest.mark.parametrize("example", PROJECT_DIRS, ids=_id)
 def test_portable_to_onprem(example: Path, tmp_path: Path):
     _require_provider("onprem")
-    project = Project.load(cwd=_copy(example, tmp_path), provider="onprem")
+    root = _copy(example, tmp_path)
+    _require_node_if_needed(root)
+    project = Project.load(cwd=root, provider="onprem")
     assert _errors(project) == []
     Deployer(project, echo=lambda _m: None).package(skip_deps=True)
 
@@ -166,8 +194,12 @@ def test_multi_cloud_extends_files(cloud: str, region: str, tmp_path: Path):
 )
 def test_http_functions_locally(example, function, method, path, body, status, tmp_path):
     root = _copy(EXAMPLES / example, tmp_path)
+    _require_node_if_needed(root)
     runner = LocalRunner(Project.load(cwd=root), env_file=None)
-    resp = runner.invoke(function, http_event(method, path, body))
+    try:
+        resp = runner.invoke(function, http_event(method, path, body))
+    finally:
+        runner.close()
     assert resp.status == status, resp.render()
 
 
@@ -180,15 +212,32 @@ def test_workflows_locally(example, workflow, data, expected, tmp_path):
     from py_serverless_kit.runtime.workflow import WorkflowFailed
 
     root = _copy(EXAMPLES / example, tmp_path)
+    _require_node_if_needed(root)
     if isinstance(data, str):
         data = json.loads((root / data).read_text("utf-8"))
     runner = LocalRunner(Project.load(cwd=root), env_file=None)
-    if expected == "SUCCEEDED":
-        assert runner.run_workflow(workflow, data)["output"] is not None
-    else:
-        with pytest.raises(WorkflowFailed) as exc:
-            runner.run_workflow(workflow, data)
-        assert exc.value.error == expected
+    try:
+        if expected == "SUCCEEDED":
+            assert runner.run_workflow(workflow, data)["output"] is not None
+        else:
+            with pytest.raises(WorkflowFailed) as exc:
+                runner.run_workflow(workflow, data)
+            assert exc.value.error == expected
+    finally:
+        runner.close()
+
+
+def test_nodejs_queue_worker_partial_failures(tmp_path):
+    from py_serverless_kit.local import build_event
+
+    root = _copy(EXAMPLES / "21-nodejs-typescript", tmp_path)
+    _require_node_if_needed(root)
+    runner = LocalRunner(Project.load(cwd=root), env_file=None)
+    try:
+        event = build_event("queue", [{"item": "pen"}, {"item": ""}, {"item": "cup", "quantity": 3}])
+        assert runner.invoke("process-orders", event).failed == ["local-1"]
+    finally:
+        runner.close()
 
 
 def test_queue_worker_partial_failures(tmp_path):

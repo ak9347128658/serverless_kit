@@ -1,4 +1,7 @@
 import json
+import shutil
+
+import pytest
 
 from tests.conftest import full_config
 
@@ -216,3 +219,47 @@ def test_artifact_bucket_and_direct_upload_options(make_project, render):
 
     project = make_project(yaml % "artifact_upload: ftp")
     assert any(i.where == "provider.options.artifact_upload" for i in project.validate() if i.level == "error")
+
+
+NODE_SKIP = pytest.mark.skipif(shutil.which("node") is None or shutil.which("npm") is None, reason="needs Node.js and npm")
+
+JS_HANDLERS = {"app/handlers.js": "exports.hello = async () => ({ ok: true });\nexports.tick = async () => null;\n"}
+
+
+def node_config(provider: str, options: str = "{}", extra: str = "") -> str:
+    return f"""
+service: demo
+provider:
+  name: {provider}
+  runtime: nodejs20
+  options: {options}
+functions:
+  hello:
+    handler: app.handlers.hello
+    events:
+      - http: "GET /hello/{{name}}"
+  tick:
+    handler: app.handlers.tick
+{extra}
+"""
+
+
+def test_node_runtime_and_shim(make_project):
+    project = make_project(node_config("aws"), files=JS_HANDLERS)
+    assert project.provider.runtime_id("nodejs22") == "nodejs22.x"
+    files = project.provider.shim_files(project.config)
+    assert list(files) == ["pskit_entry.js"]
+    assert 'require("./pskit_runtime/adapters/aws").handler' in files["pskit_entry.js"]
+    assert project.provider.node_package(project.config) == {}
+
+
+def test_node_unsupported_runtime_is_reported(make_project):
+    project = make_project(node_config("aws").replace("nodejs20", "nodejs24"), files=JS_HANDLERS)
+    assert any("nodejs24" in i.message and i.level == "error" for i in project.validate())
+
+
+@NODE_SKIP
+def test_node_render_uses_nodejs_runtime(make_project, render):
+    tf = render(make_project(node_config("aws"), files=JS_HANDLERS))
+    fn = tf["resource"]["aws_lambda_function"]["hello"]
+    assert fn["runtime"] == "nodejs20.x" and fn["handler"] == "pskit_entry.handler"

@@ -202,7 +202,292 @@ def test_hello():
 GITIGNORE = ".pskit/\n.venv/\n__pycache__/\n*.pyc\n.env\n"
 
 
-def render(template: str, service: str, provider: str) -> Dict[str, str]:
+# --------------------------------------------------------------------- Node.js / TypeScript
+
+NODE_CONFIG_HTTP = """service: {service}
+
+provider:
+  name: {provider}
+  region: {region}
+  stage: dev
+  runtime: {runtime}
+  memory: 256
+  timeout: 15
+  environment:
+    LOG_LEVEL: INFO
+{options}
+functions:
+  hello:
+    handler: src.handlers.hello
+    description: Says hello
+    events:
+      - http: GET /hello
+
+  get-item:
+    handler: src.handlers.getItem
+    events:
+      - http: GET /items/{{id}}
+
+  create-item:
+    handler: src.handlers.createItem
+    events:
+      - http:
+          method: POST
+          path: /items
+          cors: true
+"""
+
+NODE_CONFIG_EVENTS = """
+  nightly-report:
+    handler: src.handlers.nightlyReport
+    events:
+      - schedule:
+          cron: "0 2 * * *"
+          input: {{report: daily}}
+
+  process-jobs:
+    handler: src.handlers.processJobs
+    events:
+      - queue: {{name: {service}-jobs, batch_size: 10}}
+
+  on-upload:
+    handler: src.handlers.onUpload
+    events:
+      - storage: {{bucket: {service}-uploads-change-me, events: [created], suffix: .csv}}
+"""
+
+NODE_CONFIG_WORKFLOW = """
+  validate-order:
+    handler: src.handlers.validateOrder
+
+  charge-order:
+    handler: src.handlers.chargeOrder
+
+workflows:
+  order-pipeline:
+    description: Validate then charge an order
+    start_at: Validate
+    states:
+      Validate:
+        type: task
+        function: validate-order
+        retry: [{{errors: ["*"], max_attempts: 2}}]
+        catch: [{{errors: ["ValidationError"], next: Rejected}}]
+        next: Charge
+      Charge:
+        type: task
+        function: charge-order
+        end: true
+      Rejected:
+        type: fail
+        error: OrderRejected
+"""
+
+TS_HTTP = """// HTTP handlers. This code runs unchanged on every supported cloud.
+import { NotFound, Response } from "pskit";
+import type { Context, Event } from "pskit";
+
+const items: Record<string, { id: string; [key: string]: unknown }> = { "1": { id: "1", name: "first item" } };
+
+export async function hello(event: Event, ctx: Context) {
+  const name = event.http?.query.name ?? "world";
+  ctx.logger.info("saying hello", { name });
+  return { message: `Hello, ${name}!`, provider: event.provider, stage: ctx.stage };
+}
+
+export async function getItem(event: Event) {
+  const id = event.http!.pathParams.id;
+  const item = items[id];
+  if (!item) throw new NotFound(`item ${id} does not exist`);
+  return item;
+}
+
+export async function createItem(event: Event) {
+  const body = event.http!.json() as Record<string, unknown>;
+  const item = { ...body, id: String(Object.keys(items).length + 1) };
+  items[item.id] = item;
+  return Response.json(item, 201);
+}
+"""
+
+TS_EVENTS = """
+/** Runs on a schedule; `event.data` is the optional `input` from the YAML. */
+export async function nightlyReport(event: Event, ctx: Context) {
+  ctx.logger.info("nightly report", { input: event.data });
+  return { ok: true };
+}
+
+/** Queue consumer: only failed records are retried where the cloud supports it. */
+export async function processJobs(event: Event, ctx: Context) {
+  const result = new BatchResult();
+  for (const record of event.records) {
+    try {
+      ctx.logger.info("processing job", { job: record.json() });
+    } catch {
+      result.fail(record);
+    }
+  }
+  return result;
+}
+
+export async function onUpload(event: Event, ctx: Context) {
+  for (const record of event.records) {
+    ctx.logger.info("object event", { bucket: record.bucket, key: record.key, action: record.action });
+  }
+}
+"""
+
+TS_WORKFLOW = """
+export class ValidationError extends Error {}
+
+export async function validateOrder(event: Event) {
+  const order = { ...((event.data as Record<string, unknown>) ?? {}) };
+  if (!(Number(order.amount) > 0)) throw new ValidationError("amount must be positive");
+  return { ...order, valid: true };
+}
+
+export async function chargeOrder(event: Event) {
+  return { ...(event.data as Record<string, unknown>), charged: true };
+}
+"""
+
+JS_HTTP = """// HTTP handlers. This code runs unchanged on every supported cloud.
+const { NotFound, Response } = require("pskit");
+
+const items = { 1: { id: "1", name: "first item" } };
+
+/** @param {import("pskit").Event} event @param {import("pskit").Context} ctx */
+async function hello(event, ctx) {
+  const name = (event.http && event.http.query.name) || "world";
+  ctx.logger.info("saying hello", { name });
+  return { message: `Hello, ${name}!`, provider: event.provider, stage: ctx.stage };
+}
+
+async function getItem(event) {
+  const id = event.http.pathParams.id;
+  const item = items[id];
+  if (!item) throw new NotFound(`item ${id} does not exist`);
+  return item;
+}
+
+async function createItem(event) {
+  const item = { ...event.http.json(), id: String(Object.keys(items).length + 1) };
+  items[item.id] = item;
+  return Response.json(item, 201);
+}
+"""
+
+JS_EVENTS = """
+/** Runs on a schedule; `event.data` is the optional `input` from the YAML. */
+async function nightlyReport(event, ctx) {
+  ctx.logger.info("nightly report", { input: event.data });
+  return { ok: true };
+}
+
+/** Queue consumer: only failed records are retried where the cloud supports it. */
+async function processJobs(event, ctx) {
+  const result = new BatchResult();
+  for (const record of event.records) {
+    try {
+      ctx.logger.info("processing job", { job: record.json() });
+    } catch {
+      result.fail(record);
+    }
+  }
+  return result;
+}
+
+async function onUpload(event, ctx) {
+  for (const record of event.records) {
+    ctx.logger.info("object event", { bucket: record.bucket, key: record.key, action: record.action });
+  }
+}
+"""
+
+JS_WORKFLOW = """
+class ValidationError extends Error {}
+
+async function validateOrder(event) {
+  const order = { ...(event.data || {}) };
+  if (!(Number(order.amount) > 0)) throw new ValidationError("amount must be positive");
+  return { ...order, valid: true };
+}
+
+async function chargeOrder(event) {
+  return { ...event.data, charged: true };
+}
+"""
+
+TSCONFIG = """{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "pskit": [".pskit/types/pskit/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
+"""
+
+NODE_GITIGNORE = ".pskit/\nnode_modules/\ndist/\n.env\n"
+
+
+def _package_json(service: str, typescript: bool) -> str:
+    import json
+
+    scripts = {"dev": "pskit dev", "deploy": "pskit deploy"}
+    if typescript:
+        scripts["typecheck"] = "npx --yes -p typescript@5 tsc --noEmit"
+    data = {"name": service, "version": "0.1.0", "private": True, "scripts": scripts, "dependencies": {}}
+    return json.dumps(data, indent=2) + "\n"
+
+
+def render_node(template: str, service: str, provider: str, runtime: str, typescript: bool) -> Dict[str, str]:
+    """A JavaScript or TypeScript project: handlers in ``src/``, types for ``pskit`` in ``.pskit/types``."""
+    config = NODE_CONFIG_HTTP
+    code = TS_HTTP if typescript else JS_HTTP
+    names = ["hello", "getItem", "createItem"]
+    if template in ("events", "full"):
+        config += NODE_CONFIG_EVENTS
+        code += TS_EVENTS if typescript else JS_EVENTS
+        names += ["nightlyReport", "processJobs", "onUpload"]
+        code = code.replace('import { NotFound, Response } from "pskit";', 'import { BatchResult, NotFound, Response } from "pskit";')
+        code = code.replace('const { NotFound, Response } = require("pskit");', 'const { BatchResult, NotFound, Response } = require("pskit");')
+    if template in ("workflow", "full"):
+        config += NODE_CONFIG_WORKFLOW
+        code += TS_WORKFLOW if typescript else JS_WORKFLOW
+        names += ["ValidationError", "validateOrder", "chargeOrder"]
+    if not typescript:
+        code += "\nmodule.exports = { " + ", ".join(names) + " };\n"
+    files = {
+        "pskit.yml": config.format(
+            service=service,
+            provider=provider,
+            region=DEFAULT_REGIONS.get(provider, ""),
+            options=PROVIDER_OPTIONS.get(provider, ""),
+            runtime=runtime,
+        ),
+        f"src/handlers.{'ts' if typescript else 'js'}": code,
+        "package.json": _package_json(service, typescript),
+        ".gitignore": NODE_GITIGNORE,
+    }
+    if typescript:
+        files["tsconfig.json"] = TSCONFIG
+    return files
+
+
+def render(
+    template: str, service: str, provider: str, runtime: str = "python3.12", typescript: bool = False
+) -> Dict[str, str]:
+    if runtime.startswith("nodejs") or typescript:
+        return render_node(template, service, provider, runtime if runtime.startswith("nodejs") else "nodejs20", typescript)
     region = DEFAULT_REGIONS.get(provider, "")
     config = CONFIG_HTTP
     handlers = HANDLERS_HTTP

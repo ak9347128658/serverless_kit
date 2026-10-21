@@ -491,3 +491,4 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .trigger-notes { margin: 0; padding-left: 18px; }
 .job-item .job-del { margin-left: auto; }
 .inline-pick { max-height: 260px; overflow: auto; }
+.remove-switch { margin: 4px 0 8px; }

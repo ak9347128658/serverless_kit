@@ -64,7 +64,7 @@ def build_argv(
     if command == "deploy":
         return ["deploy", *common] + (["--skip-deps"] if args.get("skip_deps") else [])
     if command == "remove":
-        return ["remove", *common, "--yes"]
+        return ["remove", *common, "--yes"] + (["--keep-resources"] if args.get("keep_resources") else [])
     if command == "invoke":
         argv = ["invoke", *common, "-f", _flag_value(args.get("function"), "function")]
         if args.get("type"):

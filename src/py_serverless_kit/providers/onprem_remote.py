@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.error import URLError
@@ -73,6 +74,7 @@ def main(root: Path) -> int:
 
 def apply_local(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:
     py = _ensure_python(root, spec)
+    _ensure_node(root, spec)
     _run([str(py), str(root / "onprem_ctl.py"), "start"], cwd=root, run=run)
 
 
@@ -93,8 +95,12 @@ def apply_ssh(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) 
     ssh = deploy["ssh"]
     _check_identity(ssh, required=False)
     _ensure_python(root, spec)
+    _ensure_node(root, spec)
     if not (root / "pskit-run.sh").is_file():
-        _write_text(root / "pskit-run.sh", launcher_text(str(deploy.get("runtime") or "python3.12")))
+        _write_text(
+            root / "pskit-run.sh",
+            launcher_text(str(deploy.get("runtime") or "python3.12"), node=deploy.get("language") == "node"),
+        )
     remote = str(ssh["path"])
     archive = root / "release.tar.gz"
     script_path = root / "remote_apply.sh"
@@ -333,9 +339,28 @@ def _docker_remote_script(docker: Dict[str, Any], spec: Dict[str, Any], remote_t
     return "".join(lines)
 
 
-def dockerfile_text(runtime: str, port: int) -> str:
+def dockerfile_text(runtime: str, port: int, node_runtime: str = "") -> str:
+    """The host image. Python services start from ``python:3.x-slim``.
+
+    Node.js services start from the official ``node:NN-bookworm-slim`` image and add
+    Debian's ``python3`` (3.11) for the host process: one apt package is smaller and
+    simpler than downloading and verifying a Node.js build on top of the Python image.
+    """
     from .onprem_spec import docker_base_image
 
+    if node_runtime:
+        return (
+            f"FROM {docker_base_image(node_runtime)}\n"
+            "RUN apt-get update \\\n"
+            " && apt-get install -y --no-install-recommends python3 tzdata \\\n"
+            " && rm -rf /var/lib/apt/lists/*\n"
+            "WORKDIR /opt/pskit\n"
+            "COPY staging/ /opt/pskit/app/\n"
+            "COPY pskit_host.json onprem_ctl.py /opt/pskit/\n"
+            "ENV PYTHONUNBUFFERED=1\n"
+            f"EXPOSE {port}\n"
+            'CMD ["python3", "onprem_ctl.py", "foreground"]\n'
+        )
     base = docker_base_image(runtime)
     return (
         f"FROM {base}\n"
@@ -348,15 +373,27 @@ def dockerfile_text(runtime: str, port: int) -> str:
     )
 
 
-def launcher_text(runtime: str) -> str:
-    """Pick a bundled interpreter, then the configured Python, then ``python3``."""
+def launcher_text(runtime: str, node: bool = False) -> str:
+    """Pick a bundled interpreter, then the configured Python, then ``python3``.
+
+    Node.js services also need ``node``: a bundled ``./node/bin/node`` or one on PATH.
+    """
     minor = runtime.replace("python", "").strip() or "3"
     preferred = f"python{minor}"
+    node_check = ""
+    if node:
+        node_check = (
+            'if [ ! -x ./node/bin/node ] && ! command -v node >/dev/null 2>&1; then\n'
+            '  echo "pskit: no Node.js on this machine. Install it or redeploy with node: bundle." >&2\n'
+            "  exit 1\n"
+            "fi\n"
+        )
     return (
         "#!/bin/sh\n"
         "set -eu\n"
         'cd "$(dirname "$0")"\n'
-        'if [ -x ./python/bin/python3 ]; then\n'
+        + node_check
+        +         'if [ -x ./python/bin/python3 ]; then\n'
         "  exec ./python/bin/python3 ./onprem_ctl.py foreground\n"
         "fi\n"
         'if [ -x ./python/python.exe ]; then\n'
@@ -404,7 +441,7 @@ def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
     info.gid = 0
     info.uname = ""
     info.gname = ""
-    if info.name.endswith("pskit-run.sh"):
+    if info.name.endswith("pskit-run.sh") or info.name == "node/bin/node":
         info.mode = 0o755
     return info
 
@@ -422,6 +459,9 @@ def _pack_release(root: Path, dest: Path) -> None:
         if staging.is_dir():
             tar.add(str(staging), arcname="staging", filter=_tar_filter)
         _pack_python(tar, root / "python")
+        node_dir = root / "node"
+        if node_dir.is_dir():
+            tar.add(str(node_dir), arcname="node", filter=_tar_filter)
 
 
 def _pack_python(tar: tarfile.TarFile, python_dir: Path) -> None:
@@ -503,7 +543,7 @@ def _ssh_apply_script(spec: Dict[str, Any]) -> str:
         + _as_root_function(bool(deploy.get("sudo")))
         + _pick_python_function(remote, runtime)
         + 'mkdir -p "$REMOTE"\n'
-        + 'rm -rf "$REMOTE/staging" "$REMOTE/python"\n'
+        + 'rm -rf "$REMOTE/staging" "$REMOTE/python" "$REMOTE/node"\n'
         + 'tar -xf "$REMOTE/release.tar.gz" -C "$REMOTE"\n'
         + 'rm -f "$REMOTE/release.tar.gz"\n'
         + 'chmod 755 "$REMOTE/pskit-run.sh" 2>/dev/null || true\n'
@@ -622,10 +662,79 @@ def _ensure_python(root: Path, spec: Dict[str, Any]) -> Path:
     return _python_exe(root, spec, require_bundle=True)
 
 
-def _download(url: str, sha256: str) -> Path:
+def node_bin_rel(target_os: str) -> str:
+    """Where a bundled ``node`` lives in the host root."""
+    return "node/node.exe" if target_os == "windows" else "node/bin/node"
+
+
+def _ensure_node(root: Path, spec: Dict[str, Any]) -> Optional[Path]:
+    """Node.js services: copy or download the ``node`` binary for ``node: bundle``; check PATH otherwise."""
+    deploy = spec.get("deploy") or {}
+    if deploy.get("language") != "node":
+        return None
+    method = str(deploy.get("method") or "local")
+    if deploy.get("node") != "bundle":
+        if method == "local" and shutil.which("node") is None:
+            raise DeployError(
+                "this Node.js service needs `node` on PATH (https://nodejs.org/en/download). "
+                "Or set options.deploy.node: bundle to download it."
+            )
+        return None
+    target_os = str(deploy.get("target_os") or "linux")
+    dest = root / node_bin_rel(target_os)
+    bundle = deploy.get("node_bundle") or {}
+    home = str(bundle.get("home") or "")
+    url = str(bundle.get("url") or "")
+    marker = root / "node" / ".pskit-node"
+    if dest.is_file() and marker.is_file() and marker.read_text("utf-8").strip() in (url, home):
+        return dest
+    if (root / "node").exists():
+        _rmtree(root / "node")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if home:
+        src = Path(home)
+        exe = src / ("node.exe" if target_os == "windows" else Path("bin") / "node")
+        if not exe.is_file():
+            raise DeployError(f"options.deploy.node_home {home!r} has no {exe.relative_to(src).as_posix()}")
+        shutil.copy2(exe, dest)
+    else:
+        if not url:
+            raise DeployError("node: bundle needs options.deploy.node_url or node_home")
+        archive = _download(url, str(bundle.get("sha256") or ""), folder="nodejs")
+        _extract_node_binary(archive, dest, windows=target_os == "windows")
+    if target_os != "windows":
+        os.chmod(dest, 0o755)  # noqa: S103 - an executable, like the bundled CPython
+    marker.write_text(home or url, "utf-8")
+    return dest
+
+
+def _extract_node_binary(archive: Path, dest: Path, *, windows: bool) -> None:
+    """Only the ``node`` executable: it is self-contained (npm and its symlinks are not needed)."""
+    want = "node.exe" if windows else "bin/node"
+    if archive.name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            for name in zf.namelist():
+                if name.replace("\\", "/").split("/", 1)[-1] == want:
+                    with zf.open(name) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    return
+    else:
+        with tarfile.open(archive, "r:*") as tar:
+            for member in tar.getmembers():
+                rel = _member_rel(member.name) or ""
+                if member.isfile() and rel.split("/", 1)[-1] == want:
+                    payload = tar.extractfile(member)
+                    if payload is not None:
+                        with open(dest, "wb") as out:
+                            shutil.copyfileobj(payload, out)
+                        return
+    raise DeployError(f"{archive.name} does not contain {want}")
+
+
+def _download(url: str, sha256: str, folder: str = "python-standalone") -> Path:
     _CACHE.mkdir(parents=True, exist_ok=True)
     name = url.rstrip("/").rsplit("/", 1)[-1] or "python.tgz"
-    path = _CACHE / "python-standalone" / name
+    path = _CACHE / folder / name
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file() and (not sha256 or _sha256(path) == sha256.lower()):
         return path
@@ -634,9 +743,11 @@ def _download(url: str, sha256: str) -> Path:
         with urlopen(req, timeout=120) as resp:  # noqa: S310
             data = resp.read()
     except (URLError, OSError, TimeoutError) as exc:
+        what = "Node.js" if folder == "nodejs" else "CPython"
+        hint = "node_home" if folder == "nodejs" else "python_home"
         raise DeployError(
-            f"could not download bundled CPython from {url}: {exc}. "
-            "Set options.deploy.python_home to a portable interpreter, or use method: docker."
+            f"could not download bundled {what} from {url}: {exc}. "
+            f"Set options.deploy.{hint} to a local copy, or use method: docker."
         ) from exc
     if sha256 and hashlib.sha256(data).hexdigest() != sha256.lower():
         raise DeployError(f"sha256 mismatch for {url}")

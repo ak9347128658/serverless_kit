@@ -10,7 +10,7 @@ import { InlineIssues, PageHeader } from "../components/Misc";
 import { capabilityLabel, ProviderCards } from "../components/ProviderCard";
 import { useStudio } from "../store";
 import type { Field, Json, JsonObject } from "../types";
-import { asObject, getIn, isObject, SERVICE_RE, setIn, str } from "../util";
+import { asObject, getIn, isObject, languageOf, runtimeLabel, SERVICE_RE, setIn, str } from "../util";
 
 const PACKAGE_FIELDS: Field[] = [
   { key: "source", label: "Source directory", type: "string", default: ".", help: "Folder bundled into the deployment, relative to pskit.yml." },
@@ -106,6 +106,24 @@ export function OverviewView() {
   };
 
   const options = asObject(prov.options);
+  const changeRuntime = async (next: string) => {
+    const from = languageOf(str(prov.runtime, provider?.default_runtime || "python3.12"));
+    const to = languageOf(next || provider?.default_runtime || "python3.12");
+    if (from !== to && Object.keys(asObject(draft.functions)).length) {
+      const answer = await confirm({
+        title: to === "node" ? "Switch the service to Node.js?" : "Switch the service to Python?",
+        body: (
+          <p>
+            A service is either Python or Node.js. Existing handlers stay as they are: point each function at a{" "}
+            {to === "node" ? ".js / .ts" : ".py"} handler (new functions get a stub in the right language).
+          </p>
+        ),
+        confirmLabel: "Switch runtime",
+      });
+      if (answer !== "confirm") return;
+    }
+    edit(["provider", "runtime"], next || undefined);
+  };
   const optionFields = (provider?.options || []).filter((f) => providerName !== "onprem" || !ONPREM_SPECIAL.has(f.key));
   const serviceName = str(draft.service);
 
@@ -161,8 +179,11 @@ export function OverviewView() {
               value={str(prov.runtime)}
               allowEmpty
               emptyLabel={`default (${provider?.default_runtime || "python3.12"})`}
-              options={provider?.runtimes.length ? provider.runtimes : ["python3.9", "python3.10", "python3.11", "python3.12", "python3.13"]}
-              onChange={(v) => edit(["provider", "runtime"], v || undefined)}
+              options={[
+                ...(provider?.runtimes.length ? provider.runtimes : ["python3.9", "python3.10", "python3.11", "python3.12", "python3.13"]),
+                ...(provider?.node_runtimes || []),
+              ].map((r) => ({ value: r, label: runtimeLabel(r) }))}
+              onChange={(v) => void changeRuntime(v)}
             />
           </FormRow>
           <FormRow label="Memory (MB)" htmlFor="mem" help="64–32768" error={issues(["provider", "memory"])}>

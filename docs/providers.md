@@ -4,16 +4,16 @@ Run `pskit providers` (or `pskit providers --json`) to print this matrix from th
 
 | Provider | Tier | http | schedule | queue | storage | topic | workflows | Runtimes | Max timeout |
 |---|---|---|---|---|---|---|---|---|---|
-| [`aws`](#aws-aws-lambda) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | native | 3.9–3.13 | 900 s |
-| [`gcp`](#gcp-google-cloud-functions-2nd-gen) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | native | 3.9–3.13 | 3600 s (540 s event) |
-| [`azure`](#azure-azure-functions) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | embedded (native opt-in) | 3.9–3.12 | 600 s |
-| [`alibaba`](#alibaba-function-compute-30) | beta | ✓ | ✓ | – | ✓ | ✓ | embedded | 3.9, 3.10, 3.12 | 3600 s |
-| [`tencent`](#tencent-serverless-cloud-function-scf) | beta | ✓ | ✓ | – | ✓ | – | embedded | 3.9, 3.10 | 900 s |
-| [`huawei`](#huawei-functiongraph) | beta | ✓ | ✓ | – | ✓ | ✓ | embedded | 3.9, 3.10, 3.12 | 900 s |
-| [`ibm`](#ibm-code-engine-functions) | beta | ✓ | – | – | – | – | embedded | 3.11 | 120 s |
-| [`digitalocean`](#digitalocean-functions) | beta | ✓ | ✓ | – | – | – | embedded | 3.9, 3.11 | 900 s |
-| [`oracle`](#oracle-oci-functions) | experimental | ✓ | – | – | ✓ | – | embedded | 3.9, 3.11 | 300 s |
-| [`cloudflare`](#cloudflare-python-workers) | experimental | ✓ | ✓ | – | – | – | embedded | 3.11–3.13 | 900 s |
+| [`aws`](#aws-aws-lambda) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | native | 3.9–3.13; Node.js 18, 20, 22 | 900 s |
+| [`gcp`](#gcp-google-cloud-functions-2nd-gen) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | native | 3.9–3.13; Node.js 18, 20, 22 | 3600 s (540 s event) |
+| [`azure`](#azure-azure-functions) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | embedded (native opt-in) | 3.9–3.12; Node.js 18, 20, 22 | 600 s |
+| [`alibaba`](#alibaba-function-compute-30) | beta | ✓ | ✓ | – | ✓ | ✓ | embedded | 3.9, 3.10, 3.12; Node.js 18, 20 | 3600 s |
+| [`tencent`](#tencent-serverless-cloud-function-scf) | beta | ✓ | ✓ | – | ✓ | – | embedded | 3.9, 3.10; Node.js 18 | 900 s |
+| [`huawei`](#huawei-functiongraph) | beta | ✓ | ✓ | – | ✓ | ✓ | embedded | 3.9, 3.10, 3.12; Node.js 18 | 900 s |
+| [`ibm`](#ibm-code-engine-functions) | beta | ✓ | – | – | – | – | embedded | 3.11; Node.js 18, 20 | 120 s |
+| [`digitalocean`](#digitalocean-functions) | beta | ✓ | ✓ | – | – | – | embedded | 3.9, 3.11; Node.js 18 | 900 s |
+| [`oracle`](#oracle-oci-functions) | experimental | ✓ | – | – | ✓ | – | embedded | 3.9, 3.11; Node.js 18, 20 | 300 s |
+| [`cloudflare`](#cloudflare-workers) | experimental | ✓ | ✓ | – | – | – | embedded | 3.11–3.13; JavaScript | 900 s |
 | [`onprem`](#onprem-on-premises) | experimental | ✓ | ✓ | ✓ | ✓ | ✓ | embedded | 3.9–3.14 | 3600 s |
 
 **Tiers**
@@ -36,7 +36,8 @@ Every generated configuration (all 11 providers) passes `terraform validate`. Th
 
 - **Terraform:** `hashicorp/aws >= 5.40`
 - **Credentials:** standard AWS chain (`aws configure`, SSO, `AWS_PROFILE`, env keys, OIDC in CI)
-- **Dependencies:** pip-installed into the zip as manylinux wheels (`x86_64` or `arm64`)
+- **Dependencies:** pip-installed into the zip as manylinux wheels (`x86_64` or `arm64`); Node.js: `npm install --omit=dev` into the zip
+- **Node.js:** `nodejs18`, `nodejs20`, `nodejs22` → `nodejs18.x` / `nodejs20.x` / `nodejs22.x`. Generated `pskit_entry.js`, Lambda handler `pskit_entry.handler` (same as Python)
 
 | Trigger | Implementation |
 |---|---|
@@ -82,7 +83,8 @@ functions:
 
 - **Terraform:** `hashicorp/google >= 5.20`
 - **Credentials:** `gcloud auth application-default login` or `GOOGLE_APPLICATION_CREDENTIALS`
-- **Dependencies:** built remotely from `requirements.txt` (`functions-framework` is added automatically)
+- **Dependencies:** built remotely from `requirements.txt` (`functions-framework` is added automatically); Node.js: from `package.json` by Cloud Build (`@google-cloud/functions-framework` is added)
+- **Node.js:** `nodejs18`, `nodejs20`, `nodejs22`. Generated `pskit_entry.js` (the package's `main`) registers the same entry points, `pskit_http` and `pskit_event`
 
 ```yaml
 provider:
@@ -113,7 +115,8 @@ Functions with several triggers are **split into multiple Cloud Functions** auto
 
 - **Terraform:** `hashicorp/azurerm >= 4.9` (needs a subscription id)
 - **Credentials:** `az login` + `ARM_SUBSCRIPTION_ID`, or service principal env vars
-- **Dependencies:** remote Oryx build from `requirements.txt` (`azure-functions` is added automatically)
+- **Dependencies:** remote Oryx build from `requirements.txt` (`azure-functions` is added automatically); Node.js: from `package.json` (`@azure/functions` v4 is added)
+- **Node.js:** `nodejs18`, `nodejs20`, `nodejs22` → `application_stack.node_version` `18` / `20` / `22`. Generated `pskit_entry.js` (the package's `main`) uses the v4 programming model: one `app.http()` / `app.timer()` / `app.storageQueue()` / `app.storageBlob()` / `app.serviceBusTopic()` per trigger, the same function names and routes as `function_app.py`, including the `_pskit/invoke/<fn>` routes for invoke-only and Logic Apps task functions. Several `Set-Cookie` headers are all kept (Python keeps only the last)
 
 ```yaml
 provider:
@@ -154,6 +157,7 @@ One **Linux Consumption Function App** hosts every function of a service, using 
 - **Credentials:** `ALICLOUD_ACCESS_KEY` / `ALICLOUD_SECRET_KEY`, or `options.profile`
 - **Default region:** `cn-hangzhou`
 - **Dependencies:** vendored
+- **Node.js:** `nodejs18`, `nodejs20` (generated `index.js`, handler `index.handler`)
 
 ```yaml
 provider:
@@ -184,6 +188,7 @@ provider:
 - **Credentials:** `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY`, or `options.profile`
 - **Default region:** `ap-guangzhou`
 - **Dependencies:** vendored
+- **Node.js:** `nodejs18` → `Nodejs18.15` (generated `index.js`, handler `index.main_handler`)
 
 ```yaml
 provider:
@@ -216,6 +221,7 @@ functions:
 - **Credentials:** `HW_ACCESS_KEY` / `HW_SECRET_KEY` (+ `HW_REGION_NAME`), or `options.profile`
 - **Default region:** `cn-north-4`
 - **Dependencies:** vendored
+- **Node.js:** `nodejs18` → `Node.js18.15` (generated `index.js`, handler `index.handler`)
 
 ```yaml
 provider:
@@ -247,6 +253,7 @@ provider:
 - **Credentials:** `IC_API_KEY`
 - **Default region:** `us-south`
 - **Dependencies:** vendored
+- **Node.js:** `nodejs18`, `nodejs20` → `nodejs-18` / `nodejs-20`. The generated `index.js` exports `main`; Code Engine loads the package's main file, so don't point `package.json` `main` elsewhere
 
 ```yaml
 provider:
@@ -263,7 +270,7 @@ Every function gets a public HTTPS endpoint, and pskit's runtime does the routin
 
 **Resources:** `ibm_code_engine_project`, `ibm_code_engine_function`.
 
-**Limits:** HTTP only: no schedule/queue/storage/topic (the Terraform provider has no function subscriptions). Only python3.11. Max 120 s and 4096 MB (memory maps to fixed CPU/memory sizes). `auth` must be `none`. Code is uploaded inline as base64, so keep bundles small or use `code_reference`.
+**Limits:** HTTP only: no schedule/queue/storage/topic (the Terraform provider has no function subscriptions). Python: only python3.11. Max 120 s and 4096 MB (memory maps to fixed CPU/memory sizes). `auth` must be `none`. Code is uploaded inline as base64, so keep bundles small or use `code_reference`.
 
 ---
 
@@ -272,6 +279,7 @@ Every function gets a public HTTPS endpoint, and pskit's runtime does the routin
 - **Terraform:** no cloud provider plugin. pskit renders a `doctl serverless` project and deploys it from a `terraform_data` resource (`local-exec`), redeploying when the artifact changes and running `undeploy` on destroy.
 - **Credentials:** `doctl auth init`; `doctl` must be on `PATH`
 - **Dependencies:** vendored
+- **Node.js:** `nodejs18` → `nodejs:18`. Each function folder is a Node.js package whose main file is the generated `index.js` (exports `main`)
 
 ```yaml
 provider:
@@ -286,7 +294,7 @@ provider:
 | http | `web: raw` public functions |
 | schedule | scheduled triggers in `project.yml` |
 
-**Limits:** HTTP and schedule only. Runtimes python3.9 / python3.11. Memory 128–1024 MB. `auth` must be `none`. Each function gets its own copy of the bundle under `.pskit/digitalocean-<stage>/do_project/`, so on Windows keep project paths short or enable long paths.
+**Limits:** HTTP and schedule only. Runtimes python3.9 / python3.11 / nodejs18. Memory 128–1024 MB. `auth` must be `none`. Each function gets its own copy of the bundle under `.pskit/digitalocean-<stage>/do_project/`, so on Windows keep project paths short or enable long paths.
 
 ---
 
@@ -295,9 +303,10 @@ provider:
 - **Terraform:** `oracle/oci >= 6.0`
 - **Credentials:** `~/.oci/config`, or provider-block options `config_file_profile`, `auth`, `tenancy_ocid`, `user_ocid`, `fingerprint`, `private_key_path`
 - **Default region:** `us-ashburn-1`
-- **Dependencies:** installed inside the container image build (`fdk` added)
+- **Dependencies:** installed inside the container image build (`fdk` added for Python, `@fnproject/fdk` for Node.js)
+- **Node.js:** `nodejs18`, `nodejs20`: `func.js` + `func.yaml` + a `Dockerfile` on `fnproject/node:<major>` (`-dev` for the `npm install` stage); entrypoint `node func.js`
 
-OCI Functions only run **container images**. pskit writes `func.py`, `func.yaml` and a `Dockerfile` into the bundle, then either:
+OCI Functions only run **container images**. pskit writes `func.py` (`func.js` for Node.js), `func.yaml` and a `Dockerfile` into the bundle, then either:
 
 ```yaml
 provider:
@@ -322,11 +331,12 @@ provider:
 
 ---
 
-## cloudflare (Python Workers)
+## cloudflare (Workers)
 
 - **Terraform:** `cloudflare/cloudflare >= 5.28, < 6.0`
 - **Credentials:** `CLOUDFLARE_API_TOKEN`
-- **Dependencies:** **not bundled**. Workers run on Pyodide, so only the standard library and Pyodide's built-in packages are available.
+- **Dependencies (Python):** **not bundled**. Python Workers run on Pyodide, so only the standard library and Pyodide's built-in packages are available.
+- **JavaScript / TypeScript** (`runtime: nodejs18 | nodejs20 | nodejs22`; Workers run JavaScript natively, the version only selects the language): each function becomes one ES module bundled with esbuild, so npm dependencies **are** included. pskit writes `_pskit_cf/<fn>.mjs`, which imports your handler modules statically (a bundle can't load files by name), the manifest and the adapter, and uploads `_pskit_cf/<fn>.bundle.mjs` with `compatibility_flags: [nodejs_compat]`. Environment variables are `plain_text` bindings, copied into `process.env` per request. `require()` of `assert buffer crypto events fs path stream string_decoder url util` works through a generated shim; other Node.js built-ins are not available on Workers. Keep `compatibility_date` at `2025-09-01` or later (`node:fs`).
 
 ```yaml
 provider:
@@ -515,6 +525,22 @@ deploy:
 SSH and `scp` write `pskit-run.sh` plus `release.tar.gz` (the staged bundle, `onprem_ctl.py`, `pskit_host.json`, the unit when `install: systemd`, and `python/` when `python: bundle`). With `sudo: true`, apply runs `sudo -n mkdir` on `path` and `chown`s that directory to the SSH user (`azureuser` cannot create `/opt/pskit` itself), then copies the files. Apply does not delete `data_dir`. `install: systemd` runs `systemctl restart`. `install: process` runs `onprem_ctl.py start`. Either way the deploy fails if `http://127.0.0.1:<port>/__pskit/health` does not answer, and the failure includes `systemctl status` and `journalctl` when a unit was used.
 
 Remote Docker (`method: docker` plus `host`, or `docker_host: ssh://user@host`) builds `pskit-<service>-<stage>` locally, saves it to a tar, and `scp`s that tar to `pskit-images/<container>/` in the SSH user's home. A script on the server installs Docker when it is missing (apt, dnf, yum, or apk), waits until `docker info` succeeds, runs `docker load` and `docker run`, and deletes the tar. The deploy fails if the container does not answer `/__pskit/health`, and the failure includes `docker logs`. The SSH user needs passwordless `sudo` (`sudo -n`) when Docker must be installed or when the user cannot talk to the daemon (`sudo` defaults to true). The `.pem` must be accepted by `ssh -o BatchMode=yes` (no passphrase prompt). On Windows, if OpenSSH says the key is unprotected, restrict it with `icacls`. Set `install_docker: false` to refuse a server that does not already have Docker. A server whose package manager is not apt, dnf, yum, or apk is reported and left unchanged.
+
+**Node.js / TypeScript services** (`provider.runtime: nodejs18 | nodejs20 | nodejs22 | nodejs24`): the host is still the Python process above (HTTP, schedules, queues, storage, topics, workflow executions and logs work the same). Each function runs in its own long-lived `node pskit_runtime/worker.js` process with that function's environment, started on its first invocation. Handler `console`/`ctx.logger` output appears in `pskit logs` and the dashboard as `function` entries (plain `console` output as `stdout`). Embedded workflows are still run by the host's executor; only the task functions run in Node.js. Where `node` comes from:
+
+```yaml
+deploy:
+  method: ssh
+  host: 10.0.1.12
+  node: bundle            # auto | system | bundle. bundle downloads the official nodejs.org build for
+                          # target_os/target_arch and ships only its `node` binary (node/bin/node)
+  node_url: https://mirror.internal/node-v20.19.5-linux-x64.tar.gz   # optional mirror (.tar.gz, or .zip for Windows)
+  node_sha256: <sha256 of that archive>                              # optional, checked after download
+  node_home: /opt/node-v20                                           # or copy bin/node from a local install
+  host_python: python3.12 # the host's interpreter (python: bundle downloads this one); default python3.12
+```
+
+`node: system` (the default) needs `node` on PATH: locally `pskit deploy` stops with a link to the installer when it is missing, and over SSH `pskit-run.sh` refuses to start without `./node/bin/node` or `node` on PATH. `method: docker` builds `FROM node:<major>-bookworm-slim` and adds Debian's `python3` (3.11) and `tzdata` for the host (one apt step instead of downloading Node.js into a Python image). Bundled Node.js archives are cached under `~/.cache/pskit/nodejs`.
 
 **Resources:** `terraform_data.host` with create (`onprem_deploy.py apply`) and destroy (`onprem_deploy.py destroy`) `local-exec` provisioners.
 

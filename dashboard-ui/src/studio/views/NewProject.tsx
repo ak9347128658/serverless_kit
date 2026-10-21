@@ -20,6 +20,9 @@ export function NewProject({ meta, onCreated }: { meta: Meta; onCreated: (p: Pro
   const [service, setService] = useState("my-service");
   const [provider, setProvider] = useState(meta.providers[0]?.name || "aws");
   const [template, setTemplate] = useState<Template>("http");
+  const [language, setLanguage] = useState<"python" | "javascript" | "typescript">("python");
+  const nodeOk = (meta.providers.find((p) => p.name === provider)?.node_runtimes || []).length > 0;
+  const lang = nodeOk ? language : "python";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const confirm = useConfirm();
@@ -29,7 +32,7 @@ export function NewProject({ meta, onCreated }: { meta: Meta; onCreated: (p: Pro
     setBusy(true);
     setError(null);
     try {
-      onCreated(await api.init(service, provider, template, force));
+      onCreated(await api.init(service, provider, template, force, lang));
     } catch (exc) {
       if (exc instanceof ApiError && exc.status === 409) {
         const ok = await confirm({
@@ -73,6 +76,18 @@ export function NewProject({ meta, onCreated }: { meta: Meta; onCreated: (p: Pro
             <div className="form-label">Provider</div>
             <ProviderCards providers={meta.providers} value={provider} onSelect={setProvider} />
           </div>
+          <FormRow label="Language" help={lang === "python" ? "Handlers in app/*.py." : lang === "typescript" ? "Handlers in src/*.ts, compiled with tsc when packaging (needs Node.js)." : "Handlers in src/*.js (needs Node.js)."}>
+            <Segmented
+              label="Language"
+              value={lang}
+              onChange={setLanguage}
+              options={[
+                { value: "python", label: "Python" },
+                { value: "javascript", label: "JavaScript", disabled: !nodeOk, title: nodeOk ? undefined : "This provider runs Python only in pskit" },
+                { value: "typescript", label: "TypeScript", disabled: !nodeOk, title: nodeOk ? undefined : "This provider runs Python only in pskit" },
+              ]}
+            />
+          </FormRow>
           <FormRow label="Template" help={TEMPLATES.find((t) => t.value === template)?.hint}>
             <Segmented label="Template" value={template} onChange={setTemplate} options={TEMPLATES.map((t) => ({ value: t.value, label: t.label }))} />
           </FormRow>

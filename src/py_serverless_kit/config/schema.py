@@ -35,6 +35,22 @@ HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,62}$")
 _HANDLER_RE = re.compile(r"^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*[.:][A-Za-z_][\w]*$")
 _RATE_RE = re.compile(r"^\s*(\d+)\s+(minute|minutes|hour|hours|day|days)\s*$", re.I)
+PYTHON_RUNTIMES = tuple(f"python3.{minor}" for minor in range(9, 15))
+NODE_RUNTIMES = ("nodejs18", "nodejs20", "nodejs22", "nodejs24")
+LANGUAGES = ("python", "node")
+
+
+def runtime_language(runtime: str) -> str:
+    """``python`` for ``python3.x``, ``node`` for ``nodejsNN`` (JavaScript and TypeScript)."""
+    return "node" if str(runtime).startswith("nodejs") else "python"
+
+
+def _check_runtime(v: str) -> str:
+    if v not in PYTHON_RUNTIMES and v not in NODE_RUNTIMES:
+        raise ValueError(
+            f"runtime must be python3.9 .. python3.14 or {', '.join(NODE_RUNTIMES)} (provider support varies)"
+        )
+    return v
 
 
 class _Model(BaseModel):
@@ -223,6 +239,11 @@ class FunctionConfig(_Model):
     iam: IamConfig = Field(default_factory=IamConfig)
     options: Dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("runtime")
+    @classmethod
+    def _runtime(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _check_runtime(v)
+
     @field_validator("handler")
     @classmethod
     def _handler(cls, v: str) -> str:
@@ -293,9 +314,11 @@ class ProviderConfig(_Model):
     @field_validator("runtime")
     @classmethod
     def _runtime(cls, v: str) -> str:
-        if not re.fullmatch(r"python3\.(9|1[0-4])", v):
-            raise ValueError("runtime must be python3.9 .. python3.14 (provider support varies)")
-        return v
+        return _check_runtime(v)
+
+    @property
+    def language(self) -> str:
+        return runtime_language(self.runtime)
 
     @field_validator("stage")
     @classmethod
@@ -305,6 +328,23 @@ class ProviderConfig(_Model):
         return v
 
 
+class NodePackageConfig(_Model):
+    """How a Node.js / TypeScript service is built (``package.node``)."""
+
+    install: Optional[bool] = Field(
+        None, description="npm install production dependencies into the bundle (default: the provider decides)"
+    )
+    typescript: Optional[bool] = Field(
+        None, description="compile .ts sources with tsc (default: when tsconfig.json or a .ts handler exists)"
+    )
+    build: Optional[List[str]] = Field(None, description="custom build command run before packaging, e.g. [npm, run, build]")
+    out_dir: Optional[str] = Field(None, description="folder the build writes; bundled instead of package.source")
+    bundle: Optional[bool] = Field(
+        None, description="bundle each entry into one file with esbuild (default: only where the platform needs it)"
+    )
+    npm_args: List[str] = Field(default_factory=list)
+
+
 class PackageConfig(_Model):
     source: str = "."
     include: List[str] = Field(default_factory=lambda: ["**/*"])
@@ -312,6 +352,7 @@ class PackageConfig(_Model):
     requirements: Optional[str] = "requirements.txt"
     pip_args: List[str] = Field(default_factory=list)
     vendor: Optional[bool] = Field(None, description="force (true) or skip (false) pip install into the bundle")
+    node: NodePackageConfig = Field(default_factory=NodePackageConfig)
 
 
 # ------------------------------------------------------------------ workflows
@@ -424,6 +465,14 @@ WorkflowState.model_rebuild()
 
 
 # ------------------------------------------------------------------ resources
+
+
+GENERATED_HANDLER_PREFIXES = ("py_serverless_kit.", "pskit_runtime.")
+
+
+def is_generated_handler(handler: str) -> bool:
+    """Handlers pskit adds itself (embedded workflow orchestrators, Python or Node.js)."""
+    return handler.startswith(GENERATED_HANDLER_PREFIXES)
 
 
 def env_key(text: str) -> str:
@@ -544,6 +593,21 @@ class ServiceConfig(_Model):
             seen[key] = name
         return v
 
+    @property
+    def language(self) -> str:
+        """``python`` or ``node``: one language per service (from ``provider.runtime``)."""
+        return self.provider.language
+
+    @model_validator(mode="after")
+    def _one_language(self) -> ServiceConfig:
+        for name, fn in self.functions.items():
+            if fn.runtime and runtime_language(fn.runtime) != self.provider.language:
+                raise ValueError(
+                    f"function {name!r} uses {fn.runtime} but the service runtime is {self.provider.runtime}; "
+                    "a service is either Python or Node.js"
+                )
+        return self
+
     @model_validator(mode="after")
     def _drop_disabled(self) -> ServiceConfig:
         """Leave out functions and workflows with ``enabled: false`` (e.g. under ``providers.<cloud>``)."""
@@ -621,7 +685,7 @@ class ServiceConfig(_Model):
         generated ones (embedded workflow orchestrators).
         """
         fn = self.functions.get(fn_name)
-        generated = fn is not None and fn.handler.startswith("py_serverless_kit.")
+        generated = fn is not None and is_generated_handler(fn.handler)
         out: List[Tuple[str, ResourceConfig]] = []
         for key, res in sorted(self.resources.items()):
             if res.functions is None:

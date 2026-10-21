@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from ..config.loader import DEFAULT_FILES, ConfigError, LoadedConfig, build_raw
-from ..config.schema import PROVIDERS, ServiceConfig
+from ..config.schema import PROVIDERS, ServiceConfig, is_generated_handler
 
 HEADER = "# Edited with pskit studio. https://github.com/ak9347128658/serverless_kit\n"
 BACKUP_DIR = Path(".pskit") / "studio" / "backups"
@@ -183,7 +183,7 @@ def validate(
         result["functions"] = [
             {
                 "name": name,
-                "generated": fn.handler.startswith("py_serverless_kit."),
+                "generated": is_generated_handler(fn.handler),
                 "kind": fn.kind,
                 "handler": fn.handler,
             }
@@ -229,7 +229,9 @@ def save_project(root: Path, raw: Any, mtime: Optional[float] = None, force: boo
     return get_project(root)
 
 
-def init_project(root: Path, service: str, provider: str, template: str, force: bool = False) -> Dict[str, Any]:
+def init_project(
+    root: Path, service: str, provider: str, template: str, force: bool = False, language: str = "python"
+) -> Dict[str, Any]:
     from ..cli.templates import render
 
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", service or ""):
@@ -238,10 +240,20 @@ def init_project(root: Path, service: str, provider: str, template: str, force: 
         raise StudioError(400, f"provider must be one of {', '.join(PROVIDERS)}")
     if template not in ("http", "events", "workflow", "full"):
         raise StudioError(400, "template must be http, events, workflow or full")
+    if language not in ("python", "javascript", "typescript"):
+        raise StudioError(400, "language must be python, javascript or typescript")
+    runtime = "python3.12"
+    if language != "python":
+        from ..providers.registry import get_provider
+
+        prov = get_provider(provider)
+        if not prov.node_runtimes:
+            raise StudioError(400, f"{prov.display_name} does not run Node.js functions in pskit")
+        runtime = prov.default_runtime_for("node")
     if config_path(root) is not None and not force:
         raise StudioError(409, "a pskit.yml already exists here", code="exists")
     created = []
-    for rel, content in render(template, service, provider).items():
+    for rel, content in render(template, service, provider, runtime, language == "typescript").items():
         target = root / rel
         if target.exists() and not (force and rel == "pskit.yml"):
             continue
@@ -272,6 +284,37 @@ def _source_dir(root: Path) -> Path:
     return resolved
 
 
+def _language(root: Path) -> str:
+    """``node`` when pskit.yml's provider.runtime is nodejsNN, else ``python``."""
+    path = config_path(root)
+    if path is None:
+        return "python"
+    raw, _ = parse_text(path.read_text("utf-8"))
+    provider = (raw or {}).get("provider")
+    runtime = str(provider.get("runtime") or "") if isinstance(provider, dict) else ""
+    return "node" if runtime.startswith("nodejs") else "python"
+
+
+def _ensure_node_handler(root: Path, source: Path, handler: str, kind: str) -> Dict[str, Any]:
+    import json
+
+    from .node_stubs import ensure_node_handler
+
+    package_type = "commonjs"
+    pkg = root / "package.json"
+    if pkg.is_file():
+        try:
+            package_type = str(json.loads(pkg.read_text("utf-8")).get("type") or "commonjs")
+        except ValueError:
+            pass
+    typescript = (root / "tsconfig.json").is_file() or any(source.glob("**/*.ts"))
+    try:
+        path, created, line = ensure_node_handler(source, root, handler, kind, typescript, package_type)
+    except ValueError as exc:
+        raise StudioError(400, str(exc)) from None
+    return {"path": path.resolve().relative_to(root.resolve()).as_posix(), "created": created, "line": line}
+
+
 def ensure_handler(root: Path, handler: str, events: Optional[List[str]] = None) -> Dict[str, Any]:
     from .meta import HANDLER_TEMPLATES, TEMPLATE_IMPORTS
 
@@ -282,6 +325,8 @@ def ensure_handler(root: Path, handler: str, events: Optional[List[str]] = None)
     kinds = [e for e in (events or []) if e in HANDLER_TEMPLATES]
     kind = kinds[0] if kinds else "invoke"
     source = _source_dir(root)
+    if _language(root) == "node":
+        return _ensure_node_handler(root, source, handler, kind)
     parts = module.split(".")
     package_dir = source.joinpath(*parts)
     if (package_dir / "__init__.py").is_file():

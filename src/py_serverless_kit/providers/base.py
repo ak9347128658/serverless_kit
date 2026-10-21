@@ -32,7 +32,14 @@ ALL_CAPABILITIES = (HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC, WORKFLOW_NATIVE)
 EVENT_CAPABILITIES = frozenset({HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC})
 
 ORCHESTRATOR_HANDLER = "py_serverless_kit.runtime.workflow.orchestrate"
+# The Node.js runtime is vendored at the bundle root as ``pskit_runtime/`` (see deploy_docs/NODE_RUNTIME.md).
+ORCHESTRATOR_HANDLER_NODE = "pskit_runtime.workflow.orchestrate"
 PREFERRED_RUNTIME = "python3.12"
+PREFERRED_NODE_RUNTIME = "nodejs20"
+
+
+def orchestrator_handler(language: str) -> str:
+    return ORCHESTRATOR_HANDLER_NODE if language == "node" else ORCHESTRATOR_HANDLER
 
 
 class ProviderError(Exception):
@@ -147,7 +154,13 @@ class Provider(ABC):
     max_name_length: ClassVar[int] = 64
     name_pattern: ClassVar[str] = r"[^a-z0-9-]"
     runtimes: ClassVar[Dict[str, str]] = {}
+    # Node.js runtimes: ``nodejs20`` -> the platform's id (e.g. ``nodejs20.x``). Empty = no Node.js support.
+    node_runtimes: ClassVar[Dict[str, str]] = {}
     vendor_dependencies: ClassVar[bool] = True
+    # Node.js: npm-install production dependencies into the bundle (False when the platform builds remotely).
+    node_vendor_dependencies: ClassVar[bool] = True
+    # Node.js: the platform needs one bundled file per entry (esbuild), e.g. Cloudflare Workers.
+    node_bundle: ClassVar[bool] = False
     extra_requirements: ClassVar[List[str]] = []
     max_timeout: ClassVar[int] = 900
     # Managed storage/queue/topic resources that no event uses are created by this provider.
@@ -180,7 +193,26 @@ class Provider(ABC):
         older = [rt for rt in self.runtimes if minor(rt) <= minor(PREFERRED_RUNTIME)]
         return max(older or list(self.runtimes), key=minor)
 
+    def default_runtime_for(self, language: str) -> str:
+        """Default runtime for ``language``: :attr:`default_runtime` for Python, nodejs20 (or nearest) for Node.js."""
+        if language != "node":
+            return self.default_runtime
+        if not self.node_runtimes or PREFERRED_NODE_RUNTIME in self.node_runtimes:
+            return PREFERRED_NODE_RUNTIME
+        major = int(PREFERRED_NODE_RUNTIME[6:])
+        older = [rt for rt in self.node_runtimes if int(rt[6:]) <= major]
+        return max(older or list(self.node_runtimes), key=lambda rt: int(rt[6:]))
+
     def runtime_id(self, runtime: str) -> str:
+        from ..config.schema import runtime_language
+
+        if runtime_language(runtime) == "node":
+            if not self.node_runtimes:
+                raise ProviderError(f"{self.display_name} does not support Node.js functions in pskit yet")
+            if runtime not in self.node_runtimes:
+                supported = ", ".join(sorted(self.node_runtimes))
+                raise ProviderError(f"{self.display_name} does not support {runtime}; use one of: {supported}")
+            return self.node_runtimes[runtime]
         if self.runtimes and runtime not in self.runtimes:
             supported = ", ".join(sorted(self.runtimes))
             raise ProviderError(f"{self.display_name} does not support {runtime}; use one of: {supported}")
@@ -362,6 +394,7 @@ class Provider(ABC):
             "default_region": self.default_region,
             "capabilities": sorted(self.capabilities),
             "runtimes": sorted(self.runtimes),
+            "node_runtimes": sorted(self.node_runtimes, key=lambda rt: int(rt[6:])),
             "max_timeout": self.max_timeout,
             "terraform_provider": self.terraform_source,
             "notes": self.notes,

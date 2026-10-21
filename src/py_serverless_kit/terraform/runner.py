@@ -92,6 +92,18 @@ class TerraformRunner:
             args.append("-auto-approve")
         self._run(args)
 
+    def state_list(self) -> List[str]:
+        """Resource addresses in the state (empty when there is no state yet)."""
+        proc = self._run(["state", "list", "-no-color"], capture=True, check=False)
+        if proc.returncode != 0:
+            return []
+        return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+    def state_rm(self, addresses: List[str]) -> None:
+        """Forget resources without destroying them."""
+        if addresses:
+            self._run(["state", "rm", "-no-color", *addresses], capture=True)
+
     def output(self) -> Dict[str, Any]:
         proc = self._run(["output", "-json", "-no-color"], capture=True)
         try:

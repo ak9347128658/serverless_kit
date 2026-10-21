@@ -40,8 +40,9 @@ def _routes(runner: LocalRunner) -> List[Route]:
 class _Watcher:
     """Detects source changes by polling mtimes on request (cheap and portable)."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, suffixes: Tuple[str, ...] = (".py",)) -> None:
         self.root = root
+        self.suffixes = suffixes
         self.stamp = self._scan()
         self.lock = threading.Lock()
 
@@ -52,7 +53,7 @@ class _Watcher:
                 d for d in dirnames if not d.startswith(".") and d not in ("__pycache__", "venv", "node_modules")
             ]
             for f in filenames:
-                if f.endswith(".py"):
+                if f.endswith(self.suffixes):
                     try:
                         latest = max(latest, os.stat(os.path.join(dirpath, f)).st_mtime)
                     except OSError:
@@ -70,7 +71,8 @@ class _Watcher:
 
 def make_handler(runner: LocalRunner, echo=print):  # noqa: ANN001
     routes = _routes(runner)
-    watcher = _Watcher(runner.source)
+    suffixes = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".json") if runner.language == "node" else (".py",)
+    watcher = _Watcher(runner.source, suffixes)
     lock = threading.Lock()  # handlers share os.environ; serialize invocations
 
     class Handler(BaseHTTPRequestHandler):
@@ -186,6 +188,7 @@ def serve(runner: LocalRunner, host: str = "127.0.0.1", port: int = 3000, echo=p
         echo("stopping")
     finally:
         httpd.server_close()
+        runner.close()
 
 
 def start_background(runner: LocalRunner, host: str = "127.0.0.1", port: int = 0) -> Tuple[ThreadingHTTPServer, str]:

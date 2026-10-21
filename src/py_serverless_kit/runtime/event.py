@@ -245,6 +245,110 @@ class Event:
             out["data"] = self.data
         return out
 
+    def to_wire(self) -> Dict[str, Any]:
+        """The full portable form sent to the Node.js worker (``pskit_runtime/worker.js``).
+
+        Bodies that are bytes travel base64 encoded (``body_b64``); everything
+        else must be JSON-serialisable (anything that isn't becomes its ``str``).
+        """
+        out: Dict[str, Any] = {
+            "type": self.type,
+            "provider": self.provider,
+            "function": self.function,
+            "time": self.time.isoformat(),
+            "source": self.source,
+            "data": _jsonable(self.data),
+            "http": None,
+            "records": [],
+        }
+        if self.http is not None:
+            out["http"] = {
+                "method": self.http.method,
+                "path": self.http.path,
+                "headers": self.http.headers.to_dict(),
+                "query": dict(self.http.query),
+                "multi_query": {k: list(v) for k, v in self.http.multi_query.items()},
+                "path_params": dict(self.http.path_params),
+                "body_b64": base64.b64encode(self.http.body).decode("ascii"),
+                "source_ip": self.http.source_ip,
+                "route": self.http.route,
+            }
+        for rec in self.records:
+            binary = isinstance(rec.body, (bytes, bytearray))
+            out["records"].append(
+                {
+                    "id": rec.id,
+                    "body": None if binary else _jsonable(rec.body),
+                    "body_b64": base64.b64encode(bytes(rec.body)).decode("ascii") if binary else None,
+                    "attributes": _jsonable(rec.attributes),
+                    "source": rec.source,
+                    "bucket": rec.bucket,
+                    "key": rec.key,
+                    "size": rec.size,
+                    "action": rec.action,
+                }
+            )
+        return out
+
+
+def _jsonable(value: Any) -> Any:
+    """``value`` if JSON can carry it, else a JSON-friendly copy (bytes -> text, unknown -> str)."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", "replace")
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def event_from_wire(data: Dict[str, Any]) -> Event:
+    """Inverse of :meth:`Event.to_wire` (used by tests and Python-side tooling)."""
+    http = None
+    raw_http = data.get("http")
+    if raw_http:
+        body_b64 = raw_http.get("body_b64")
+        http = HttpRequest(
+            method=raw_http.get("method") or "GET",
+            path=raw_http.get("path") or "/",
+            headers=Headers(raw_http.get("headers") or {}),
+            query=dict(raw_http.get("query") or {}),
+            multi_query={k: list(v) for k, v in (raw_http.get("multi_query") or {}).items()},
+            path_params=dict(raw_http.get("path_params") or {}),
+            body=base64.b64decode(body_b64) if body_b64 else HttpRequest.decode_body(raw_http.get("body")),
+            source_ip=raw_http.get("source_ip"),
+            route=raw_http.get("route"),
+        )
+    records = []
+    for rec in data.get("records") or []:
+        body_b64 = rec.get("body_b64")
+        records.append(
+            Record(
+                id=rec.get("id"),
+                body=base64.b64decode(body_b64) if body_b64 else rec.get("body"),
+                attributes=dict(rec.get("attributes") or {}),
+                source=rec.get("source"),
+                bucket=rec.get("bucket"),
+                key=rec.get("key"),
+                size=rec.get("size"),
+                action=rec.get("action"),
+            )
+        )
+    return Event(
+        type=str(data.get("type") or EventType.INVOKE),
+        provider=str(data.get("provider") or "local"),
+        function=str(data.get("function") or ""),
+        http=http,
+        records=records,
+        data=data.get("data"),
+        time=parse_time(data.get("time")),
+        source=data.get("source"),
+    )
+
 
 def parse_time(value: Any) -> datetime:
     """Parse the many timestamp shapes providers emit; fall back to *now*."""

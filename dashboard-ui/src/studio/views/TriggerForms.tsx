@@ -463,6 +463,22 @@ function SourceForm({
     }
   };
 
+  /** "Create new": add a managed resource to Resources and select it right away. */
+  const createResource = () => {
+    const native = str(config[nameKey]).trim() || fallback;
+    const taken = Object.keys(asObject(draft.resources));
+    const base = native.replace(/[^A-Za-z0-9_-]/g, "-").replace(/^[^A-Za-z]+/, "") || noun;
+    const key = uniqueName(NAME_RE.test(base) ? base.slice(0, 60) : noun, taken);
+    const res: JsonObject = { type };
+    if (native !== key) res.name = native;
+    edit(["resources", key], res, { coalesce: false });
+    const { [nameKey]: _n, existing: _e, ...rest } = config;
+    void _n;
+    void _e;
+    replace({ ...rest, resource: key });
+    setModeState("resource");
+  };
+
   /** Picked in the cloud account: attach directly, optionally through a new external resource. */
   const pick = (item: DiscoverItem, asResource: boolean) => {
     const { resource: _r, [nameKey]: _n, ...rest } = config;
@@ -534,9 +550,20 @@ function SourceForm({
         <FormRow
           label={type === "storage" ? "Bucket name" : `${type[0].toUpperCase()}${type.slice(1)} name`}
           required
-          help={mode === "new" ? "pskit creates it on deploy (managed: removed with the stage)." : "The exact name in the account; pskit only attaches the trigger."}
+          help={
+            mode === "new"
+              ? "pskit creates it on deploy. “Create & select” also adds it to Resources, so other functions can bind it and it shows up in this list."
+              : "The exact name in the account; pskit only attaches the trigger."
+          }
         >
-          <TextInput mono value={str(config[nameKey])} placeholder={fallback} onChange={(v) => set(nameKey, v)} />
+          <div className="row-gap">
+            <TextInput mono value={str(config[nameKey])} placeholder={fallback} onChange={(v) => set(nameKey, v)} />
+            {mode === "new" && (
+              <button type="button" className="btn btn-sm btn-primary" onClick={createResource} title={`Add this ${noun} to Resources and select it`}>
+                Create &amp; select
+              </button>
+            )}
+          </div>
         </FormRow>
       )}
       {type === "storage" && (

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+
+import pytest
 
 from py_serverless_kit.core.deployer import Deployer
 from tests.conftest import full_config
@@ -227,3 +230,73 @@ def test_log_analytics_workspace_output(make_project, render):
     tf = render(make_project(full_config("azure", options={"subscription_id": "sub", "app_insights": False})))
     assert "log_analytics_workspace_id" not in tf["output"]
     assert "azurerm_log_analytics_workspace" not in tf["resource"]
+
+
+NODE_SKIP = pytest.mark.skipif(shutil.which("node") is None or shutil.which("npm") is None, reason="needs Node.js and npm")
+
+JS_HANDLERS = {"app/handlers.js": "exports.hello = async () => ({ ok: true });\nexports.tick = async () => null;\n"}
+
+
+def node_config(provider: str, options: str = "{}", extra: str = "") -> str:
+    return f"""
+service: demo
+provider:
+  name: {provider}
+  runtime: nodejs20
+  options: {options}
+functions:
+  hello:
+    handler: app.handlers.hello
+    events:
+      - http: "GET /hello/{{name}}"
+  tick:
+    handler: app.handlers.tick
+{extra}
+"""
+
+
+AZ_OPTS = "{subscription_id: 00000000-0000-0000-0000-000000000000}"
+
+
+def test_node_shim_registers_every_trigger(make_project):
+    extra = """
+    events:
+      - schedule: {cron: "0 9 * * *", input: {report: daily}}
+  worker:
+    handler: app.handlers.tick
+    events:
+      - queue: jobs
+      - storage: {bucket: demo-uploads, suffix: .csv}
+      - topic: events
+workflows:
+  flow:
+    engine: native
+    start_at: s
+    states:
+      s: {type: task, function: tick}
+"""
+    project = make_project(node_config("azure", AZ_OPTS, extra), files=JS_HANDLERS)
+    files = project.provider.shim_files(project.config)
+    assert set(files) == {"pskit_entry.js", "host.json"}
+    src = files["pskit_entry.js"]
+    assert 'app.http("hello_http_0", { route: "hello/{name}", methods: ["GET"], authLevel: "anonymous"' in src
+    assert 'app.timer("tick_schedule_0", { schedule: "0 0 9 * * *"' in src and '{"report": "daily"}' in src
+    assert 'app.storageQueue("worker_queue_0", { queueName: "jobs"' in src
+    assert 'path: "demo-uploads/{name}.csv"' in src
+    assert 'app.serviceBusTopic("worker_topic_2", { topicName: "events", subscriptionName: "worker"' in src
+    # The native workflow's task function gets the private invoke route.
+    assert 'route: "_pskit/invoke/tick", methods: ["POST"], authLevel: "function"' in src
+    package = project.provider.node_package(project.config)
+    assert package["main"] == "pskit_entry.js" and "@azure/functions" in package["dependencies"]
+
+
+def test_node_python_shim_is_unchanged_by_the_refactor(make_project):
+    project = make_project(full_config("azure"))
+    assert "function_app.py" in project.provider.shim_files(project.config)
+
+
+@NODE_SKIP
+def test_node_render_sets_node_version(make_project, render):
+    tf = render(make_project(node_config("azure", AZ_OPTS), files=JS_HANDLERS))
+    stack = tf["resource"]["azurerm_linux_function_app"]["app"]["site_config"]["application_stack"]
+    assert stack == {"node_version": "20"}

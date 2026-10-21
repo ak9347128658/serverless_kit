@@ -42,6 +42,8 @@ export interface ProviderMeta {
   default_region: string;
   capabilities: string[];
   runtimes: string[];
+  /** Node.js runtimes (nodejs18 … nodejs24) this provider runs; empty = Python only. */
+  node_runtimes?: string[];
   default_runtime?: string;
   max_timeout: number;
   notes?: string;
@@ -75,6 +77,7 @@ export interface Meta {
     drivers: { queue: Driver[]; storage: Driver[]; topic: Driver[] };
   };
   handler_templates?: Record<string, string>;
+  node_handler_templates?: Record<string, string>;
 }
 
 export interface Issue {
@@ -157,6 +160,12 @@ export interface VsCodeState {
   url?: string | null;
   container?: string | null;
   log_job?: string | null;
+  python?: string | null;
+  node?: string | null;
+  target_image?: string;
+  running_image?: string | null;
+  python_versions?: string[];
+  node_versions?: string[];
 }
 
 export interface FsEntry {
@@ -207,4 +216,13 @@ export interface SetupResult {
   checks: SetupCheck[];
   env?: EnvHint[];
   platform?: "windows" | "macos" | "linux";
+}
+
+export interface DevEnvStatus {
+  venv: { path: string; exists: boolean; python: string | null };
+  requirements: { path: string; exists: boolean };
+  package_json: boolean;
+  node_modules: boolean;
+  node: { path: string | null; version: string | null; npm: string | null };
+  interpreters: { path: string; version: string }[];
 }

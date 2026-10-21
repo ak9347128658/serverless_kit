@@ -53,6 +53,18 @@ asks first.
 - **Provider differences**: trigger types the provider can't run aren't offered. Options it rejects (for example `auth: jwt` on Azure) or ignores (a timezone on Azure timers) are listed on each trigger, worked out from the provider's own validation.
 - **Enable / disable**: functions and workflows can be disabled everywhere (`enabled: false`) or only on the current provider (`providers.<cloud>...enabled: false`). A single trigger can be disabled on one provider too. The Deploy page and the provider switch list everything that won't run on the target and offer to disable it there.
 
+## Project environment, trigger resources and remove
+
+- **Setup & credentials → Project environment** creates `.venv` with the Python you pick (every interpreter found on
+  this machine is listed, including the Windows `py` launcher's) and installs `requirements.txt` into it, or recreates
+  it from scratch. Node.js services get **npm install** (`npm ci` when there is a lockfile). The output streams in the
+  page.
+- **Triggers → Create new → Create & select** adds the queue, bucket or topic to Resources (managed) and selects it in
+  the trigger, so other functions can bind it too. **Pick from <cloud>** can add an existing one as an external resource
+  in the same way.
+- **Deploy → Remove** has a switch, *Remove also deletes buckets, queues and topics*. Turned off, remove runs
+  `pskit remove --keep-resources`: functions and triggers are destroyed and the data resources stay in the cloud.
+
 ## Saving: what changes in pskit.yml
 
 - Values keep their written form: `${env:API_KEY}`, `${self:custom.x}` and `${opt:...}` are saved as written, never resolved.
@@ -87,6 +99,13 @@ A missing SDK or credential shows a message in the picker; you can always type t
    until it answers.
 3. The editor opens inside the studio, with **Open in new tab** and **Stop**. A container that's already running is
    reused. Stop removes it; your files stay in the project folder.
+
+**Runtimes**: pick a **Python** (3.9 to 3.13) and/or **Node.js** (18, 20, 22, 24) version next to the image. The first
+start with a combination builds `pskit-code-server:<tag>-py<X>-node<Y>` on top of the code-server image: CPython from
+`uv python install`, Node.js from the official nodejs.org Linux build (its SHA-256 is checked), and the Python
+extension. Later starts reuse it. The Dockerfile is kept in `.pskit/studio/vscode/`. Changing the selection while
+VS Code runs offers **Restart with these runtimes**: the container is replaced, and your files stay where they are.
+The default is the project's own runtime.
 
 It runs with `--auth none` because it is reachable only from this machine. On Linux and macOS it runs as your user, so
 new files aren't owned by root.
