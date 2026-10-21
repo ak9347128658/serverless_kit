@@ -70,6 +70,9 @@ functions:
         def state_list(self):
             return AWS_STATE
 
+        def state_pull(self):
+            return {"version": 4, "resources": []}
+
         def state_rm(self, addresses):
             calls.append(("rm", list(addresses)))
 
@@ -81,6 +84,7 @@ functions:
     kept = Deployer(project, echo=lambda *_: None, runner=Runner()).remove(keep_resources=True)
     assert calls[0] == "init" and calls[-1] == "destroy"
     assert calls[1] == ("rm", kept) and "aws_sqs_queue.q_jobs" in kept
+    assert (project.work_dir / "kept" / "terraform.tfstate").is_file()  # remembered for `pskit resources delete`
 
     calls.clear()
     assert Deployer(project, echo=lambda *_: None, runner=Runner()).remove() == []

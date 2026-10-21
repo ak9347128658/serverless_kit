@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import string
@@ -171,6 +172,60 @@ def ssh_command(deploy: Any) -> List[str]:
 
 
 # --------------------------------------------------------------------- deployed logs
+
+
+TEST_EVENTS = Path(".pskit") / "studio" / "test-events.json"
+
+
+def test_guide(root: Path, provider: str, stage: str) -> Dict[str, Any]:
+    """How to test every function on provider/stage: payloads, commands and console steps."""
+    from ..core.project import Project
+    from ..core.testing import guide
+
+    try:
+        project = Project.load(cwd=root, provider=provider, stage=stage)
+    except Exception as exc:  # noqa: BLE001 - an invalid draft is shown as a message
+        raise StudioError(400, f"the saved pskit.yml does not load for {provider}/{stage}: {exc}") from None
+    return guide(project, deployment_record(root, provider, stage))
+
+
+def test_events(root: Path) -> Dict[str, Any]:
+    """Saved test payloads: ``{function: [{"name", "event", "payload", "path"?}]}``."""
+    path = root / TEST_EVENTS
+    try:
+        data = json.loads(path.read_text("utf-8")) if path.is_file() else {}
+    except (OSError, ValueError):
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_test_events(root: Path, events: Any) -> Dict[str, Any]:
+    if not isinstance(events, dict):
+        raise StudioError(400, "events must be an object of function name -> list")
+    text = json.dumps(events, indent=2, sort_keys=True)
+    if len(text) > 512 * 1024:
+        raise StudioError(413, "saved test events are limited to 512 KiB")
+    for name, items in events.items():
+        if not isinstance(items, list) or not all(isinstance(i, dict) and isinstance(i.get("name"), str) for i in items):
+            raise StudioError(400, f"events.{name} must be a list of {{name, event, payload}}")
+    path = root / TEST_EVENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((text + "\n").encode("utf-8"))
+    return events
+
+
+def cloud_resources(root: Path, provider: str, stage: str) -> Dict[str, Any]:
+    """Buckets, queues and topics pskit created for provider/stage: deployed and kept."""
+    from ..core.deployer import Deployer
+    from ..core.project import Project
+
+    if not (root / ".pskit" / f"{provider}-{stage}").is_dir():
+        return {"deployed": [], "kept": [], "reason": f"{provider}/{stage} has not been packaged or deployed from here"}
+    try:
+        project = Project.load(cwd=root, provider=provider, stage=stage)
+        return dict(Deployer(project, echo=lambda _m: None).cloud_resources())
+    except Exception as exc:  # noqa: BLE001 - config, terraform or credential problems: show them
+        raise StudioError(502, f"{type(exc).__name__}: {exc}") from None
 
 
 def deployment_record(root: Path, provider: str, stage: str) -> Optional[Dict[str, Any]]:

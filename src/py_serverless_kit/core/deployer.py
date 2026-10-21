@@ -136,7 +136,7 @@ class Deployer:
     def remove(self, *, auto_approve: bool = True, keep_resources: bool = False) -> List[str]:
         """Destroy the stage. With ``keep_resources`` managed buckets, queues and topics stay in the
         cloud (they are dropped from the Terraform state first). Returns the kept addresses."""
-        from .retain import kept_addresses, supports
+        from .retain import kept_addresses, save_kept, supports
 
         project = self.project
         if not (project.work_dir / "main.tf.json").is_file():
@@ -151,8 +151,11 @@ class Deployer:
                 self.echo(f"  {project.provider.display_name}: no managed buckets, queues or topics to keep")
             else:
                 kept = kept_addresses(provider, self.runner.state_list())
+                if kept:
+                    # Remember them in .pskit/<p>-<s>/kept/ so `pskit resources delete` can remove them later.
+                    save_kept(project.work_dir, self.runner.state_pull(), kept)
                 for address in kept:
-                    self.echo(f"  keeping {address} (no longer managed by pskit)")
+                    self.echo(f"  keeping {address} (delete later with `pskit resources delete`)")
                 self.runner.state_rm(kept)
         self.runner.destroy(auto_approve=auto_approve)
         record_path = project.work_dir / RECORD_FILE
@@ -164,6 +167,46 @@ class Deployer:
             record_path.write_text(json.dumps(record, indent=2), "utf-8")
         self.run_hook("after_remove")
         return kept
+
+    # ---------------------------------------------------------------- data resources
+    def cloud_resources(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Buckets, queues and topics pskit created: still deployed, and kept by ``remove --keep-resources``."""
+        from .retain import data_resources, list_kept
+
+        provider = self.project.config.provider.name
+        deployed: List[Dict[str, Any]] = []
+        if (self.project.work_dir / "main.tf.json").is_file():
+            self.runner.init()
+            deployed = data_resources(provider, self.runner.state_pull())
+        return {"deployed": deployed, "kept": list_kept(self.project.work_dir, provider)}
+
+    def delete_resources(self, addresses: List[str]) -> List[str]:
+        """Delete buckets, queues or topics by Terraform address (kept ones or deployed ones). Returns deleted."""
+        from .retain import delete_kept
+
+        found = self.cloud_resources()
+        kept = {r["address"] for r in found["kept"]}
+        deployed = {r["address"] for r in found["deployed"]}
+        unknown = [a for a in addresses if a not in kept and a not in deployed]
+        if unknown:
+            raise DeployError(
+                f"not a bucket, queue or topic of this deployment: {', '.join(unknown)} (see `pskit resources list`)"
+            )
+        done: List[str] = []
+        from_kept = [a for a in addresses if a in kept]
+        if from_kept:
+            tf = self.project.config.provider.terraform
+            delete_kept(self.project.work_dir, from_kept, binary=tf.binary, echo=self.echo)
+            done += from_kept
+        targets = [a for a in addresses if a in deployed and a not in kept]
+        if targets:
+            self.runner.destroy(auto_approve=True, targets=targets)
+            done += targets
+            self.echo(
+                "  Deleted from the cloud. If it is still in pskit.yml, the next deploy creates it again: "
+                "remove it from `resources:` / the trigger first."
+            )
+        return done
 
     def refresh_info(self) -> Dict[str, Any]:
         outputs = self.runner.output()

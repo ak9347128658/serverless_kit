@@ -172,6 +172,9 @@ function FunctionList() {
       className: "nowrap",
       render: (r) => (
         <span className="row-gap row-actions" onClick={(e) => e.stopPropagation()}>
+          <a className="btn btn-sm" href={href("test", r.name)} title="Send a test event">
+            Test
+          </a>
           <a className="btn btn-sm" href={href("code", handlerFile(str(r.fn.handler)))} title="Open handler code">
             Code
           </a>

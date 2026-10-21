@@ -226,3 +226,41 @@ export interface DevEnvStatus {
   node: { path: string | null; version: string | null; npm: string | null };
   interpreters: { path: string; version: string }[];
 }
+
+export interface CloudResourceRow {
+  address: string;
+  type: string;
+  kind: string;
+  name: string;
+  id: string;
+  status: "deployed" | "kept";
+}
+
+export interface TestTrigger {
+  index: number;
+  type: "http" | "schedule" | "queue" | "storage" | "topic" | "invoke";
+  summary: string;
+  method?: string;
+  path?: string;
+  name?: string;
+  sample: Json;
+  payload_help: string;
+  local: string[];
+  remote: { supported: boolean; reason: string; pskit: string[]; cli: string[]; console: string[] };
+}
+
+export interface TestGuide {
+  provider: string;
+  stage: string;
+  region: string;
+  deployed: boolean;
+  sdk?: string | null;
+  functions: { name: string; description: string; triggers: TestTrigger[] }[];
+}
+
+export interface SavedTestEvent {
+  name: string;
+  event: number;
+  payload: Json;
+  path?: string;
+}

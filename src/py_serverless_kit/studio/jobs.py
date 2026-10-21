@@ -21,8 +21,20 @@ from .project import StudioError
 
 MAX_LINES = 5000
 KEEP_JOBS = 20
-EXCLUSIVE = ("package", "plan", "deploy", "remove")
-COMMANDS = ("validate", "package", "plan", "deploy", "remove", "info", "invoke", "workflow-run")
+EXCLUSIVE = ("package", "plan", "deploy", "remove", "resources-delete")
+COMMANDS = (
+    "validate",
+    "package",
+    "plan",
+    "deploy",
+    "remove",
+    "info",
+    "invoke",
+    "workflow-run",
+    "resources-delete",
+    "trigger",
+)
+_ADDRESS = r'^[A-Za-z_][A-Za-z0-9_.\-]*(\[[A-Za-z0-9_"\-]+\])?$'
 _NAME = r"^[A-Za-z][A-Za-z0-9_-]{0,62}$"
 
 
@@ -63,6 +75,34 @@ def build_argv(
         return ["plan", *common] + (["--skip-deps"] if args.get("skip_deps") else [])
     if command == "deploy":
         return ["deploy", *common] + (["--skip-deps"] if args.get("skip_deps") else [])
+    if command == "trigger":
+        argv = ["trigger", *common, "-f", _flag_value(args.get("function"), "function"), "--json"]
+        event = args.get("event")
+        if event is None or event == -1 or args.get("direct"):
+            argv.append("--direct")
+        else:
+            if not isinstance(event, int) or isinstance(event, bool) or not 0 <= event < 1000:
+                raise StudioError(400, "event must be the trigger number")
+            argv += ["-e", str(event)]
+        if args.get("path"):
+            path = str(args["path"]).strip()
+            if not path.startswith("/") or any(c.isspace() or ord(c) < 32 for c in path) or len(path) > 2048:
+                raise StudioError(400, "HTTP path must start with / and contain no spaces")
+            argv += ["--path", path]
+        if args.get("data") is not None:
+            data = args["data"] if isinstance(args["data"], str) else json.dumps(args["data"])
+            if data.startswith("@"):
+                raise StudioError(400, "data must be JSON, not a file reference")
+            argv += ["-d", data]
+        return argv
+    if command == "resources-delete":
+        addresses = args.get("addresses") or []
+        if not isinstance(addresses, list) or not addresses or len(addresses) > 200:
+            raise StudioError(400, "addresses must be a non-empty list")
+        for address in addresses:
+            if not isinstance(address, str) or not re.fullmatch(_ADDRESS, address):
+                raise StudioError(400, f"invalid resource address {address!r}")
+        return ["resources", "delete", *common, "--yes", *addresses]
     if command == "remove":
         return ["remove", *common, "--yes"] + (["--keep-resources"] if args.get("keep_resources") else [])
     if command == "invoke":

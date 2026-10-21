@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Chip } from "../../components/Badge";
 import { DataTable, type Column } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
+import { CloudResources } from "../components/CloudResources";
 import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FieldForm, FormRow, KeyValueEditor, Segmented, TextInput, Toggle } from "../components/Forms";
 import { DiscoverModal, InlineIssues, PageHeader } from "../components/Misc";
@@ -49,7 +50,9 @@ export function ResourcesView({ rest }: { rest: string[] }) {
     const users = usedBy(name);
     const ok = await confirm({
       title: `Delete resource ${name}?`,
-      body: users.length ? `Triggers in ${users.join(", ")} use it and will stop validating until you change them.` : "Bound functions lose its PSKIT_RESOURCE_* variables. Nothing is deleted in the cloud.",
+      body: users.length ? `Triggers in ${users.join(", ")} use it and will stop validating until you change them.` : asObject(resources[name]).external
+          ? "Bound functions lose its PSKIT_RESOURCE_* variables. Nothing is deleted in the cloud (it is external)."
+          : "Bound functions lose its PSKIT_RESOURCE_* variables. It is managed by pskit, so the next deploy deletes it from the cloud with its data (or delete it now under In the cloud).",
       confirmLabel: "Delete",
       danger: true,
     });
@@ -135,6 +138,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
           emptyHint="Declare a bucket, queue, topic, database or custom service, managed by pskit or one that already exists."
         />
       </div>
+      <CloudResources />
       {editing && <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} />}
     </div>
   );

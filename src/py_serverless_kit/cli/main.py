@@ -115,7 +115,11 @@ Deploy
 \b
 Operate
   logs        Tail deployed logs              pskit logs -f --function worker
+  trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
+  resources   list | delete
+              pskit resources list -s dev
+              pskit resources delete aws_s3_bucket.b_uploads -s dev
   workflow    run | show | start | executions | status | cancel
               pskit workflow run order -i '{"id": 1}' --history
               pskit workflow start order -i @input.json --wait
@@ -358,6 +362,141 @@ def remove(project, yes: bool, keep_resources: bool) -> None:  # noqa: ANN001
         info(f"Kept {len(kept)} resource(s); they are no longer managed by pskit. Delete them in the console when done.")
     write_dashboard(project.root)
     ok("Removed.")
+
+
+# ----------------------------------------------------------------------------- trigger (test events)
+@cli.command(short_help="Send a real test event to a deployed function.")
+@project_options
+@click.option("-f", "--function", "function", default=None, help="Function to test (all with --list).")
+@click.option("-e", "--event", "index", type=int, default=None, help="Trigger number (0 = first; see --list).")
+@click.option("--direct", is_flag=True, help="Invoke the function directly instead of through a trigger.")
+@click.option("-d", "--data", default=None, help="Payload JSON or @file.json (default: a sample for the trigger).")
+@click.option("--path", "path", default=None, help="HTTP path incl. query string (http triggers), e.g. /items/1?x=y.")
+@click.option("--list", "show", is_flag=True, help="Show how to test each trigger: payload, commands, console steps.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def trigger(  # noqa: ANN001
+    project, function: Optional[str], index: Optional[int], direct: bool, data: Optional[str], path: Optional[str],
+    show: bool, as_json: bool,
+) -> None:
+    """Send a real test event to a deployed function (queue message, upload, HTTP call...).
+
+    \b
+    Examples:
+      pskit trigger --list                          # how to test every function
+      pskit trigger -f worker -e 0 -d '{"order_id": 1}'      # e.g. an SQS message
+      pskit trigger -f thumbnails -e 0 -d '{"key": "in/a.png", "content": "x"}'
+      pskit trigger -f api -e 0 --path '/items/1'
+      pskit trigger -f nightly --direct              # invoke without the trigger
+    Test locally (nothing deployed) with `pskit invoke`.
+    """
+    from ..core.deployer import Deployer
+    from ..core.testing import TriggerError, guide, send
+    from ..local.runner import parse_data
+
+    record = Deployer(project, echo=echo).load_record()
+    info_ = guide(project, record)
+    if show or function is None:
+        rows = [f for f in info_["functions"] if function in (None, f["name"])]
+        if as_json:
+            click.echo(json.dumps(rows, indent=2, default=str))
+            return
+        if not info_["deployed"]:
+            info(f"{info_['provider']}/{info_['stage']} is not deployed: only local tests (pskit invoke) apply.")
+        for fn in rows:
+            echo(click.style(f"\n{fn['name']}", bold=True) + (f"  {fn['description']}" if fn["description"] else ""))
+            for t in fn["triggers"]:
+                label = "direct invoke" if t["index"] < 0 else f"#{t['index']} {t['summary']}"
+                echo(f"  {label}")
+                echo(f"    payload: {json.dumps(t['sample'])}   ({t['payload_help']})")
+                for cmd in t["local"]:
+                    echo(f"    local:   {cmd}")
+                remote = t["remote"]
+                for cmd in remote["pskit"]:
+                    echo(f"    deployed: {cmd}")
+                if not remote["supported"] and info_["deployed"]:
+                    echo(f"    deployed: {remote['reason']}")
+                for cmd in remote["cli"]:
+                    echo(f"    cloud CLI: {cmd}")
+                for i, step in enumerate(remote["console"], 1):
+                    echo(f"    console {i}. {step}")
+        return
+    if direct and index is not None:
+        raise click.UsageError("use --event or --direct, not both")
+    triggers = next((f["triggers"] for f in info_["functions"] if f["name"] == function), None)
+    if triggers is None:
+        raise click.UsageError(f"unknown function {function!r}")
+    chosen = -1 if direct else (index if index is not None else triggers[0]["index"])
+    sample = next((t["sample"] for t in triggers if t["index"] == chosen), None)
+    payload = parse_data(data) if data is not None else sample
+    try:
+        result = send(project, record, function, chosen, payload, path=path)
+    except TriggerError as exc:
+        raise click.ClickException(str(exc)) from None
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+    ok(f"Sent {result.get('kind')} event to {function}")
+    click.echo(json.dumps(result, indent=2, default=str))
+    info("Watch what the function did: pskit logs -f --function " + function)
+
+
+# ----------------------------------------------------------------------------- resources
+@cli.group()
+def resources() -> None:
+    """List or delete the buckets, queues and topics pskit created.
+
+    \b
+    Examples:
+      pskit resources list -s dev
+      pskit resources delete aws_s3_bucket.b_uploads -s dev
+      pskit resources delete --all-kept -s dev     # after `pskit remove --keep-resources`
+    """
+
+
+def _resource_rows(project: Any) -> dict:
+    from ..core.deployer import Deployer
+
+    return Deployer(project, echo=echo).cloud_resources()
+
+
+@resources.command("list", short_help="Deployed and kept buckets, queues and topics.")
+@project_options
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def resources_list(project, as_json: bool) -> None:  # noqa: ANN001
+    """Deployed and kept buckets, queues and topics, with their Terraform addresses."""
+    found = _resource_rows(project)
+    if as_json:
+        click.echo(json.dumps(found, indent=2))
+        return
+    rows = found["deployed"] + found["kept"]
+    if not rows:
+        echo("No buckets, queues or topics created by pskit for this stage.")
+        return
+    echo(f"{'status':<10}{'kind':<8}{'name':<40}address")
+    for r in rows:
+        echo(f"{r['status']:<10}{r['kind']:<8}{r['name'][:39]:<40}{r['address']}")
+    if found["kept"]:
+        info("Kept resources were left by `pskit remove --keep-resources`; delete them with `pskit resources delete`.")
+
+
+@resources.command("delete", short_help="Delete buckets, queues or topics by address.")
+@project_options
+@click.argument("addresses", nargs=-1)
+@click.option("--all-kept", is_flag=True, help="Delete every resource kept by `pskit remove --keep-resources`.")
+@click.option("-y", "--yes", is_flag=True, help="Do not ask for confirmation.")
+def resources_delete(project, addresses: tuple, all_kept: bool, yes: bool) -> None:  # noqa: ANN001
+    """Delete buckets, queues or topics (and their data) by address. See `pskit resources list`."""
+    from ..core.deployer import Deployer
+
+    targets = list(addresses)
+    if all_kept:
+        targets += [r["address"] for r in _resource_rows(project)["kept"] if r["address"] not in targets]
+    if not targets:
+        raise click.UsageError("pass one or more addresses (see `pskit resources list`) or --all-kept")
+    if not yes:
+        click.confirm(f"Permanently delete {len(targets)} resource(s) and their data: {', '.join(targets)}?", abort=True)
+    deleted = Deployer(project, echo=echo).delete_resources(targets)
+    ok(f"Deleted {len(deleted)} resource(s).")
 
 
 def _ask_onprem_pem(project: Any) -> None:

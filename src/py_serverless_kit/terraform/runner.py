@@ -86,11 +86,23 @@ class TerraformRunner:
             args.append("-auto-approve")
         self._run(args)
 
-    def destroy(self, auto_approve: bool = True) -> None:
+    def destroy(self, auto_approve: bool = True, targets: Optional[List[str]] = None) -> None:
         args = ["destroy", "-input=false", "-no-color"]
         if auto_approve:
             args.append("-auto-approve")
+        args += [f"-target={t}" for t in targets or []]
         self._run(args)
+
+    def state_pull(self) -> Dict[str, Any]:
+        """The whole state as JSON (any backend); ``{}`` when there is none."""
+        proc = self._run(["state", "pull"], capture=True, check=False)
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            return {}
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError as exc:
+            raise TerraformError(f"could not parse terraform state: {exc}") from exc
+        return data if isinstance(data, dict) else {}
 
     def state_list(self) -> List[str]:
         """Resource addresses in the state (empty when there is no state yet)."""

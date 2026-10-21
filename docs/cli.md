@@ -99,6 +99,85 @@ code-upload bucket is not kept. On Azure the storage account, Service Bus namesp
 queues, containers or topics are kept as well. Supported on AWS, GCP, Azure, Alibaba, Tencent, Huawei and Oracle; the
 other providers create no buckets, queues or topics.
 
+Kept resources are remembered in `.pskit/<provider>-<stage>/kept/` (their Terraform state plus the provider settings),
+so they can be deleted later with `pskit resources delete`.
+
+## `pskit trigger`
+
+Send a **real** test event to a deployed function, the way its trigger would: an HTTP request to its URL, a message to
+its queue, an object uploaded to its bucket, a message published to its topic, or a direct invocation (schedules are
+fired by invoking the function with the schedule's input). Test without deploying with `pskit invoke`.
+
+```bash
+pskit trigger --list                                   # every function and trigger: payload, local command,
+                                                       # pskit command, cloud CLI command and console steps
+pskit trigger -f worker -e 0 -d '{"order_id": 1}'      # trigger #0 of worker, e.g. an SQS message
+pskit trigger -f worker -e 0 -d '[{"id": 1}, {"id": 2}]'   # two queue messages
+pskit trigger -f thumbnails -e 0 -d '{"key": "in/a.png", "content": "x"}'   # upload an object
+pskit trigger -f fanout -e 0 -d '{"message": {"id": 1}, "attributes": {"type": "order"}}'
+pskit trigger -f api -e 0 --path '/orders/7?verbose=1'  # HTTP trigger with a path
+pskit trigger -f nightly --direct                      # invoke directly, no trigger
+pskit logs -f --function worker                        # then watch what it did
+```
+
+| Flag | |
+|---|---|
+| `-f, --function` | the function (all of them with `--list`) |
+| `-e, --event N` | trigger number, in the order of `events:` (default: the first) |
+| `--direct` | invoke the function directly instead of through a trigger |
+| `-d, --data` | payload JSON or `@file.json`; default: a sample for the trigger type |
+| `--path` | HTTP path and query string for HTTP triggers |
+| `--list` | show how to test each trigger (works before deploying, too) |
+| `--json` | JSON output |
+
+What pskit can send itself (with the machine's credentials and SDKs):
+
+| Provider | HTTP | queue | storage | topic | schedule / invoke |
+|---|---|---|---|---|---|
+| AWS (boto3) | ✓ | SQS | S3 | SNS | `lambda invoke` |
+| GCP | ✓ | Pub/Sub | Cloud Storage | Pub/Sub | via the function URL (HTTP functions) |
+| Azure | ✓ | Storage queue¹ | Blob¹ | Service Bus² | — |
+| On premises | ✓ | ✓ | ✓ | ✓ | ✓ |
+| IBM, DigitalOcean, Cloudflare, Oracle | ✓ | — | — | — | via the function URL |
+| Alibaba, Tencent, Huawei | ✓ | — | — | — | — |
+
+¹ `AZURE_STORAGE_CONNECTION_STRING` of the Function App's storage account. ² `AZURE_SERVICEBUS_CONNECTION_STRING`.
+Where pskit can't send, `--list` prints the cloud CLI command (`aws`, `gcloud`, `az`, `ossutil`, `coscli`, `obsutil`,
+`oci`, `ibmcloud`, `tccli`, `doctl`, `curl`) and the console steps instead.
+
+Payload shapes per trigger type:
+
+| Type | `-d` |
+|---|---|
+| http | the request body (none for GET) |
+| queue | one message, or a list of messages |
+| storage | `{"key": "...", "content": "..."}` (`"action": "deleted"` deletes it) |
+| topic | `{"message": ..., "attributes": {...}}` |
+| schedule / invoke | `event.data` |
+
+## `pskit resources`
+
+The buckets, queues and topics pskit created for this stage: **deployed** ones (in the stage's Terraform state) and
+**kept** ones (left by `pskit remove --keep-resources`).
+
+```bash
+pskit resources list -s dev                         # status, kind, name, Terraform address
+pskit resources delete aws_s3_bucket.b_uploads -s dev
+pskit resources delete --all-kept -s dev --yes
+```
+
+| Command / flag | |
+|---|---|
+| `list [--json]` | list deployed and kept buckets, queues and topics |
+| `delete ADDRESS...` | delete them permanently, with their objects and messages |
+| `delete --all-kept` | delete every kept resource |
+| `-y, --yes` | don't ask for confirmation |
+
+Deleting a deployed resource runs `terraform destroy -target=...`. If it is still in `pskit.yml`, the next deploy
+creates it again, so remove it from `resources:` (or the trigger) first. Kept resources are deleted from their own small
+workspace in `.pskit/<provider>-<stage>/kept/`, which is removed when the last one is gone. Credentials are the same as for
+`pskit deploy`.
+
 ## `pskit info`
 
 Show the deployed functions, triggers, URLs and resource ids.

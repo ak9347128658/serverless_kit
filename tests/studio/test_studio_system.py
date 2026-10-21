@@ -194,3 +194,36 @@ def test_validate_reports_disabled(tmp_path, make_project):
     cf = proj.validate(tmp_path, raw, "cloudflare")
     assert cf["disabled"]["functions"] == ["later"]
     assert any(i["where"] == "functions.later" and "disabled" in i["message"] for i in cf["issues"])
+
+
+def test_cloud_resources_endpoint_and_delete_job_args(studio):  # noqa: F811
+    from py_serverless_kit.studio.jobs import build_argv
+
+    base, _root, _ = studio
+    status, body = call(base, "GET", "/api/cloud-resources?provider=aws&stage=dev")
+    assert status == 200 and body["deployed"] == [] and body["kept"] == [] and "reason" in body
+    argv = build_argv("resources-delete", "aws", "dev", {"addresses": ["aws_s3_bucket.b_uploads"]})
+    assert argv == ["resources", "delete", "--provider", "aws", "--stage", "dev", "--yes", "aws_s3_bucket.b_uploads"]
+    for bad in ([], ["-target=x"], ["a b"], "aws_s3_bucket.b"):
+        with pytest.raises(StudioError):
+            build_argv("resources-delete", "aws", "dev", {"addresses": bad})
+
+
+def test_test_guide_events_and_trigger_job(studio):  # noqa: F811
+    from py_serverless_kit.studio.jobs import build_argv
+
+    base, root, _ = studio
+    status, body = call(base, "GET", "/api/test-guide?provider=aws&stage=dev")
+    assert status == 200 and not body["deployed"] and {f["name"] for f in body["functions"]} >= {"hello", "step"}
+    events = {"hello": [{"name": "big", "event": 0, "payload": {"n": 1}, "path": "/hello?x=1"}]}
+    assert call(base, "PUT", "/api/test-events", {"events": events}) == (200, events)
+    assert call(base, "GET", "/api/test-events") == (200, events)
+    assert (root / ".pskit" / "studio" / "test-events.json").is_file()
+    assert call(base, "PUT", "/api/test-events", {"events": {"hello": "x"}})[0] == 400
+    argv = build_argv("trigger", "aws", "dev", {"function": "hello", "event": 0, "data": {"a": 1}, "path": "/hello?x=1"})
+    assert argv == ["trigger", "--provider", "aws", "--stage", "dev", "-f", "hello", "--json", "-e", "0",
+                    "--path", "/hello?x=1", "-d", '{"a": 1}']
+    assert "--direct" in build_argv("trigger", "aws", "dev", {"function": "hello", "event": -1})
+    for bad in ({"function": "-x"}, {"function": "hello", "event": "0; rm"}, {"function": "hello", "path": "x y"}):
+        with pytest.raises(StudioError):
+            build_argv("trigger", "aws", "dev", bad)

@@ -492,3 +492,15 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .job-item .job-del { margin-left: auto; }
 .inline-pick { max-height: 260px; overflow: auto; }
 .remove-switch { margin: 4px 0 8px; }
+
+/* test page */
+.test-layout { display: flex; gap: 12px; align-items: flex-start; }
+.test-fns { display: flex; flex-direction: column; min-width: 200px; max-width: 260px; padding: 6px; position: sticky; top: 8px; }
+.test-fn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.test-fn:hover { background: var(--bg); }
+.test-fn.active { background: var(--bg); outline: 2px solid var(--accent); }
+.test-main { min-width: 0; }
+.trigger-card.active { outline: 2px solid var(--accent); }
+.chip-link, .chip-x { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 2px; font: inherit; }
+.chip-x { opacity: 0.6; }
+@media (max-width: 820px) { .test-layout { flex-direction: column; } .test-fns { position: static; max-width: none; width: 100%; } }

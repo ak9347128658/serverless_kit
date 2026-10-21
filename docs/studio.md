@@ -53,6 +53,23 @@ asks first.
 - **Provider differences**: trigger types the provider can't run aren't offered. Options it rejects (for example `auth: jwt` on Azure) or ignores (a timezone on Azure timers) are listed on each trigger, worked out from the provider's own validation.
 - **Enable / disable**: functions and workflows can be disabled everywhere (`enabled: false`) or only on the current provider (`providers.<cloud>...enabled: false`). A single trigger can be disabled on one provider too. The Deploy page and the provider switch list everything that won't run on the target and offer to disable it there.
 
+## Test functions
+
+The **Test** page (or **Test** on a function row) sends events to a function:
+
+1. Pick the function and the event: one of its triggers (HTTP, schedule, queue, storage, topic) or **Direct invoke**.
+2. Edit the payload. It starts from a sample for that trigger type (a storage sample matches the trigger's prefix and
+   suffix; a schedule uses its own `input`). **Save event** keeps named payloads per function in
+   `.pskit/studio/test-events.json`, like test events in the Lambda console.
+3. **Run locally** runs the handler on this machine with a synthetic event (`pskit invoke`): no cloud, no deploy.
+   **Send to <provider>/<stage>** fires the real trigger of the deployed function (`pskit trigger`): a queue message,
+   an uploaded object, a topic message, an HTTP request or an invocation. Turn on *Show the function's logs* to watch it.
+
+**How to test this** shows the same for each trigger three ways: the studio steps, the terminal commands (local
+`pskit invoke`, deployed `pskit trigger`, and the cloud's own CLI such as `aws sqs send-message` or
+`gcloud pubsub topics publish`) with Copy buttons, and the click-by-click steps in the cloud console. See
+[`pskit trigger`](cli.md#pskit-trigger) for which events pskit can send on each provider.
+
 ## Project environment, trigger resources and remove
 
 - **Setup & credentials → Project environment** creates `.venv` with the Python you pick (every interpreter found on
@@ -64,6 +81,10 @@ asks first.
   in the same way.
 - **Deploy → Remove** has a switch, *Remove also deletes buckets, queues and topics*. Turned off, remove runs
   `pskit remove --keep-resources`: functions and triggers are destroyed and the data resources stay in the cloud.
+- **Resources → In the cloud** lists the buckets, queues and topics pskit created for the provider and stage in the top
+  bar, deployed or kept. Select some (or **Delete all kept**) and delete them with their data (`pskit resources delete`,
+  behind a typed confirmation). Deleting a managed resource from the Resources table only removes it from `pskit.yml`;
+  the next deploy then deletes it in the cloud.
 
 ## Saving: what changes in pskit.yml
 

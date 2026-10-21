@@ -17,6 +17,7 @@ import { NewProject } from "./views/NewProject";
 import { OverviewView } from "./views/Overview";
 import { ResourcesView } from "./views/Resources";
 import { SetupView } from "./views/Setup";
+import { TestView } from "./views/Test";
 import { WorkflowsView } from "./views/Workflows";
 import { YamlView } from "./views/Yaml";
 
@@ -133,6 +134,7 @@ const NAV: { view: View; label: string; icon: string }[] = [
   { view: "workflows", label: "Workflows", icon: "⇉" },
   { view: "resources", label: "Resources", icon: "▤" },
   { view: "code", label: "Code", icon: "{}" },
+  { view: "test", label: "Test", icon: "▶" },
   { view: "deploy", label: "Deploy", icon: "▲" },
   { view: "logs", label: "Logs", icon: "☰" },
   { view: "yaml", label: "YAML", icon: "≡" },
@@ -220,6 +222,9 @@ function Shell() {
       break;
     case "setup":
       page = <SetupView />;
+      break;
+    case "test":
+      page = <TestView rest={route.rest} />;
       break;
     case "logs":
       page = <LogsView rest={route.rest} />;

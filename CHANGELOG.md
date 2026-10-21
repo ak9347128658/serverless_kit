@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-21
+
+### Added
+- **Test functions with real events**: `pskit trigger` sends a test event to a deployed function through its trigger: an HTTP request, an SQS / Pub/Sub / Storage-queue / on-prem queue message, an S3 / GCS / Blob / on-prem upload, an SNS / Pub/Sub / Service Bus / on-prem topic message, or a direct invocation. `pskit trigger --list` shows, for every function and trigger, a sample payload, the local `pskit invoke` command, the `pskit trigger` command, the cloud's own CLI command and the console steps. Studio **Test** page: pick a trigger, edit or save the event, then Run locally or Send to the deployed stage with live logs, plus a How-to-test panel (studio, terminal, console).
+- `pskit resources list | delete`: list the buckets, queues and topics pskit created (deployed, or kept by `--keep-resources`) and delete them permanently. Kept ones are remembered in `.pskit/<provider>-<stage>/kept/`, so they can be deleted after the stage is gone. Studio: **Resources → In the cloud**, with select, delete selected and delete all kept.
+
 ## [1.0.0] - 2026-10-21
 
 ### Added

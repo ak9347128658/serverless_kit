@@ -296,6 +296,19 @@ def make_handler(app: Studio) -> type:
                 label = "npm install" if language == "node" else "Create .venv and install requirements"
                 job = app.jobs.run_callable("env", lambda j: devenv.run_steps(root, steps, j.emit), label=label)
                 return 202, {"job_id": job.id}
+            if parts == ["test-guide"] and method == "GET":
+                provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
+                stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
+                return 200, system.test_guide(root, provider, stage)
+            if parts == ["test-events"]:
+                if method == "GET":
+                    return 200, system.test_events(root)
+                if method == "PUT":
+                    return 200, system.save_test_events(root, _obj(self._body()).get("events"))
+            if parts == ["cloud-resources"] and method == "GET":
+                provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
+                stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
+                return 200, system.cloud_resources(root, provider, stage)
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":

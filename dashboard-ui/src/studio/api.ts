@@ -9,6 +9,9 @@ import type {
   Meta,
   ProjectState,
   SetupResult,
+  SavedTestEvent,
+  TestGuide,
+  CloudResourceRow,
   DevEnvStatus,
   ValidateResult,
   VsCodeState,
@@ -151,6 +154,13 @@ export const api = {
   cancelJob: (id: string) => request<Job>("POST", `/api/jobs/${encodeURIComponent(id)}/cancel`, {}),
   clearJobs: () => request<{ removed: number }>("DELETE", "/api/jobs"),
   deleteJob: (id: string) => request<{ removed: number }>("DELETE", `/api/jobs/${encodeURIComponent(id)}`),
+  cloudResources: (provider: string, stage: string) =>
+    request<{ deployed: CloudResourceRow[]; kept: CloudResourceRow[]; reason?: string }>("GET", "/api/cloud-resources", undefined, {
+      query: { provider, stage },
+    }),
+  testGuide: (provider: string, stage: string) => request<TestGuide>("GET", "/api/test-guide", undefined, { query: { provider, stage } }),
+  testEvents: () => request<Record<string, SavedTestEvent[]>>("GET", "/api/test-events"),
+  saveTestEvents: (events: Record<string, SavedTestEvent[]>) => request<Record<string, SavedTestEvent[]>>("PUT", "/api/test-events", { events }),
   browse: (path?: string) => request<FsListing>("GET", "/api/fs", undefined, { query: { path } }),
   setup: (provider: string) => request<SetupResult>("GET", "/api/setup", undefined, { query: { provider } }),
   setEnv: (name: string, value: string) => request<{ name: string; set: boolean }>("POST", "/api/setup/env", { name, value }),
