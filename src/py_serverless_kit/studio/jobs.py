@@ -33,6 +33,7 @@ COMMANDS = (
     "workflow-run",
     "resources-delete",
     "trigger",
+    "resource-send",
 )
 _ADDRESS = r'^[A-Za-z_][A-Za-z0-9_.\-]*(\[[A-Za-z0-9_"\-]+\])?$'
 _NAME = r"^[A-Za-z][A-Za-z0-9_-]{0,62}$"
@@ -75,6 +76,14 @@ def build_argv(
         return ["plan", *common] + (["--skip-deps"] if args.get("skip_deps") else [])
     if command == "deploy":
         return ["deploy", *common] + (["--skip-deps"] if args.get("skip_deps") else [])
+    if command == "resource-send":
+        argv = ["resources", "send", *common, _flag_value(args.get("resource"), "resource"), "--json"]
+        if args.get("data") is not None:
+            data = args["data"] if isinstance(args["data"], str) else json.dumps(args["data"])
+            if data.startswith("@"):
+                raise StudioError(400, "data must be JSON, not a file reference")
+            argv += ["-d", data]
+        return argv
     if command == "trigger":
         argv = ["trigger", *common, "-f", _flag_value(args.get("function"), "function"), "--json"]
         event = args.get("event")

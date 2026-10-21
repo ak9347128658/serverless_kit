@@ -117,9 +117,10 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  resources   list | delete
+  resources   list | send | delete
               pskit resources list -s dev
               pskit resources delete aws_s3_bucket.b_uploads -s dev
+              pskit resources send jobs -d '{"order_id": 1}'
   workflow    run | show | start | executions | status | cancel
               pskit workflow run order -i '{"id": 1}' --history
               pskit workflow start order -i @input.json --wait
@@ -477,6 +478,66 @@ def resources_list(project, as_json: bool) -> None:  # noqa: ANN001
         echo(f"{r['status']:<10}{r['kind']:<8}{r['name'][:39]:<40}{r['address']}")
     if found["kept"]:
         info("Kept resources were left by `pskit remove --keep-resources`; delete them with `pskit resources delete`.")
+
+
+@resources.command("send", short_help="Send a test message / object to a queue, bucket or topic.")
+@project_options
+@click.argument("key", required=False)
+@click.option("-d", "--data", default=None, help="Payload JSON or @file.json (default: a sample).")
+@click.option("--list", "show", is_flag=True, help="How to test every resource: payload, commands, console steps.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def resources_send(project, key: Optional[str], data: Optional[str], show: bool, as_json: bool) -> None:  # noqa: ANN001
+    """Test a resource: a message to a queue, an object to a bucket, a message to a topic.
+
+    \b
+    Examples:
+      pskit resources send --list
+      pskit resources send jobs -d '{"order_id": 1}'
+      pskit resources send uploads -d '{"key": "in/a.csv", "content": "a,b"}'
+      pskit resources send events -d '{"message": {"id": 1}, "attributes": {"type": "order"}}'
+    Functions bound to the resource receive it through their triggers; watch them with `pskit logs -f`.
+    """
+    from ..core.deployer import Deployer
+    from ..core.testing import TriggerError, resource_guide, send_resource
+    from ..local.runner import parse_data
+
+    record = Deployer(project, echo=echo).load_record()
+    if show or key is None:
+        info_ = resource_guide(project, record)
+        rows = [r for r in info_["resources"] if key in (None, r["key"])]
+        if as_json:
+            click.echo(json.dumps(rows, indent=2, default=str))
+            return
+        if not rows:
+            echo("No resources in pskit.yml.")
+        for r in rows:
+            label = f"{r['type']} {r['name']}" + (" (external)" if r["external"] else "")
+            echo(click.style(f"\n{r['key']}", bold=True) + f"  {label}  -> {', '.join(r['functions']) or 'no functions'}")
+            if r["sendable"]:
+                echo(f"    payload: {json.dumps(r['sample'])}   ({r['payload_help']})")
+                for cmd in r["remote"]["pskit"]:
+                    echo(f"    pskit:     {cmd}")
+                if not r["remote"]["supported"]:
+                    echo(f"    pskit:     {r['remote']['reason']}")
+                for cmd in r["remote"]["cli"]:
+                    echo(f"    cloud CLI: {cmd}")
+                for i, step in enumerate(r["remote"]["console"], 1):
+                    echo(f"    console {i}. {step}")
+            else:
+                echo(f"    env vars:  {', '.join(r['env'])}")
+                echo("    read it in a handler: resource(" + json.dumps(r["key"]) + ").get(\"<connection key>\")")
+        return
+    try:
+        result = send_resource(project, record, key, parse_data(data) if data is not None else None)
+    except TriggerError as exc:
+        raise click.ClickException(str(exc)) from None
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+    ok(f"Sent to {result['kind']} {result['name']}")
+    click.echo(json.dumps(result, indent=2, default=str))
+    if result.get("functions"):
+        info("Bound functions: " + ", ".join(result["functions"]) + ". Watch them: pskit logs -f")
 
 
 @resources.command("delete", short_help="Delete buckets, queues or topics by address.")

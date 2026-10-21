@@ -81,6 +81,10 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   in the same way.
 - **Deploy → Remove** has a switch, *Remove also deletes buckets, queues and topics*. Turned off, remove runs
   `pskit remove --keep-resources`: functions and triggers are destroyed and the data resources stay in the cloud.
+- **Resources → Test a resource** (or **Test** on a resource row) sends a message to a queue, uploads an object to a
+  bucket or publishes to a topic, for managed resources (after deploy) and external ones (right away), with the same
+  How-to-test tabs as the Test page. For database, cache and custom resources it shows the `PSKIT_RESOURCE_*`
+  variables the bound functions get and a Python / Node.js snippet that reads them.
 - **Resources → In the cloud** lists the buckets, queues and topics pskit created for the provider and stage in the top
   bar, deployed or kept. Select some (or **Delete all kept**) and delete them with their data (`pskit resources delete`,
   behind a typed confirmation). Deleting a managed resource from the Resources table only removes it from `pskit.yml`;

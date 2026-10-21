@@ -227,3 +227,15 @@ def test_test_guide_events_and_trigger_job(studio):  # noqa: F811
     for bad in ({"function": "-x"}, {"function": "hello", "event": "0; rm"}, {"function": "hello", "path": "x y"}):
         with pytest.raises(StudioError):
             build_argv("trigger", "aws", "dev", bad)
+
+
+def test_resource_test_guide_and_send_args(studio):  # noqa: F811
+    from py_serverless_kit.studio.jobs import build_argv
+
+    base, _root, _ = studio
+    status, body = call(base, "GET", "/api/resource-test-guide?provider=aws&stage=dev")
+    assert status == 200 and body["resources"] == []
+    argv = build_argv("resource-send", "aws", "dev", {"resource": "jobs", "data": {"a": 1}})
+    assert argv == ["resources", "send", "--provider", "aws", "--stage", "dev", "jobs", "--json", "-d", '{"a": 1}']
+    with pytest.raises(StudioError):
+        build_argv("resource-send", "aws", "dev", {"resource": "--all"})

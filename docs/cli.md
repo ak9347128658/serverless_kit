@@ -171,7 +171,20 @@ pskit resources delete --all-kept -s dev --yes
 | `list [--json]` | list deployed and kept buckets, queues and topics |
 | `delete ADDRESS...` | delete them permanently, with their objects and messages |
 | `delete --all-kept` | delete every kept resource |
+| `send KEY [-d DATA]` | test a resource: a message to a queue, an object to a bucket, a message to a topic |
+| `send --list` | how to test every resource: payload, pskit and cloud CLI commands, console steps; for database, cache and custom resources the `PSKIT_RESOURCE_*` variables and a Python / Node.js snippet |
 | `-y, --yes` | don't ask for confirmation |
+
+```bash
+pskit resources send --list
+pskit resources send jobs -d '{"order_id": 1}'                       # queue message
+pskit resources send uploads -d '{"key": "in/a.csv", "content": "a,b"}'   # object upload
+pskit resources send events -d '{"message": {"id": 1}, "attributes": {"type": "order"}}'
+```
+
+`send` works for managed resources once deployed and for external ones right away (they already exist). It uses the
+same senders and credentials as [`pskit trigger`](#pskit-trigger): AWS, GCP, Azure and on premises; elsewhere `--list`
+prints the cloud CLI command and console steps.
 
 Deleting a deployed resource runs `terraform destroy -target=...`. If it is still in `pskit.yml`, the next deploy
 creates it again, so remove it from `resources:` (or the trigger) first. Kept resources are deleted from their own small

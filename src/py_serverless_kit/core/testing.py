@@ -548,4 +548,121 @@ def send(
     return {"kind": trig["type"], "summary": trig["summary"], **out}
 
 
-__all__ = ["SAMPLES", "TriggerError", "can_send", "guide", "send"]
+# --------------------------------------------------------------------- resources
+
+_RESOURCE_SAMPLES: Dict[str, Any] = {
+    "queue": {"order_id": 1, "action": "create"},
+    "storage": {"key": "test/hello.txt", "content": "hello from pskit"},
+    "topic": {"message": {"event": "created", "id": 1}, "attributes": {"source": "pskit-test"}},
+}
+_RESOURCE_ACTION = {"queue": "Send a message", "storage": "Upload an object", "topic": "Publish a message"}
+
+
+def can_send_resource(provider: str, kind: str, deployed: bool, external: bool) -> Tuple[bool, str]:
+    if kind not in _RESOURCE_SAMPLES:
+        return False, f"pskit can't send to a {kind} resource; use its own client with the connection values below"
+    if not deployed and not external:
+        return False, "managed resources exist after the first deploy: deploy first"
+    if provider in ("aws", "onprem") or (provider in ("gcp", "azure")):
+        if provider == "onprem" and not deployed:
+            return False, "the on-prem host runs after deploy: deploy first"
+        return True, ""
+    return False, f"sending to {kind} resources from pskit isn't available on {provider}; use the CLI command or console steps"
+
+
+def _env_names(key: str, res: Any) -> List[str]:
+    from ..config.schema import env_key
+
+    prefix = f"PSKIT_RESOURCE_{env_key(key)}_"
+    return [prefix + n for n in ("TYPE", "NAME", "EXTERNAL")] + [prefix + env_key(k) for k in res.connection]
+
+
+def resource_guide(project: Any, record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """How to test every resource: what to send (queues, buckets, topics) or how to read its connection."""
+    cfg = project.config
+    provider = cfg.provider.name
+    region = project.region
+    deployed = record is not None and record.get("status") not in ("local", "not deployed", "removed")
+    extra: Dict[str, Any] = {
+        "endpoint": _onprem_endpoint(record, project.root) if provider == "onprem" and deployed else None,
+        "project": cfg.provider.options.get("project") if provider == "gcp" else None,
+    }
+    common = f" -p {provider} -s {cfg.provider.stage}"
+    items = []
+    for key, res in sorted(cfg.resources.items()):
+        native = res.native_name(key)
+        kind = res.type
+        ok, reason = can_send_resource(provider, kind, deployed, res.external)
+        bound = cfg.resource_functions(key)
+        first = sorted(res.connection)[0] if res.connection else "url"
+        entry: Dict[str, Any] = {
+            "key": key,
+            "type": kind,
+            "name": native,
+            "external": res.external,
+            "functions": bound,
+            "connection_keys": sorted(res.connection),
+            "env": _env_names(key, res),
+            "snippets": {
+                "python": f'from py_serverless_kit import resource\n\nr = resource("{key}")\nprint(r.native_name, r.get("{first}"))',
+                "node": f'const {{ resource }} = require("pskit");\n\nconst r = resource("{key}");\nconsole.log(r.nativeName, r.get("{first}"));',
+            },
+            "sendable": kind in _RESOURCE_SAMPLES,
+            "action": _RESOURCE_ACTION.get(kind),
+            "sample": _RESOURCE_SAMPLES.get(kind),
+            "payload_help": PAYLOAD_HELP.get(kind, ""),
+            "remote": {"supported": ok, "reason": reason, "pskit": [], "cli": [], "console": []},
+        }
+        if kind in _RESOURCE_SAMPLES:
+            trig = {"index": 0, "type": kind, "name": native, "summary": f"{kind} {native}", "prefix": "", "suffix": ""}
+            sample = _RESOURCE_SAMPLES[kind]
+            if ok:
+                entry["remote"]["pskit"] = [f"pskit resources send {key}{common} -d {_q(_dumps(sample))}"]
+            if deployed or res.external:
+                entry["remote"]["cli"] = _cloud_cli(provider, region, key, {}, trig, sample, extra)
+                entry["remote"]["console"] = _console(provider, key, {}, trig, region)
+        items.append(entry)
+    return {"provider": provider, "stage": cfg.provider.stage, "deployed": deployed, "resources": items}
+
+
+def send_resource(project: Any, record: Optional[Dict[str, Any]], key: str, payload: Any) -> Dict[str, Any]:
+    """Send a message to a queue / topic resource or upload an object to a storage resource."""
+    res = project.config.resources.get(key)
+    if res is None:
+        known = ", ".join(sorted(project.config.resources)) or "<none>"
+        raise TriggerError(f"unknown resource {key!r}; known: {known}")
+    provider = project.config.provider.name
+    deployed = record is not None and record.get("status") not in ("local", "not deployed", "removed")
+    ok, reason = can_send_resource(provider, res.type, deployed, res.external)
+    if not ok:
+        raise TriggerError(reason)
+    native = res.native_name(key)
+    trig = {"index": 0, "type": res.type, "name": native, "summary": f"{res.type} {native}"}
+    if payload is None:
+        payload = _RESOURCE_SAMPLES[res.type]
+    try:
+        if provider == "onprem":
+            out = _send_onprem(record or {}, project.root, "", trig, payload)
+        elif provider == "aws":
+            out = _send_aws(project.region, {}, trig, payload)
+        elif provider == "gcp":
+            out = _send_gcp(project.config.provider.options.get("project"), trig, payload)
+        else:
+            out = _send_azure(trig, payload)
+    except TriggerError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - credentials, permissions, missing resources: report them
+        raise TriggerError(f"{type(exc).__name__}: {exc}") from None
+    return {"resource": key, "kind": res.type, "name": native, "functions": project.config.resource_functions(key), **out}
+
+
+__all__ = [
+    "SAMPLES",
+    "TriggerError",
+    "can_send",
+    "can_send_resource",
+    "guide",
+    "resource_guide",
+    "send",
+    "send_resource",
+]

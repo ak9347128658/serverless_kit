@@ -189,6 +189,18 @@ def test_guide(root: Path, provider: str, stage: str) -> Dict[str, Any]:
     return guide(project, deployment_record(root, provider, stage))
 
 
+def resource_test_guide(root: Path, provider: str, stage: str) -> Dict[str, Any]:
+    """How to test every resource on provider/stage."""
+    from ..core.project import Project
+    from ..core.testing import resource_guide
+
+    try:
+        project = Project.load(cwd=root, provider=provider, stage=stage)
+    except Exception as exc:  # noqa: BLE001
+        raise StudioError(400, f"the saved pskit.yml does not load for {provider}/{stage}: {exc}") from None
+    return resource_guide(project, deployment_record(root, provider, stage))
+
+
 def test_events(root: Path) -> Dict[str, Any]:
     """Saved test payloads: ``{function: [{"name", "event", "payload", "path"?}]}``."""
     path = root / TEST_EVENTS

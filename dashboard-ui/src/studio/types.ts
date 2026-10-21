@@ -264,3 +264,26 @@ export interface SavedTestEvent {
   payload: Json;
   path?: string;
 }
+
+export interface ResourceTestItem {
+  key: string;
+  type: string;
+  name: string;
+  external: boolean;
+  functions: string[];
+  connection_keys: string[];
+  env: string[];
+  snippets: { python: string; node: string };
+  sendable: boolean;
+  action?: string | null;
+  sample?: Json | null;
+  payload_help: string;
+  remote: { supported: boolean; reason: string; pskit: string[]; cli: string[]; console: string[] };
+}
+
+export interface ResourceTestGuide {
+  provider: string;
+  stage: string;
+  deployed: boolean;
+  resources: ResourceTestItem[];
+}

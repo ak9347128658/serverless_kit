@@ -11,6 +11,7 @@ import type {
   SetupResult,
   SavedTestEvent,
   TestGuide,
+  ResourceTestGuide,
   CloudResourceRow,
   DevEnvStatus,
   ValidateResult,
@@ -159,6 +160,8 @@ export const api = {
       query: { provider, stage },
     }),
   testGuide: (provider: string, stage: string) => request<TestGuide>("GET", "/api/test-guide", undefined, { query: { provider, stage } }),
+  resourceTestGuide: (provider: string, stage: string) =>
+    request<ResourceTestGuide>("GET", "/api/resource-test-guide", undefined, { query: { provider, stage } }),
   testEvents: () => request<Record<string, SavedTestEvent[]>>("GET", "/api/test-events"),
   saveTestEvents: (events: Record<string, SavedTestEvent[]>) => request<Record<string, SavedTestEvent[]>>("PUT", "/api/test-events", { events }),
   browse: (path?: string) => request<FsListing>("GET", "/api/fs", undefined, { query: { path } }),

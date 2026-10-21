@@ -3,6 +3,7 @@ import { Chip } from "../../components/Badge";
 import { DataTable, type Column } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { CloudResources } from "../components/CloudResources";
+import { ResourceTester } from "../components/ResourceTester";
 import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FieldForm, FormRow, KeyValueEditor, Segmented, TextInput, Toggle } from "../components/Forms";
 import { DiscoverModal, InlineIssues, PageHeader } from "../components/Misc";
@@ -40,6 +41,11 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const resources = asObject(draft.resources);
   const rows: Row[] = Object.entries(resources).map(([name, res]) => ({ name, res: asObject(res) }));
   const editing = rest[0] === "new" ? "new" : rest[0] && rest[0] in resources ? rest[0] : null;
+  const [testing, setTesting] = useState<string | null>(null);
+  const test = (key: string) => {
+    setTesting(key);
+    window.setTimeout(() => document.getElementById("resource-test")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  };
 
   const usedBy = (name: string) =>
     Object.entries(asObject(draft.functions))
@@ -108,7 +114,10 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       key: "actions",
       header: "",
       render: (r) => (
-        <span onClick={(e) => e.stopPropagation()}>
+        <span className="row-gap" onClick={(e) => e.stopPropagation()}>
+          <button type="button" className="btn btn-sm" onClick={() => test(r.name)} title="Send a test message / object">
+            Test
+          </button>
           <button type="button" className="btn btn-sm btn-danger" onClick={() => void remove(r.name)}>
             Delete
           </button>
@@ -137,6 +146,9 @@ export function ResourcesView({ rest }: { rest: string[] }) {
           emptyTitle="No resources yet"
           emptyHint="Declare a bucket, queue, topic, database or custom service, managed by pskit or one that already exists."
         />
+      </div>
+      <div id="resource-test">
+        <ResourceTester key={testing || ""} selected={testing} onSelect={setTesting} />
       </div>
       <CloudResources />
       {editing && <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} />}

@@ -197,3 +197,61 @@ def test_cli_trigger(make_project, monkeypatch, tmp_path):
     result = CliRunner().invoke(cli, ["trigger", "-f", "worker", "-e", "0", "-d", '{"n": 1}', "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["sent"] == 1
+
+
+RESOURCES = """
+service: shop
+provider: {name: aws, region: eu-west-1}
+functions:
+  worker: {handler: app.handlers.hello, events: [{queue: {resource: jobs}}]}
+resources:
+  jobs: {type: queue}
+  uploads: {type: storage, external: true, name: company-uploads}
+  events: {type: topic, functions: [worker]}
+  orders-db: {type: database, external: true, connection: {host: db.internal, port: 5432}}
+"""
+
+
+def test_resource_guide(make_project):
+    project = make_project(RESOURCES)
+    g = {r["key"]: r for r in testing.resource_guide(project, None)["resources"]}
+    assert g["jobs"]["sendable"] and g["jobs"]["action"] == "Send a message"
+    assert not g["jobs"]["remote"]["supported"] and "deploy first" in g["jobs"]["remote"]["reason"]
+    # External resources exist already: testable without deploying, with commands.
+    up = g["uploads"]
+    assert up["remote"]["supported"] and up["name"] == "company-uploads"
+    assert up["remote"]["pskit"][0].startswith("pskit resources send uploads -p aws -s dev")
+    assert "s3://company-uploads/" in up["remote"]["cli"][0]
+    db = g["orders-db"]
+    assert not db["sendable"] and "PSKIT_RESOURCE_ORDERS_DB_HOST" in db["env"]
+    assert 'resource("orders-db")' in db["snippets"]["python"] and 'r.get("host")' in db["snippets"]["node"]
+    assert g["events"]["functions"] == ["worker"]
+
+
+def test_send_resource(make_project, monkeypatch):
+    project = make_project(RESOURCES)
+    calls: list = []
+    monkeypatch.setattr(testing, "_boto3", lambda region: _FakeSession(calls))
+    out = testing.send_resource(project, None, "uploads", {"key": "a.txt", "content": "x"})
+    assert out["uploaded"] == "s3://company-uploads/a.txt"
+    with pytest.raises(TriggerError, match="deploy first"):
+        testing.send_resource(project, None, "jobs", None)
+    record = {"provider": "aws", "status": "deployed", "functions": []}
+    out = testing.send_resource(project, record, "jobs", None)  # default sample
+    assert out["sent"] == 1 and out["functions"] == ["worker"]
+    with pytest.raises(TriggerError, match="can't send to a database"):
+        testing.send_resource(project, record, "orders-db", {})
+    with pytest.raises(TriggerError, match="unknown resource"):
+        testing.send_resource(project, record, "nope", {})
+
+
+def test_cli_resources_send(make_project, monkeypatch, tmp_path):
+    make_project(RESOURCES)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["resources", "send", "--list"])
+    assert result.exit_code == 0 and "orders-db" in result.output and "PSKIT_RESOURCE_ORDERS_DB_HOST" in result.output
+    calls: list = []
+    monkeypatch.setattr(testing, "_boto3", lambda region: _FakeSession(calls))
+    result = CliRunner().invoke(cli, ["resources", "send", "uploads", "-d", '{"key": "k", "content": "c"}', "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["uploaded"] == "s3://company-uploads/k"

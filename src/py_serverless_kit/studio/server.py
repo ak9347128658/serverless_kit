@@ -300,6 +300,10 @@ def make_handler(app: Studio) -> type:
                 provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
                 stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
                 return 200, system.test_guide(root, provider, stage)
+            if parts == ["resource-test-guide"] and method == "GET":
+                provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
+                stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
+                return 200, system.resource_test_guide(root, provider, stage)
             if parts == ["test-events"]:
                 if method == "GET":
                     return 200, system.test_events(root)
