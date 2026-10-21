@@ -135,7 +135,8 @@ export interface Studio {
   replace: (raw: JsonObject) => void;
   undo: () => void;
   redo: () => void;
-  save: (force?: boolean) => Promise<boolean>;
+  /** Save the draft (or `raw`, which also becomes the draft). */
+  save: (force?: boolean, raw?: JsonObject) => Promise<boolean>;
   reload: () => Promise<void>;
   setProject: (project: ProjectState) => void;
   setTarget: (provider?: string, stage?: string) => void;
@@ -211,11 +212,13 @@ export function StudioProvider({
   }, [dirty]);
 
   const save = useCallback(
-    async (force = false): Promise<boolean> => {
-      if (!state.draft) return false;
+    async (force = false, raw?: JsonObject): Promise<boolean> => {
+      const draft = raw ?? state.draft;
+      if (!draft) return false;
+      if (raw) dispatch({ type: "replace", raw });
       dispatch({ type: "saving", on: true });
       try {
-        const saved = await api.save(state.draft, state.mtime, force);
+        const saved = await api.save(draft, state.mtime, force);
         dispatch({ type: "project", project: saved });
         return true;
       } catch (exc) {

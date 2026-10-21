@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 import type { Field, Json, JsonObject } from "../types";
 import { ENV_RE, envRef, isObject, parseEnvRef, str } from "../util";
+import { FilePickerModal } from "./FilePicker";
 
 // --------------------------------------------------------------------- rows
 
@@ -222,6 +223,121 @@ export function EnumSelect({
         );
       })}
     </select>
+  );
+}
+
+// --------------------------------------------------------------------- dropdown with a custom value
+
+export interface ComboOption {
+  value: string;
+  label?: string;
+}
+
+const CUSTOM = "__pskit_custom__";
+
+/**
+ * A dropdown of known values (regions, sizes, ...) that still accepts any other value:
+ * "Custom…" reveals a text field. Unknown current values show up as custom.
+ */
+export function ComboInput({
+  id,
+  value,
+  options,
+  onChange,
+  emptyLabel,
+  placeholder,
+  mono = true,
+  numeric,
+  invalid,
+}: {
+  id?: string;
+  value: string;
+  options: (string | number | ComboOption)[];
+  onChange: (v: string) => void;
+  /** Label of the empty choice (e.g. "default (us-east-1)"); omit to require a value. */
+  emptyLabel?: string;
+  placeholder?: string;
+  mono?: boolean;
+  numeric?: boolean;
+  invalid?: boolean;
+}) {
+  const opts: ComboOption[] = options.map((o) => (typeof o === "object" ? o : { value: String(o) }));
+  const known = value === "" || opts.some((o) => o.value === value);
+  const [custom, setCustom] = useState(!known);
+  useEffect(() => {
+    if (!known) setCustom(true);
+  }, [known]);
+  return (
+    <div className="combo">
+      <select
+        id={id}
+        className={`select select-full${invalid ? " invalid" : ""}`}
+        value={custom ? CUSTOM : value}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === CUSTOM) {
+            setCustom(true);
+            return;
+          }
+          setCustom(false);
+          onChange(v);
+        }}
+      >
+        {(emptyLabel !== undefined || value === "") && <option value="">{emptyLabel ?? "— choose —"}</option>}
+        {opts.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label && o.label !== o.value ? `${o.label} · ${o.value}` : o.value}
+          </option>
+        ))}
+        <option value={CUSTOM}>Custom…</option>
+      </select>
+      {custom && (
+        <input
+          className={`input${mono ? " mono" : ""}${invalid ? " invalid" : ""}`}
+          value={value}
+          autoFocus={!value}
+          placeholder={placeholder || "type a value"}
+          inputMode={numeric ? "numeric" : undefined}
+          spellCheck={false}
+          autoComplete="off"
+          aria-label="Custom value"
+          onChange={(e) => onChange(numeric ? e.target.value.replace(/[^0-9.]/g, "") : e.target.value)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** A local file path with a "Browse…" picker served by the studio (e.g. an SSH key). */
+export function FilePathInput({
+  id,
+  value,
+  onChange,
+  placeholder,
+  keysOnly,
+  title,
+}: {
+  id?: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  keysOnly?: boolean;
+  title?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="row-gap grow">
+      <TextInput id={id} mono value={value} placeholder={placeholder} onChange={onChange} />
+      <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
+        Browse…
+      </button>
+      {value && (
+        <button type="button" className="btn btn-ghost btn-sm" aria-label="Clear" onClick={() => onChange("")}>
+          ✕
+        </button>
+      )}
+      <FilePickerModal open={open} title={title} start={value || undefined} keysOnly={keysOnly} onClose={() => setOpen(false)} onPick={onChange} />
+    </div>
   );
 }
 
@@ -618,6 +734,36 @@ function FieldControl({
         />
       );
     }
+  }
+  if (field.type === "file") {
+    return (
+      <FilePathInput
+        id={id}
+        value={str(v)}
+        placeholder={placeholder}
+        keysOnly={/pem|key|identity/i.test(field.key)}
+        title={`Choose: ${field.label}`}
+        onChange={(t) => set(t)}
+      />
+    );
+  }
+  if (field.suggestions && field.suggestions.length && (field.type === "string" || field.type === "int" || field.type === "number")) {
+    const numeric = field.type !== "string";
+    return (
+      <ComboInput
+        id={id}
+        value={v === undefined || v === null ? "" : String(v)}
+        options={field.suggestions.map((s) => String(s))}
+        numeric={numeric}
+        placeholder={placeholder}
+        emptyLabel={field.default !== undefined && field.default !== null ? `default (${String(field.default)})` : field.required ? undefined : "—"}
+        onChange={(s) => {
+          if (!numeric) return set(s);
+          const n = s === "" ? undefined : Number(s);
+          set(n === undefined || isNaN(n) ? undefined : n);
+        }}
+      />
+    );
   }
   switch (field.type) {
     case "bool":

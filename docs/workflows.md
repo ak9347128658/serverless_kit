@@ -2,7 +2,7 @@
 
 A workflow chains functions with branching, retries, error handling, waits, parallel branches and fan-out. You define it once in `pskit.yml`, and pskit runs it:
 
-- **natively**, as AWS Step Functions (ASL) or Google Cloud Workflows;
+- **natively**, as AWS Step Functions (ASL), Google Cloud Workflows or (opt-in, `engine: native`) Azure Logic Apps;
 - on the **embedded engine** on every other target, inside an auto-generated orchestrator function (on premises that function runs inside the long-lived host, so the workflow is not cut off by a function timeout);
 - **locally** with `pskit workflow run`, using the same engine.
 
@@ -53,10 +53,11 @@ Full example: [`examples/07-workflow-orders`](../examples/07-workflow-orders).
 | `start_at` | — | required; must name a state |
 | `states` | — | map of state name → state |
 | `description` | `""` | |
-| `engine` | `auto` | `auto` = native where supported (aws, gcp), embedded elsewhere; `native` errors on clouds without native support; `embedded` forces the engine everywhere |
+| `engine` | `auto` | `auto` = native where supported (aws, gcp), embedded elsewhere (also on Azure, where native is opt-in); `native` errors on clouds without native support; `embedded` forces the engine everywhere |
 | `timeout` | — | AWS `TimeoutSeconds`; embedded orchestrator function timeout (capped at the provider's max), also enforced by the embedded engine (the run ends `TIMED_OUT`) |
 | `options.type` | `STANDARD` | AWS only: `STANDARD` or `EXPRESS` |
 | `options.http` | `true` | embedded only: `false` removes the orchestrator's HTTP trigger |
+| `options.sync` | `true` | Azure native only: `false` drops the `Response` actions, so the caller gets `202` at once instead of the output |
 
 All `next` / `default` / `catch.next` targets are checked to exist, and every `function` must be defined under `functions`.
 
@@ -135,6 +136,7 @@ Error names are the **Python exception class names** your handler raises (e.g. `
 |---|---|---|
 | aws | native | `aws_sfn_state_machine` (ASL) + an IAM role that can invoke the task Lambdas |
 | gcp | native | `google_workflows_workflow`; tasks are OIDC-authenticated HTTP calls to the functions |
+| azure (`engine: native`) | native | a Logic App (`azurerm_logic_app_workflow` + HTTP request trigger + actions); tasks call `/_pskit/invoke/<function>` with the function key |
 | all others (or `engine: embedded`) | embedded | an extra function `<workflow>-orchestrator` that runs the state machine and calls task handlers **in-process** (same bundle) |
 
 ### Embedded orchestrator
@@ -149,6 +151,7 @@ Error names are the **Python exception class names** your handler raises (e.g. `
 
 - **AWS:** `IntervalSeconds` is rounded to ≥ 1. `map` uses an inline `ItemProcessor`. `contains` compiles to `StringMatches *x*`.
 - **GCP:** only the **first** retry rule of a task is used (Cloud Workflows allows one retry policy). `retry`/`catch` are honoured on `task` states only (ignored on `parallel`/`map`, with a warning). Task HTTP timeouts are capped at 1800 s.
+- **Azure (Logic Apps):** the state machine runs as an interpreter: an `Until` loop over a `Switch` on the current state, with the data kept as a JSON string variable. The HTTP trigger answers with the output (`200`) or `{"error", "cause"}` (`500`); a synchronous `Response` must come within about 2 minutes, so set `options.sync: false` for long workflows. Only the **first** retry rule of a task is used, as Logic Apps' exponential retry policy (it retries 408/429/5xx responses: the `errors` filter and `backoff_rate` are ignored, intervals are 5 s–1 day, at most 90 retries). `retry`/`catch` work on `task` states only. Task calls time out after 120 s (the Logic Apps limit for outbound HTTP), and `pskit validate` warns when a task function's timeout is longer. `map` iterations run one at a time (`max_concurrency` is ignored). `matches` accepts `abc`, `abc*`, `*abc`, `*abc*` and `*`; other globs are a validation error. `is_present` treats `null` like a missing key. `result_path` can't contain array indexes. Logic Apps allow 8 levels of nesting, so `parallel` states can nest at most three deep and `map` states two deep. A run stops after 5000 states or `timeout` (default 1 hour).
 
 ## Commands
 

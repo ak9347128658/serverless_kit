@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Type, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 PROVIDERS = (
     "aws",
@@ -211,6 +211,7 @@ class IamConfig(_Model):
 class FunctionConfig(_Model):
     handler: str
     description: str = ""
+    enabled: bool = Field(True, description="false keeps the function in pskit.yml but skips it on deploy")
     runtime: Optional[str] = None
     memory: Optional[int] = Field(None, ge=64, le=32768)
     timeout: Optional[int] = Field(None, ge=1, le=3600)
@@ -413,6 +414,7 @@ class WorkflowDefinition(_Model):
 
 class WorkflowConfig(WorkflowDefinition):
     description: str = ""
+    enabled: bool = Field(True, description="false keeps the workflow in pskit.yml but skips it on deploy")
     engine: Literal["auto", "native", "embedded"] = "auto"
     timeout: Optional[int] = None
     options: Dict[str, Any] = Field(default_factory=dict)
@@ -505,6 +507,7 @@ class ServiceConfig(_Model):
     resources: Dict[str, ResourceConfig] = Field(default_factory=dict)
     hooks: Dict[str, List[str]] = Field(default_factory=dict)
     custom: Dict[str, Any] = Field(default_factory=dict, description="free-form values for ${self:custom.x}")
+    _disabled: Dict[str, List[str]] = PrivateAttr(default_factory=dict)
 
     @field_validator("service")
     @classmethod
@@ -542,10 +545,35 @@ class ServiceConfig(_Model):
         return v
 
     @model_validator(mode="after")
+    def _drop_disabled(self) -> ServiceConfig:
+        """Leave out functions and workflows with ``enabled: false`` (e.g. under ``providers.<cloud>``)."""
+        functions = [name for name, fn in self.functions.items() if not fn.enabled]
+        workflows = [name for name, wf in self.workflows.items() if not wf.enabled]
+        self._disabled = {"functions": functions, "workflows": workflows}
+        if functions:
+            self.functions = {k: v for k, v in self.functions.items() if v.enabled}
+            for res in self.resources.values():
+                if res.functions is not None:
+                    res.functions = [f for f in res.functions if f not in functions]
+        if workflows:
+            self.workflows = {k: v for k, v in self.workflows.items() if v.enabled}
+        return self
+
+    @property
+    def disabled(self) -> Dict[str, List[str]]:
+        """``{"functions": [...], "workflows": [...]}`` left out with ``enabled: false``."""
+        return {key: list(self._disabled.get(key, [])) for key in ("functions", "workflows")}
+
+    @model_validator(mode="after")
     def _cross_refs(self) -> ServiceConfig:
         self._resolve_resources()
+        off = set(self._disabled.get("functions", []))
         for wf_name, wf in self.workflows.items():
             for fn in wf.task_functions():
+                if fn in off:
+                    raise ValueError(
+                        f"workflow {wf_name!r} calls function {fn!r}, which is disabled; disable the workflow too"
+                    )
                 if fn not in self.functions:
                     raise ValueError(f"workflow {wf_name!r} references unknown function {fn!r}")
         seen: Dict[str, str] = {}

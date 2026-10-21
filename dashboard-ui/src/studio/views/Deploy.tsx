@@ -6,7 +6,8 @@ import { EnumSelect, FormRow, JsonInput, Section, Segmented, TextInput } from ".
 import { PageHeader } from "../components/Misc";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
-import type { Job, Json } from "../types";
+import { compatProblems, overridesOn, restoreTriggersOn, setEnabledOn, skipTriggersOn, type CompatProblem } from "../compat";
+import type { Job, Json, JsonObject } from "../types";
 import { asObject, normalizeEvent, asArray } from "../util";
 import { relative } from "../../format";
 
@@ -20,13 +21,46 @@ const ACTIONS = [
 ] as const;
 
 export function DeployView() {
-  const { state, dirty, draft, save } = useStudio();
+  const { state, dirty, draft, save, meta, replace } = useStudio();
   const toast = useToast();
   const confirm = useConfirm();
   const [jobId, setJobId] = useState<string | null>(null);
   const [history, setHistory] = useState<Job[]>([]);
   const job = useJob(jobId);
   const target = state.target || { provider: "aws", stage: "dev" };
+  const targetMeta = meta.providers.find((p) => p.name === target.provider);
+  const problems = targetMeta ? compatProblems(draft, targetMeta) : [];
+
+  /** Switch every problem off on the target provider only. Returns the new draft. */
+  const disableAll = (): JsonObject => {
+    let raw = draft;
+    for (const p of problems) {
+      if (p.kind === "trigger" && p.fn && p.types) raw = skipTriggersOn(raw, target.provider, p.fn, p.types);
+      else if (p.wf) raw = setEnabledOn(raw, target.provider, "workflows", p.wf, false);
+    }
+    return raw;
+  };
+
+  const clearHistory = async () => {
+    try {
+      const r = await api.clearJobs();
+      if (jobId && history.some((h) => h.job_id === jobId && h.status !== "running")) setJobId(null);
+      loadHistory();
+      toast(r.removed ? `Cleared ${r.removed} job${r.removed === 1 ? "" : "s"}` : "Nothing to clear", "info");
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+    }
+  };
+
+  const removeJob = async (id: string) => {
+    try {
+      await api.deleteJob(id);
+      if (id === jobId) setJobId(null);
+      loadHistory();
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+    }
+  };
 
   const loadHistory = useCallback(() => {
     api.jobs().then((r) => setHistory(r.jobs || []), () => undefined);
@@ -37,7 +71,39 @@ export function DeployView() {
   }, [job.status, loadHistory]);
 
   const run = async (command: string, args?: Record<string, unknown>) => {
-    if (dirty) {
+    let fixed: JsonObject | null = null;
+    if (problems.length && ["validate", "package", "plan", "deploy"].includes(command)) {
+      const answer = await confirm({
+        title: `Not available on ${targetMeta?.display_name || target.provider}`,
+        body: (
+          <div className="stack">
+            <ul className="bullets">
+              {problems.map((p) => (
+                <li key={p.key}>{p.message}</li>
+              ))}
+            </ul>
+            <p className="small">
+              <code className="mono">pskit {command}</code> fails until these are fixed. Disabling them writes{" "}
+              <code className="mono">providers.{target.provider}</code> overrides, so the other clouds keep them.
+            </p>
+          </div>
+        ),
+        confirmLabel: `Disable on ${targetMeta?.display_name || target.provider} and ${command}`,
+        extra: [{ label: `${command[0].toUpperCase()}${command.slice(1)} anyway`, value: "anyway" }],
+      });
+      if (!answer) return;
+      if (answer === "confirm") fixed = disableAll();
+    }
+    if (fixed) {
+      // Commands read pskit.yml from disk: save the overrides (and any other pending edit) first.
+      try {
+        if (!(await save(false, fixed))) return;
+        toast(`Disabled on ${targetMeta?.display_name || target.provider} and saved pskit.yml`, "ok");
+      } catch (exc) {
+        toast(`Save failed: ${errorMessage(exc)}`, "err");
+        return;
+      }
+    } else if (dirty) {
       const answer = await confirm({
         title: "Save first?",
         body: "Commands run against pskit.yml on disk, which doesn't have your latest changes.",
@@ -97,6 +163,7 @@ export function DeployView() {
         }
       />
       {dirty && <div className="hint-box warn">You have unsaved changes. Commands use pskit.yml on disk; you'll be asked to save first.</div>}
+      <CompatPanel provider={target.provider} problems={problems} onDisableAll={() => replace(disableAll())} />
       <div className="action-grid">
         {ACTIONS.map((a) => (
           <button key={a.command} type="button" className={`action-card btn ${a.tone}`} disabled={running} onClick={() => void run(a.command)} title={a.hint}>
@@ -110,24 +177,111 @@ export function DeployView() {
       <InvokePanel functions={functions} disabled={running} onRun={(args) => void run("invoke", args)} />
       {workflows.length > 0 && <WorkflowRunPanel workflows={workflows} disabled={running} onRun={(args) => void run("workflow-run", args)} />}
 
-      <Section title="Recent jobs" defaultOpen={history.length > 0}>
+      <Section
+        title="Recent jobs"
+        defaultOpen={history.length > 0}
+        hint={history.length ? `${history.length}` : undefined}
+        actions={
+          history.some((h) => h.status !== "running") ? (
+            <button type="button" className="btn btn-sm" onClick={() => void clearHistory()} title="Forget every finished job (running jobs are kept)">
+              Clear finished
+            </button>
+          ) : undefined
+        }
+      >
         {!history.length ? (
           <p className="muted">No jobs yet.</p>
         ) : (
           <ul className="job-list">
             {history.map((h) => (
-              <li key={h.job_id}>
-                <button type="button" className={`job-item${h.job_id === jobId ? " active" : ""}`} onClick={() => setJobId(h.job_id)}>
+              <li key={h.job_id} className="row-gap">
+                <button type="button" className={`job-item grow${h.job_id === jobId ? " active" : ""}`} onClick={() => setJobId(h.job_id)}>
                   <span className={`badge badge-${h.status === "succeeded" ? "ok" : h.status === "running" ? "info" : h.status === "cancelled" ? "off" : "err"}`}>{h.status}</span>
-                  <code className="mono">pskit {h.command}</code>
+                  <code className="mono">{JOB_COMMANDS.has(h.command) ? `pskit ${h.command}` : h.label || h.command}</code>
                   <span className="muted small grow">{relative(h.started_at)}</span>
                 </button>
+                {h.status !== "running" && (
+                  <button type="button" className="btn btn-ghost btn-sm" aria-label={`Remove job ${h.command}`} title="Remove from the list" onClick={() => void removeJob(h.job_id)}>
+                    ✕
+                  </button>
+                )}
               </li>
             ))}
           </ul>
         )}
       </Section>
     </div>
+  );
+}
+
+const JOB_COMMANDS = new Set(["validate", "package", "plan", "deploy", "info", "remove", "invoke", "workflow-run"]);
+
+/** What can't run on the target provider, and the per-provider overrides already in place. */
+function CompatPanel({ provider, problems, onDisableAll }: { provider: string; problems: CompatProblem[]; onDisableAll: () => void }) {
+  const { draft, meta, replace } = useStudio();
+  const name = meta.providers.find((p) => p.name === provider)?.display_name || provider;
+  const overrides = overridesOn(draft, provider);
+  if (!problems.length && !overrides.length) return null;
+  return (
+    <Section title={problems.length ? `${problems.length} item${problems.length > 1 ? "s" : ""} won't run on ${name}` : `Switched off on ${name}`} hint={`providers.${provider}`}>
+      {problems.length > 0 && (
+        <>
+          <ul className="compat-list">
+            {problems.map((p) => (
+              <li key={p.key}>
+                <span className="badge badge-err">unsupported</span>
+                <span className="grow">{p.message}</span>
+                {p.kind === "trigger" && p.fn && p.types && (
+                  <>
+                    <button type="button" className="btn btn-sm" onClick={() => replace(skipTriggersOn(draft, provider, p.fn as string, p.types as string[]))}>
+                      Disable trigger on {name}
+                    </button>
+                    <button type="button" className="btn btn-sm" onClick={() => replace(setEnabledOn(draft, provider, "functions", p.fn as string, false))}>
+                      Disable function on {name}
+                    </button>
+                  </>
+                )}
+                {p.wf && (
+                  <button type="button" className="btn btn-sm" onClick={() => replace(setEnabledOn(draft, provider, "workflows", p.wf as string, false))}>
+                    Disable workflow on {name}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="row-gap">
+            <button type="button" className="btn btn-primary btn-sm" onClick={onDisableAll}>
+              Disable all of them on {name}
+            </button>
+            <span className="muted small">Other providers keep them. Save, then deploy.</span>
+          </div>
+        </>
+      )}
+      {overrides.length > 0 && (
+        <>
+          <p className="muted small">Already switched off on {name} (other providers are not affected):</p>
+          <ul className="compat-list">
+            {overrides.map((o) => (
+              <li key={`${o.section}:${o.name}:${o.what}`}>
+                <span className="badge badge-off">{o.what}</span>
+                <span className="grow mono small">
+                  {o.section}.{o.name}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() =>
+                    replace(o.what === "disabled" ? setEnabledOn(draft, provider, o.section, o.name, true) : restoreTriggersOn(draft, provider, o.name))
+                  }
+                >
+                  {o.what === "disabled" ? "Enable again" : "Use the normal triggers"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </Section>
   );
 }
 

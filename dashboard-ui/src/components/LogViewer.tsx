@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { LogEntry, LogsResponse } from "../types";
-import { formatTime, levelTone } from "../format";
+import { formatTime, levelTone, safeUrl } from "../format";
 import { ErrorBanner, Spinner, EmptyState } from "./Feedback";
 import { SearchInput, Select } from "./Inputs";
 
@@ -48,6 +48,8 @@ export function LogViewer({
   const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [unsupported, setUnsupported] = useState<string | null>(null);
+  const [consoleUrl, setConsoleUrl] = useState<string | null>(null);
+  const [mode, setMode] = useState<"seq" | "time">("seq");
   const [loading, setLoading] = useState(true);
   const [olderLoading, setOlderLoading] = useState(false);
   const nextRef = useRef(0);
@@ -90,6 +92,7 @@ export function LogViewer({
           if (cancelled) return;
           if (!resp.supported) {
             setUnsupported(resp.reason || "Logs are not available for this deployment.");
+            setConsoleUrl(safeUrl(resp.console));
             return;
           }
           append(resp.entries || []);
@@ -118,13 +121,22 @@ export function LogViewer({
         if (cancelled) return;
         if (!head.supported) {
           setUnsupported(head.reason || "Logs are not available for this deployment.");
+          setConsoleUrl(safeUrl(head.console));
           setLoading(false);
           return;
         }
         setUnsupported(null);
-        const latest = typeof head.next === "number" ? head.next : 0;
-        nextRef.current = Math.max(0, latest - PAGE);
-        if (typeof head.oldest === "number") setOldest(head.oldest);
+        setConsoleUrl(safeUrl(head.console));
+        const timeMode = head.mode === "time";
+        setMode(timeMode ? "time" : "seq");
+        if (timeMode) {
+          // Cloud logs page by timestamp: 0 asks the server for the recent window.
+          nextRef.current = 0;
+        } else {
+          const latest = typeof head.next === "number" ? head.next : 0;
+          nextRef.current = Math.max(0, latest - PAGE);
+          if (typeof head.oldest === "number") setOldest(head.oldest);
+        }
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : String(err));
@@ -170,9 +182,22 @@ export function LogViewer({
     if (atBottom !== follow) setFollow(atBottom);
   };
 
-  if (unsupported) return <EmptyState title="Logs unavailable">{unsupported}</EmptyState>;
+  if (unsupported)
+    return (
+      <EmptyState title="Logs unavailable">
+        {unsupported}
+        {consoleUrl && (
+          <>
+            {" "}
+            <a href={consoleUrl} target="_blank" rel="noopener noreferrer">
+              Open the console ↗
+            </a>
+          </>
+        )}
+      </EmptyState>
+    );
 
-  const canOlder = entries.length > 0 && entries[0].seq > Math.max(1, oldest);
+  const canOlder = mode === "seq" && entries.length > 0 && entries[0].seq > Math.max(1, oldest);
 
   return (
     <div className="logviewer">
@@ -205,6 +230,11 @@ export function LogViewer({
         <button type="button" className="btn" onClick={() => setEntries([])} title="Clear the view (server logs are kept)">
           Clear
         </button>
+        {consoleUrl && (
+          <a className="btn" href={consoleUrl} target="_blank" rel="noopener noreferrer" title="Open the provider console">
+            Console ↗
+          </a>
+        )}
       </div>
       {error && <ErrorBanner message={`Could not read logs: ${error}`} />}
       <div className="logbox" ref={box} onScroll={onScroll} role="log" aria-live="polite">
@@ -233,6 +263,7 @@ export function LogViewer({
       <div className="log-status muted">
         <span>
           {entries.length} entries{paused ? " · paused" : " · live"}
+          {mode === "time" ? " · cloud logs arrive with a few seconds' delay" : ""}
         </span>
         {!follow && (
           <button type="button" className="btn btn-sm" onClick={() => setFollow(true)}>

@@ -463,7 +463,9 @@ class EmbeddedCloudBackend(ExecutionBackend):
         )
 
     def _url(self, workflow: str) -> str:
-        self._workflow(workflow)
+        wf = self._workflow(workflow)
+        if wf.get("engine") == "native" and wf.get("url"):
+            return str(wf["url"])  # e.g. the Azure Logic Apps HTTP trigger (callback URL)
         orchestrator = f"{workflow}-orchestrator"
         for fn in self.record.get("functions") or []:
             if fn.get("name") != orchestrator:
@@ -483,16 +485,23 @@ class EmbeddedCloudBackend(ExecutionBackend):
             url, data=json.dumps(data).encode("utf-8"), method="POST"
         )
         req.add_header("content-type", "application/json")
+        failed = False
         try:
             with urllib.request.urlopen(req, timeout=900) as resp:  # noqa: S310
                 body = json.loads(resp.read().decode("utf-8") or "null")
         except urllib.error.HTTPError as exc:
+            failed = True
             try:
                 body = json.loads(exc.read().decode("utf-8") or "null")
             except ValueError:
                 raise ExecutionError(f"{url} answered HTTP {exc.code}") from None
         except (urllib.error.URLError, OSError) as exc:
             raise ExecutionError(f"could not reach {url}: {exc}") from None
+        if self._workflow(workflow).get("engine") == "native":
+            # A native engine behind an HTTP trigger answers with the workflow output itself.
+            out = {"workflow": workflow, "status": "FAILED" if failed else "SUCCEEDED", "source": self.record.get("provider")}
+            out["error" if failed else "output"] = body
+            return out
         if not isinstance(body, dict):
             raise ExecutionError(f"unexpected response from {url}: {body!r}")
         body.setdefault("workflow", workflow)

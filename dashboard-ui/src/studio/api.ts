@@ -1,11 +1,14 @@
+import type { LogsResponse, LogStream } from "../types";
 import type {
   DiscoverResult,
   FileContent,
   FileEntry,
+  FsListing,
   Job,
   JsonObject,
   Meta,
   ProjectState,
+  SetupResult,
   ValidateResult,
   VsCodeState,
 } from "./types";
@@ -145,6 +148,23 @@ export const api = {
     request<Job>("GET", `/api/jobs/${encodeURIComponent(id)}`, undefined, { query: { since } }),
   jobs: () => request<{ jobs: Job[] }>("GET", "/api/jobs"),
   cancelJob: (id: string) => request<Job>("POST", `/api/jobs/${encodeURIComponent(id)}/cancel`, {}),
+  clearJobs: () => request<{ removed: number }>("DELETE", "/api/jobs"),
+  deleteJob: (id: string) => request<{ removed: number }>("DELETE", `/api/jobs/${encodeURIComponent(id)}`),
+  browse: (path?: string) => request<FsListing>("GET", "/api/fs", undefined, { query: { path } }),
+  setup: (provider: string) => request<SetupResult>("GET", "/api/setup", undefined, { query: { provider } }),
+  setEnv: (name: string, value: string) => request<{ name: string; set: boolean }>("POST", "/api/setup/env", { name, value }),
+  awsProfile: (body: { profile: string; access_key_id: string; secret_access_key: string; region?: string; session_token?: string }) =>
+    request<Record<string, unknown>>("POST", "/api/setup/aws-profile", body),
+  login: (action: string) => request<{ job_id: string }>("POST", "/api/setup/login", { action }),
+  sshTest: (deploy: JsonObject) => request<{ job_id: string }>("POST", "/api/setup/ssh-test", { deploy }),
+  logs: (provider: string, stage: string, p: { since?: number; limit?: number; level?: string; function?: string; q?: string; source?: string }) =>
+    request<LogsResponse>("GET", "/api/logs", undefined, { query: { provider, stage, ...p } }),
+  logStreams: (provider: string, stage: string, fn?: string) =>
+    request<{ supported: boolean; reason?: string; can_delete?: boolean; items: LogStream[] }>("GET", "/api/logs/streams", undefined, {
+      query: { provider, stage, function: fn },
+    }),
+  deleteLogs: (provider: string, stage: string, body: { ids?: string[]; all?: boolean; function?: string }) =>
+    request<{ deleted: number; errors?: string[] }>("POST", "/api/logs/delete", body, { query: { provider, stage } }),
   vscode: () => request<VsCodeState>("GET", "/api/vscode"),
   vscodeStart: (image?: string) => request<{ job_id: string }>("POST", "/api/vscode/start", { image }),
   vscodeStop: () => request<VsCodeState>("POST", "/api/vscode/stop", {}),

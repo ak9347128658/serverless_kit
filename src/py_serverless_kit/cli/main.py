@@ -92,13 +92,55 @@ def project_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+CONTEXT = {"help_option_names": ["-h", "--help"], "max_content_width": 120}
+
+ROOT_EPILOG = """\b
+Getting started
+  init        Scaffold a project              pskit init my-api -p aws -t full
+  studio      Build it in the browser         pskit studio --open
+  doctor      Check tools and credentials     pskit doctor -p azure
+\b
+Develop
+  dev         Local server, hot reload        pskit dev --port 3000
+  invoke      Call one function locally       pskit invoke -f hello -d '{"name": "Ada"}'
+  validate    Check config for a provider     pskit validate -p gcp -s prod
+\b
+Deploy
+  package     Build zip + Terraform only      pskit package -s dev
+  plan        terraform plan                  pskit plan --destroy
+  deploy      Package and apply               pskit deploy -s prod --confirm
+  info        What is deployed (URLs, ids)    pskit info --refresh
+  remove      Destroy the stage               pskit remove -s dev --yes
+  tf          Any terraform command           pskit tf -- state list
+\b
+Operate
+  logs        Tail deployed logs              pskit logs -f --function worker
+  dashboard   Deployment dashboard            pskit dashboard --serve --open
+  workflow    run | show | start | executions | status | cancel
+              pskit workflow run order -i '{"id": 1}' --history
+              pskit workflow start order -i @input.json --wait
+              pskit workflow executions order --status FAILED
+              pskit workflow status <execution-id> --watch
+              pskit workflow cancel <execution-id>
+              pskit workflow show order --format asl
+\b
+Reference
+  providers   Capability matrix of every cloud   pskit providers --json
+\b
+
+
+Project options (most commands): -c/--config FILE  -p/--provider NAME  -s/--stage NAME  -r/--region NAME  -v/--verbose
+Run `pskit COMMAND --help` for every option of a command. Docs: docs/cli.md"""
+
+
+@click.group(context_settings=CONTEXT, epilog=ROOT_EPILOG)
 @click.version_option(__version__, prog_name="py-serverless-kit")
 def cli() -> None:
     """py-serverless-kit: write Python functions once, deploy them to any cloud.
 
     \b
     Typical flow:
+      pskit doctor                   # check terraform, CLIs and credentials
       pskit init my-api --provider aws
       pskit dev                      # run locally
       pskit deploy --stage dev       # terraform apply
@@ -116,7 +158,14 @@ def cli() -> None:
 )
 @click.option("--force", is_flag=True, help="Overwrite existing files.")
 def init(directory: str, name: Optional[str], provider: str, template: str, force: bool) -> None:
-    """Scaffold a new project."""
+    """Scaffold a new project (pskit.yml, handlers, tests).
+
+    
+    Examples:
+      pskit init my-api --provider aws
+      pskit init . -p gcp -t workflow
+      pskit init svc -p onprem -t full --name orders
+    """
     import re
 
     from .templates import render
@@ -147,7 +196,13 @@ def init(directory: str, name: Optional[str], provider: str, template: str, forc
 @cli.command()
 @project_options
 def validate(project) -> None:  # noqa: ANN001
-    """Validate the config against the selected provider."""
+    """Validate the config against the selected provider.
+
+    
+    Examples:
+      pskit validate
+      pskit validate -p azure -s prod
+    """
     issues = project.validate()
     cfg = project.config
     info(
@@ -168,7 +223,15 @@ def validate(project) -> None:  # noqa: ANN001
 @project_options
 @click.option("--skip-deps", is_flag=True, help="Do not pip-install requirements into the bundle.")
 def package(project, skip_deps: bool) -> None:  # noqa: ANN001
-    """Build the artifact and generate Terraform (no cloud calls)."""
+    """Build the artifact and Terraform (no cloud calls).
+
+    Writes .pskit/<provider>-<stage>/artifact.zip and main.tf.json.
+
+    
+    Examples:
+      pskit package
+      pskit package -p gcp -s prod --skip-deps
+    """
     from ..core.deployer import Deployer
 
     result = Deployer(project, echo=echo).package(skip_deps=skip_deps)
@@ -180,7 +243,13 @@ def package(project, skip_deps: bool) -> None:  # noqa: ANN001
 @click.option("--skip-deps", is_flag=True)
 @click.option("--destroy", is_flag=True, help="Plan a destroy instead.")
 def plan(project, skip_deps: bool, destroy: bool) -> None:  # noqa: ANN001
-    """Show the terraform plan."""
+    """Show the terraform plan (what would change).
+
+    
+    Examples:
+      pskit plan -s dev
+      pskit plan --destroy
+    """
     from ..core.deployer import Deployer
 
     changed = Deployer(project, echo=echo).plan(skip_deps=skip_deps, destroy=destroy)
@@ -194,7 +263,14 @@ def plan(project, skip_deps: bool, destroy: bool) -> None:  # noqa: ANN001
 @click.option("--upgrade", is_flag=True, help="terraform init -upgrade (update provider plugins).")
 @click.option("--no-dashboard", is_flag=True, help="Do not regenerate the dashboard.")
 def deploy(project, skip_deps: bool, confirm: bool, upgrade: bool, no_dashboard: bool) -> None:  # noqa: ANN001
-    """Package and deploy with terraform apply."""
+    """Package and deploy with terraform apply.
+
+    
+    Examples:
+      pskit deploy
+      pskit deploy -s prod --confirm      # review the plan first
+      pskit deploy -p onprem --skip-deps
+    """
     from ..core.deployer import Deployer
     from ..dashboard.generator import write_dashboard
 
@@ -211,7 +287,13 @@ def deploy(project, skip_deps: bool, confirm: bool, upgrade: bool, no_dashboard:
 @project_options
 @click.option("-y", "--yes", is_flag=True, help="Do not ask for confirmation.")
 def remove(project, yes: bool) -> None:  # noqa: ANN001
-    """Destroy every resource of this service/stage."""
+    """Destroy every resource of this service/stage.
+
+    
+    Examples:
+      pskit remove -s dev
+      pskit remove -s dev --yes
+    """
     from ..core.deployer import Deployer
     from ..dashboard.generator import write_dashboard
 
@@ -309,7 +391,13 @@ def _print_record(record: dict) -> None:
 @click.option("--json", "as_json", is_flag=True, help="Machine readable output.")
 @click.option("--refresh", is_flag=True, help="Re-read terraform outputs.")
 def info_cmd(project, as_json: bool, refresh: bool) -> None:  # noqa: ANN001
-    """Show what is deployed (functions, URLs, ids)."""
+    """Show what is deployed (functions, URLs, ids).
+
+    
+    Examples:
+      pskit info
+      pskit info -s prod --refresh --json
+    """
     from ..core.deployer import Deployer
     from ..dashboard.generator import local_record
 
@@ -339,7 +427,14 @@ def info_cmd(project, as_json: bool, refresh: bool) -> None:  # noqa: ANN001
 def dashboard(
     directory: str, output: Optional[str], serve: bool, bind_host: str, port: int, open_browser: bool
 ) -> None:
-    """Generate (and optionally serve) the deployment dashboard."""
+    """Generate (and optionally serve) the deployment dashboard.
+
+    
+    Examples:
+      pskit dashboard --open
+      pskit dashboard --serve --open      # live logs and workflow executions
+      pskit dashboard -o site/index.html
+    """
     from ..dashboard.generator import collect_records, local_record, write_dashboard
 
     root = Path(directory).resolve()
@@ -392,7 +487,15 @@ def dashboard(
 @click.option("--open", "open_browser", is_flag=True, help="Open in the browser.")
 @click.option("--vscode-image", default=None, help="code-server image for the full VS Code view.")
 def studio(directory: str, bind_host: str, port: int, open_browser: bool, vscode_image: Optional[str]) -> None:
-    """Build functions, triggers, workflows and resources in the browser (writes pskit.yml)."""
+    """Edit the project in the browser (writes pskit.yml).
+
+    Build functions, triggers, workflows and resources with forms, edit code and deploy.
+
+    
+    Examples:
+      pskit studio --open
+      pskit studio -d path/to/project --port 8800
+    """
     from ..studio.server import is_loopback, make_server, studio_url
 
     root = Path(directory).resolve()
@@ -418,6 +521,78 @@ def studio(directory: str, bind_host: str, port: int, open_browser: bool, vscode
         httpd.server_close()
 
 
+# ----------------------------------------------------------------------------- doctor
+@cli.command()
+@click.option("-p", "--provider", default=None, help="Provider to check (default: provider.name in pskit.yml).")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+@click.option("--json", "as_json", is_flag=True, help="Machine readable output.")
+def doctor(provider: Optional[str], config_path: Optional[str], as_json: bool) -> None:
+    """Check terraform, the cloud CLI and credentials.
+
+    Lists what is missing for the provider and how to install or configure it
+    on this OS. Works without a pskit.yml when -p is given. Exits with 1 if
+    anything required is missing.
+
+    \b
+    Examples:
+      pskit doctor
+      pskit doctor -p azure
+      pskit doctor -p onprem --json
+    """
+    import yaml
+
+    from ..config.loader import find_config
+    from ..core.setup_check import check, os_key
+
+    raw: dict = {}
+    try:
+        path = find_config(config_path)
+        loaded = yaml.safe_load(path.read_text("utf-8"))
+        raw = loaded if isinstance(loaded, dict) else {}
+    except (ConfigError, OSError, yaml.YAMLError):
+        if config_path:
+            raise click.ClickException(f"cannot read {config_path}") from None
+    if isinstance(raw.get("provider"), str):
+        raw["provider"] = {"name": raw["provider"]}
+    name = provider or str((raw.get("provider") or {}).get("name") or "")
+    if not name:
+        raise click.UsageError("no pskit.yml here; pass the provider, e.g. `pskit doctor -p aws`")
+    if name not in PROVIDERS:
+        raise click.BadParameter(f"unknown provider {name!r}; use one of {', '.join(PROVIDERS)}", param_hint="-p")
+    report = check(name, raw if (raw.get("provider") or {}).get("name", name) == name else None, Path.cwd())
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+    else:
+        try:
+            "✓✗".encode(getattr(sys.stdout, "encoding", None) or "ascii")
+            good, bad = "✓", "✗"
+        except (LookupError, UnicodeEncodeError):
+            good, bad = "+", "x"
+        marks = {"ok": (good, "green"), "missing": (bad, "red"), "warning": ("!", "yellow"), "info": ("i", "cyan")}
+        info(f"pskit doctor: {name}")
+        here = os_key()
+        for item in report["checks"]:
+            mark, color = marks.get(item["status"], ("?", None))
+            echo(click.style(f" {mark} ", fg=color) + f"{item['title']}: {item['detail']}")
+            fix = item.get("fix") or {}
+            if item["status"] in ("ok",) or not (fix.get("summary") or fix.get("steps", {}).get(here)):
+                continue
+            if fix.get("summary"):
+                echo(f"     {fix['summary']}")
+            for step in (fix.get("steps") or {}).get(here) or []:
+                echo(f"       {step}")
+            for command in fix.get("commands") or []:
+                echo(f"       $ {command}")
+            for link in fix.get("links") or []:
+                echo(f"       {link['label']}: {link['url']}")
+        if report["ok"]:
+            ok("Everything required is in place.")
+        else:
+            fail(f"Some required pieces are missing ({bad}).")
+    if not report["ok"]:
+        sys.exit(1)
+
+
 # ----------------------------------------------------------------------------- local
 @cli.command()
 @project_options
@@ -425,7 +600,15 @@ def studio(directory: str, bind_host: str, port: int, open_browser: bool, vscode
 @click.option("--port", default=3000, show_default=True)
 @click.option("--env-file", default=".env", show_default=True)
 def dev(project, host: str, port: int, env_file: str) -> None:  # noqa: ANN001
-    """Run a local HTTP server that routes to your handlers (hot reload)."""
+    """Run a local server with hot reload.
+
+    Routes HTTP requests to your handlers and reloads them when files change.
+
+    
+    Examples:
+      pskit dev
+      pskit dev --port 8080 --env-file .env.local
+    """
     from ..local.runner import LocalRunner
     from ..local.server import serve
 
@@ -458,7 +641,14 @@ def invoke(
     headers: tuple,
     env_file: str,
 ) -> None:
-    """Invoke a function locally with a synthetic event."""
+    """Invoke a function locally with a synthetic event.
+
+    
+    Examples:
+      pskit invoke -f hello
+      pskit invoke -f hello -t http --method POST --path "/hello?x=1" -d '{"name": "Ada"}'
+      pskit invoke -f worker -t queue -d @message.json
+    """
     from ..local.runner import LocalRunner, build_event, parse_data, response_to_dict
 
     fn = project.config.functions.get(function)
@@ -493,7 +683,17 @@ def invoke(
 # ----------------------------------------------------------------------------- workflows
 @cli.group()
 def workflow() -> None:
-    """Run or inspect workflows (state machines)."""
+    """Run or inspect workflows (state machines).
+
+    
+    Examples:
+      pskit workflow run order -i '{"id": 1}' --history    # local, embedded engine
+      pskit workflow show order --format asl
+      pskit workflow start order -i @input.json --wait     # the deployed workflow
+      pskit workflow executions order --status FAILED
+      pskit workflow status <execution-id> --watch
+      pskit workflow cancel <execution-id>
+    """
 
 
 @workflow.command("run")
@@ -503,7 +703,13 @@ def workflow() -> None:
 @click.option("--sleep", is_flag=True, help="Honour wait states (default: skip waiting).")
 @click.option("--history", is_flag=True, help="Print the execution history.")
 def workflow_run(project, name: str, data: Optional[str], sleep: bool, history: bool) -> None:  # noqa: ANN001
-    """Run a workflow locally on the embedded engine."""
+    """Run a workflow locally on the embedded engine.
+
+    
+    Examples:
+      pskit workflow run order -i '{"id": 1}'
+      pskit workflow run order -i @input.json --history --sleep
+    """
     from ..local.runner import LocalRunner, parse_data
     from ..runtime.workflow import WorkflowFailed
 
@@ -526,7 +732,13 @@ def workflow_run(project, name: str, data: Optional[str], sleep: bool, history: 
 @click.argument("name")
 @click.option("--format", "fmt", default="auto", type=click.Choice(["auto", "asl", "gcp", "json"]), show_default=True)
 def workflow_show(project, name: str, fmt: str) -> None:  # noqa: ANN001
-    """Print the compiled workflow definition."""
+    """Print the compiled workflow definition.
+
+    
+    Examples:
+      pskit workflow show order
+      pskit workflow show order --format gcp
+    """
     from ..workflows import definition_dict
     from ..workflows.asl import compile_asl
     from ..workflows.gcp import compile_gcp
@@ -595,7 +807,13 @@ def _print_execution_line(item: dict) -> None:
 @click.option("--wait", is_flag=True, help="Wait for the result (on-prem; native engines return at once).")
 @click.option("--json", "as_json", is_flag=True)
 def workflow_start(project, name: str, data: Optional[str], wait: bool, as_json: bool) -> None:  # noqa: ANN001
-    """Start a deployed workflow and print its execution id."""
+    """Start a deployed workflow and print its execution id.
+
+    
+    Examples:
+      pskit workflow start order -i '{"id": 1}'
+      pskit workflow start order -i @input.json --wait --json
+    """
     from ..local.runner import parse_data
 
     backend = _execution_backend(project)
@@ -626,7 +844,13 @@ def workflow_start(project, name: str, data: Optional[str], wait: bool, as_json:
 def workflow_executions(  # noqa: ANN001
     project, name: Optional[str], status: Optional[str], limit: int, offset: int, token: Optional[str], as_json: bool
 ) -> None:
-    """List executions of the deployed workflows (newest first)."""
+    """List executions of the deployed workflows (newest first).
+
+    
+    Examples:
+      pskit workflow executions
+      pskit workflow executions order --status FAILED -n 50
+    """
     backend = _execution_backend(project)
     result = _remote(lambda: backend.list(workflow=name, status=status, limit=limit, offset=offset, token=token))
     if as_json:
@@ -656,7 +880,13 @@ def workflow_executions(  # noqa: ANN001
 def workflow_status(  # noqa: ANN001
     project, execution_id: str, name: Optional[str], history: bool, watch: bool, as_json: bool
 ) -> None:
-    """Show one execution: status, current state, output or error."""
+    """Show one execution: status, current state, output or error.
+
+    
+    Examples:
+      pskit workflow status <execution-id>
+      pskit workflow status <execution-id> -w order --history --watch
+    """
     import time
 
     backend = _execution_backend(project)
@@ -687,7 +917,13 @@ def workflow_status(  # noqa: ANN001
 @click.argument("execution_id")
 @click.option("-w", "--workflow", "name", default=None, help="Workflow name (AWS/GCP).")
 def workflow_cancel(project, execution_id: str, name: Optional[str]) -> None:  # noqa: ANN001
-    """Cancel a running execution (it stops before its next state)."""
+    """Cancel a running execution (stops before its next state).
+
+    
+    Examples:
+      pskit workflow cancel <execution-id>
+      pskit workflow cancel <execution-id> -w order
+    """
     backend = _execution_backend(project)
     record = _remote(lambda: backend.cancel(execution_id, name))
     _print_execution_line(record)
@@ -708,6 +944,10 @@ def workflow_cancel(project, execution_id: str, name: Optional[str]) -> None:  #
 )
 @click.option("-q", "--grep", "text", default=None, help="Only entries containing this text.")
 @click.option("--json", "as_json", is_flag=True, help="One JSON object per line.")
+@click.option("--streams", "list_streams", is_flag=True, help="List log streams (per function / container) instead.")
+@click.option("--delete", "delete_ids", multiple=True, metavar="STREAM", help="Delete a log stream (repeatable).")
+@click.option("--delete-all", is_flag=True, help="Delete every log stream (of --function, or of all functions).")
+@click.option("-y", "--yes", is_flag=True, help="Don't ask for confirmation before deleting.")
 def logs(  # noqa: ANN001
     project,
     follow: bool,
@@ -717,22 +957,75 @@ def logs(  # noqa: ANN001
     source: Optional[str],
     text: Optional[str],
     as_json: bool,
+    list_streams: bool,
+    delete_ids: tuple,
+    delete_all: bool,
+    yes: bool,
 ) -> None:
-    """Show logs of the deployed on-premises host (handlers, print output, invocations)."""
+    """Show, list or delete logs of a deployment.
+
+    \b
+    On premises: the host's buffer (handlers, print output, invocations).
+    AWS: CloudWatch Logs (needs boto3). GCP: Cloud Logging (needs
+    google-cloud-logging, read only). Azure: Log Analytics when a
+    `log_analytics_workspace_id` output exists. Elsewhere: use the console
+    link from `pskit info`.
+    """
     import time
 
-    from ..core.onprem_control import control_for
+    from ..core.cloud_logs import LogError, log_backend
 
     record = _deployed_record(project)
-    control = control_for(record, project.root)
-    if control is None:
-        raise click.ClickException(
-            "`pskit logs` reads the on-premises host. For cloud providers use the console link from `pskit info`."
+    backend = log_backend(record, project.root)
+    if not backend.supported:
+        raise click.ClickException(backend.reason)
+
+    def call(fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except LogError as exc:
+            raise click.ClickException(str(exc)) from None
+        except KeyError as exc:
+            raise click.ClickException(str(exc.args[0] if exc.args else exc)) from None
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from None
+
+    if delete_ids or delete_all:
+        if not backend.can_delete:
+            raise click.ClickException(backend.reason or "deleting logs is not supported for this deployment")
+        what = (
+            f"{len(delete_ids)} log stream(s)"
+            if delete_ids
+            else (f"every log stream of {function}" if function else "every log stream of every function")
         )
+        where = f"{project.config.provider.name}/{project.config.provider.stage}"
+        if not yes and not click.confirm(f"Delete {what} of {where}? This cannot be undone", default=False):
+            raise click.Abort()
+        result = call(lambda: backend.delete(ids=list(delete_ids) or None, function=function, all=delete_all and not function))
+        ok(f"Deleted {result.get('deleted', 0)} log stream(s)" if backend.mode == "time" else f"Deleted {result.get('deleted', 0)} entries")
+        for error in result.get("errors") or []:
+            fail(f"  {error}")
+        return
+
+    if list_streams:
+        page = call(lambda: backend.streams(function))
+        items = page.get("items") or []
+        if as_json:
+            for item in items:
+                click.echo(json.dumps(item, default=str))
+            return
+        if not items:
+            echo("No log streams.")
+            return
+        for item in items:
+            last = str(item.get("last") or "")[:19].replace("T", " ")
+            size = item.get("count") if item.get("count") is not None else item.get("bytes")
+            echo(f"{last:<20} {str(item.get('function') or 'host'):<24} {size if size is not None else '':>10}  {item.get('id')}")
+        return
 
     def fetch(since: int, limit: int) -> dict:
         return dict(
-            _remote(lambda: control.logs(since=since, limit=limit, level=level, function=function, q=text, source=source))
+            call(lambda: backend.query(since=since, limit=limit, level=level, function=function, q=text, source=source))
         )
 
     colors = {"ERROR": "red", "CRITICAL": "red", "WARNING": "yellow", "DEBUG": "bright_black"}
@@ -754,7 +1047,7 @@ def logs(  # noqa: ANN001
     cursor = int(page.get("next") or 0)
     while follow:
         try:
-            time.sleep(1)
+            time.sleep(1 if backend.mode == "seq" else 3)
             page = fetch(cursor, 500)
         except KeyboardInterrupt:
             break
@@ -768,7 +1061,13 @@ def logs(  # noqa: ANN001
 @cli.command()
 @click.option("--json", "as_json", is_flag=True)
 def providers(as_json: bool) -> None:
-    """List supported clouds and what each supports."""
+    """List supported clouds and what each supports.
+
+    
+    Examples:
+      pskit providers
+      pskit providers --json
+    """
     from ..providers.registry import available, get_provider
 
     rows = []
@@ -797,7 +1096,13 @@ def providers(as_json: bool) -> None:
 @project_options
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def tf(project, args: tuple) -> None:  # noqa: ANN001
-    """Run any terraform command in the generated workspace, e.g. `pskit tf -- state list`."""
+    """Run any terraform command in the generated workspace.
+
+    
+    Examples:
+      pskit tf -- state list
+      pskit tf -s prod -- output -json
+    """
     from ..terraform.runner import TerraformRunner
 
     if not (project.work_dir / "main.tf.json").is_file():

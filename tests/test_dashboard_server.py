@@ -47,6 +47,13 @@ class FakeControl:
             raise FakeUnavailable("connection refused")
         return {"entries": [{"seq": since + 1, "message": "hi", "level": "INFO"}], "next": since + 1, "oldest": 1}
 
+    def log_streams(self) -> dict:
+        return {"items": [{"function": "a", "count": 2}, {"function": None, "count": 1}]}
+
+    def clear_logs(self, function=None) -> dict:
+        FakeControl.calls.append({"clear": function})
+        return {"deleted": 3}
+
 
 class FakeExecutionError(Exception):
     pass
@@ -221,6 +228,47 @@ def test_non_onprem_logs_unsupported(make_project, fakes):
         status, data, _ = call(base + "/api/deployments/aws-dev/logs")
         assert status == 200 and data["supported"] is False
         assert call(base + "/api/deployments/aws-dev/health")[1]["live"] is False
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_log_streams_and_delete(server, fakes):
+    base, key = server
+    status, data, _ = call(f"{base}/api/deployments/{key}/logs?since=1")
+    assert data["mode"] == "seq" and data["can_delete"] is True
+    status, data, _ = call(f"{base}/api/deployments/{key}/logs/streams")
+    assert status == 200 and [i["id"] for i in data["items"]] == ["a", "__host__"] and data["can_delete"]
+    status, data, _ = call(f"{base}/api/deployments/{key}/logs/delete", "POST", {"ids": ["a"]})
+    assert status == 200 and data["deleted"] == 3 and FakeControl.calls[-1] == {"clear": "a"}
+    status, data, _ = call(f"{base}/api/deployments/{key}/logs/delete", "POST", {"all": True})
+    assert status == 200 and FakeControl.calls[-1] == {"clear": None}
+    assert call(f"{base}/api/deployments/{key}/logs/delete", "POST", {})[0] == 400
+    assert call(f"{base}/api/deployments/{key}/logs/delete", "POST", {"ids": "a"})[0] == 400
+    assert call(f"{base}/api/deployments/{key}/logs/delete", "POST", [1])[0] == 400
+    status, _, _ = call(
+        f"{base}/api/deployments/{key}/logs/delete", "POST", {"all": True}, headers={"Origin": "http://evil.example"}
+    )
+    assert status == 403
+    assert call(f"{base}/api/deployments/{key}/logs/delete")[0] == 404
+
+
+def test_cloud_logs_unsupported_delete(make_project, fakes):
+    project = make_project("service: dash\nprovider: {name: cloudflare}\nfunctions: {a: {handler: app.handlers.hello}}\n")
+    work = project.work_dir
+    work.mkdir(parents=True)
+    (work / "deployment.json").write_text(json.dumps(build_record(project)), "utf-8")
+    httpd = make_server(project.root, "127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{httpd.server_address[1]}/api/deployments/{work.name}"
+        status, data, _ = call(base + "/logs")
+        assert status == 200 and data["supported"] is False and "can't read" in data["reason"]
+        status, data, _ = call(base + "/logs/streams")
+        assert status == 200 and data["supported"] is False and data["items"] == []
+        status, data, _ = call(base + "/logs/delete", "POST", {"all": True})
+        assert status == 400
     finally:
         httpd.shutdown()
         httpd.server_close()

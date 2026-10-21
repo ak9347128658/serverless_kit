@@ -462,3 +462,32 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
   .top-actions .btn-ghost:not(:last-child) { display: none; }
   .route-input { grid-template-columns: 1fr; }
 }
+
+/* dropdown with a custom value, file picker */
+.combo { display: flex; gap: 6px; align-items: center; width: 100%; }
+.combo .select { flex: 1 1 50%; min-width: 0; }
+.combo .input { flex: 1 1 50%; min-width: 0; }
+.file-list { max-height: 50vh; overflow: auto; }
+
+/* setup & credentials */
+.setup-bar { margin-bottom: 12px; }
+.check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.check-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel); }
+.check-row.check-missing { border-color: var(--err); }
+.check-row.check-warning { border-color: var(--warn); }
+.check-icon { min-width: 24px; justify-content: center; text-align: center; }
+.check-fix { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
+.check-fix p { margin: 0; }
+.steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.cmd-row { display: flex; gap: 8px; align-items: center; }
+.pre-inline { flex: 1 1 auto; padding: 4px 8px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); overflow-x: auto; white-space: pre; }
+.env-input { flex: 1 1 320px; max-width: 560px; }
+.env-input .input { flex: 1 1 auto; }
+
+/* compatibility / disabled items */
+.compat-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.compat-list li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row-disabled { opacity: 0.55; }
+.trigger-notes { margin: 0; padding-left: 18px; }
+.job-item .job-del { margin-left: auto; }
+.inline-pick { max-height: 260px; overflow: auto; }

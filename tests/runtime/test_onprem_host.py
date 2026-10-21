@@ -463,3 +463,39 @@ def test_captured_print_and_logging_are_tagged(make_project, tmp_path):
     logged = [e for e in entries if e["source"] == "function" and e["message"] == "slow working"]
     assert printed and printed[0]["message"].startswith("slow step") and printed[0]["request_id"]
     assert logged and logged[0]["fields"]["n"] == 1
+
+
+def test_log_streams_and_clear(make_project, tmp_path):
+    host, root = _workflow_host(make_project, tmp_path)
+    httpd, base = _server(host)
+    try:
+        _json("GET", base + "/hello")
+        _expect_http_error(500, "POST", base + "/__pskit/invoke/boom", {})
+        host.logs.append("WARNING", "host", "host note")
+        status, streams = _json("GET", base + "/__pskit/logs/streams")
+        assert status == 200
+        by_fn = {item["function"]: item for item in streams["items"]}
+        assert {"hello", "boom", None} <= set(by_fn) and by_fn["hello"]["count"] >= 1
+        _expect_http_error(405, "POST", base + "/__pskit/logs/streams", {})
+
+        status, cleared = _json("DELETE", base + "/__pskit/logs?function=hello")
+        assert status == 200 and cleared["deleted"] >= 1
+        _status, left = _json("GET", base + "/__pskit/logs")
+        assert left["entries"] and all(e["function"] != "hello" for e in left["entries"])
+        _status, cleared = _json("DELETE", base + "/__pskit/logs?function=__host__")
+        _status, left = _json("GET", base + "/__pskit/logs")
+        assert all(e["function"] for e in left["entries"])
+        _json("DELETE", base + "/__pskit/logs")
+        _status, left = _json("GET", base + "/__pskit/logs")
+        assert left["entries"] == []
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        host.executor.shutdown()
+        host.logs.close()
+    # The JSON-lines file was rewritten too: nothing comes back after a restart.
+    again = Host(root)
+    try:
+        assert not again.logs.query(function="hello")["entries"]
+    finally:
+        again.logs.close()

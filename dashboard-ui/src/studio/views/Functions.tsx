@@ -4,19 +4,24 @@ import { DataTable, type Column } from "../../components/DataTable";
 import { SearchInput } from "../../components/Inputs";
 import { api, errorMessage } from "../api";
 import { useConfirm, useToast } from "../components/Feedback";
-import { EnumSelect, FieldForm, FormRow, KeyValueEditor, NumberInput, Section, Segmented, TextInput, Toggle } from "../components/Forms";
+import { ComboInput, EnumSelect, FieldForm, FormRow, KeyValueEditor, NumberInput, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { DiffView, InlineIssues, PageHeader } from "../components/Misc";
+import { isEnabled } from "../compat";
+import { EnableControl } from "../components/EnableControl";
+import { DeployedLogs } from "./Logs";
 import { href, navigate } from "../route";
 import { providersSupporting, useStudio } from "../store";
 import { forgetHandlerStub, queueHandlerStub } from "../stubs";
-import { EVENT_TYPES, type EventType, type Json, type JsonObject } from "../types";
+import { EVENT_TYPES, type EventType, type Json, type JsonObject, type ProviderMeta } from "../types";
 import {
   asArray,
   asObject,
+  deepEqual,
   defaultHandler,
   eventSummary,
   eventToRaw,
   functionKind,
+  getIn,
   HANDLER_RE,
   NAME_RE,
   normalizeEvent,
@@ -26,6 +31,7 @@ import {
   uniqueName,
   type NormalEvent,
 } from "../util";
+import { durationLabel, memoryLabel, MEMORY, timeoutChoices } from "./Overview";
 import { defaultEvent, EVENT_INFO, TriggerForm } from "./TriggerForms";
 
 interface Row {
@@ -55,7 +61,7 @@ export function FunctionsView({ rest }: { rest: string[] }) {
 }
 
 function FunctionList() {
-  const { draft, state, edit, replace, issuesAt, provider } = useStudio();
+  const { draft, state, edit, replace, issuesAt, provider, providerName } = useStudio();
   const confirm = useConfirm();
   const toast = useToast();
   const [q, setQ] = useState("");
@@ -110,6 +116,16 @@ function FunctionList() {
       ),
     },
     { key: "kind", header: "Kind", sortValue: (r) => functionKind(r.fn), render: (r) => <span className="badge badge-accent">{functionKind(r.fn)}</span> },
+    {
+      key: "enabled",
+      header: "Deploy",
+      sortValue: (r) => (isEnabled(draft, providerName, "functions", r.name) ? 0 : 1),
+      render: (r) => (
+        <span onClick={(e) => e.stopPropagation()}>
+          <EnableControl section="functions" name={r.name} compact />
+        </span>
+      ),
+    },
     {
       key: "triggers",
       header: "Triggers",
@@ -233,7 +249,7 @@ const STEPS: { id: Step; label: string }[] = [
 
 function FunctionWizard({ name: existing }: { name: string | null }) {
   const studio = useStudio();
-  const { draft, meta, provider, providerName, replace, issuesAt } = studio;
+  const { draft, meta, provider, providerName, replace, issuesAt, state } = studio;
   const toast = useToast();
   const confirm = useConfirm();
   const functions = asObject(draft.functions);
@@ -249,6 +265,14 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
   const [openEvent, setOpenEvent] = useState<number | null>(events.length ? 0 : null);
   const [step, setStep] = useState<Step>("basics");
   const [stubNow, setStubNow] = useState(true);
+  // Triggers switched off on the current provider only (providers.<cloud>.functions.<name>.events).
+  const [skipped, setSkipped] = useState<Set<number>>(() => {
+    const over = existing ? getIn(draft, ["providers", providerName, "functions", existing, "events"]) : undefined;
+    if (!Array.isArray(over)) return new Set();
+    const base = asArray(original?.events);
+    return new Set(base.map((e, i) => (over.some((o) => deepEqual(o, e)) ? -1 : i)).filter((i) => i >= 0));
+  });
+  const [showLogs, setShowLogs] = useState(false);
   const [busy, setBusy] = useState(false);
 
   if (existing && !original) {
@@ -274,8 +298,8 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
       if (n?.type === "http") routes.add(`${str(n.config.method, "GET").toUpperCase()} ${str(n.config.path, "/").replace(/\/$/, "") || "/"}`);
     }
   }
-  const eventErrors = events.map((ev) => {
-    if (!studio.supports(ev.type)) return `${provider?.display_name || providerName} has no ${EVENT_INFO[ev.type].label.toLowerCase()} triggers`;
+  const eventErrors = events.map((ev, i) => {
+    if (!studio.supports(ev.type) && !skipped.has(i)) return `${provider?.display_name || providerName} has no ${EVENT_INFO[ev.type].label.toLowerCase()} triggers`;
     if (ev.type === "http") {
       const key = `${str(ev.config.method, "GET").toUpperCase()} ${str(ev.config.path, "/").replace(/\/$/, "") || "/"}`;
       if (routes.has(key)) return `route ${key} is already used by another function`;
@@ -328,6 +352,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     // Keep the function's position when editing in place.
     if (existing === name) raw = setIn(raw, ["functions", name], body);
     else raw = setIn(raw, ["functions"], { ...asObject((raw as JsonObject).functions), [name]: body });
+    raw = syncProviderOverrides(raw as JsonObject, meta.providers, existing, name, asArray(original?.events), events.map(eventToRaw), providerName, skipped);
     replace(raw as JsonObject);
     const types = events.map((e) => e.type);
     if (!existing || original?.handler !== body.handler) {
@@ -395,6 +420,13 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
             <FormRow label="Function name" required error={nameError} htmlFor="fname">
               <TextInput id="fname" mono autoFocus={!existing} value={name} invalid={!!nameError} onChange={updateName} />
             </FormRow>
+            <FormRow label="Deploy" help={existing ? "Disabled functions stay in pskit.yml but are not deployed (everywhere, or only on this provider)." : "Off: kept in pskit.yml but never deployed."}>
+              {existing && existing === name ? (
+                <EnableControl section="functions" name={existing} />
+              ) : (
+                <Toggle checked={fn.enabled !== false} label={fn.enabled === false ? "disabled everywhere" : "enabled"} onChange={(b) => setField("enabled", b ? undefined : false)} />
+              )}
+            </FormRow>
             <FormRow label="Description" htmlFor="fdesc">
               <TextInput id="fdesc" value={str(fn.description)} onChange={(v) => setField("description", v)} placeholder="What does it do?" />
             </FormRow>
@@ -428,10 +460,24 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
                 />
               </FormRow>
               <FormRow label="Memory (MB)" htmlFor="fmem">
-                <NumberInput id="fmem" integer min={64} max={32768} value={typeof fn.memory === "number" ? fn.memory : undefined} placeholder={`inherit (${str(asObject(draft.provider).memory, "256")})`} onChange={(v) => setField("memory", v)} />
+                <ComboInput
+                  id="fmem"
+                  numeric
+                  value={typeof fn.memory === "number" ? String(fn.memory) : ""}
+                  options={MEMORY.map((m) => ({ value: String(m), label: memoryLabel(m) }))}
+                  emptyLabel={`inherit (${str(asObject(draft.provider).memory, "256")} MB)`}
+                  onChange={(v) => setField("memory", v === "" ? undefined : Number(v))}
+                />
               </FormRow>
               <FormRow label="Timeout (s)" htmlFor="fto" help={provider ? `max ${provider.max_timeout}s` : undefined} error={fieldIssues("timeout")}>
-                <NumberInput id="fto" integer min={1} max={provider?.max_timeout || 3600} value={typeof fn.timeout === "number" ? fn.timeout : undefined} placeholder={`inherit (${str(asObject(draft.provider).timeout, "30")})`} onChange={(v) => setField("timeout", v)} />
+                <ComboInput
+                  id="fto"
+                  numeric
+                  value={typeof fn.timeout === "number" ? String(fn.timeout) : ""}
+                  options={timeoutChoices(provider?.max_timeout).map((s) => ({ value: String(s), label: durationLabel(s) }))}
+                  emptyLabel={`inherit (${str(asObject(draft.provider).timeout, "30")} s)`}
+                  onChange={(v) => setField("timeout", v === "" ? undefined : Number(v))}
+                />
               </FormRow>
               <FormRow label="Architecture">
                 <Segmented
@@ -452,18 +498,17 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
 
       {step === "triggers" && (
         <>
-          <Section title="Add a trigger" hint="what calls this function">
+          <Section title="Add a trigger" hint={`what ${provider?.display_name || providerName} can call this function with`}>
             <div className="trigger-grid">
-              {EVENT_TYPES.map((type: EventType) => {
-                const ok = studio.supports(type);
+              {EVENT_TYPES.filter((type) => studio.supports(type)).map((type: EventType) => {
                 const info = EVENT_INFO[type];
+                const notes = provider?.trigger_support?.[type] || [];
                 return (
                   <button
                     key={type}
                     type="button"
                     className="trigger-card"
-                    disabled={!ok}
-                    title={ok ? info.blurb : `Not on ${provider?.display_name}. Supported on: ${providersSupporting(meta, type).join(", ")}`}
+                    title={info.blurb}
                     onClick={() => {
                       setEvents((evs) => [...evs, defaultEvent(type, name)]);
                       setOpenEvent(events.length);
@@ -473,11 +518,25 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
                       {info.icon}
                     </span>
                     <b>{info.label}</b>
-                    <span className="muted small">{ok ? info.blurb : `Not supported on ${provider?.display_name}`}</span>
+                    <span className="muted small">{info.blurb}</span>
+                    {notes.length > 0 && (
+                      <span className="small warn-text">
+                        {notes.length} provider limitation{notes.length > 1 ? "s" : ""}
+                      </span>
+                    )}
                   </button>
                 );
               })}
             </div>
+            {EVENT_TYPES.some((type) => !studio.supports(type)) && (
+              <p className="muted small">
+                Not available on {provider?.display_name || providerName}:{" "}
+                {EVENT_TYPES.filter((type) => !studio.supports(type))
+                  .map((type) => `${EVENT_INFO[type].label} (${providersSupporting(meta, type).join(", ") || "no provider"})`)
+                  .join("; ")}
+                .
+              </p>
+            )}
           </Section>
           {!events.length && <p className="muted pad">No triggers. The function can still be called with invoke() or from a workflow.</p>}
           {events.map((ev, i) => (
@@ -489,23 +548,50 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
                   {EVENT_INFO[ev.type].label}
                   <span className="muted mono small">{eventSummary(eventToRaw(ev))}</span>
                   {eventErrors[i] && <span className="badge badge-err">fix</span>}
+                  {skipped.has(i) && <span className="badge badge-off">off on {provider?.display_name || providerName}</span>}
                 </span>
               }
               defaultOpen={openEvent === i}
               actions={
-                <button
-                  type="button"
-                  className="btn btn-sm btn-danger"
-                  onClick={() => {
-                    setEvents((evs) => evs.filter((_, j) => j !== i));
-                    setOpenEvent(null);
-                  }}
-                >
-                  Remove
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    title={skipped.has(i) ? "Use this trigger again on this provider" : "Keep the trigger for other providers but do not create it on this one"}
+                    onClick={() =>
+                      setSkipped((s) => {
+                        const next = new Set(s);
+                        if (next.has(i)) next.delete(i);
+                        else next.add(i);
+                        return next;
+                      })
+                    }
+                  >
+                    {skipped.has(i) ? `Enable on ${provider?.display_name || providerName}` : `Disable on ${provider?.display_name || providerName}`}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger"
+                    onClick={() => {
+                      setEvents((evs) => evs.filter((_, j) => j !== i));
+                      setSkipped((s) => new Set(Array.from(s).filter((j) => j !== i).map((j) => (j > i ? j - 1 : j))));
+                      setOpenEvent(null);
+                    }}
+                  >
+                    Remove
+                  </button>
+                </>
               }
             >
-              {eventErrors[i] && <div className="form-error block">{eventErrors[i]}</div>}
+              {eventErrors[i] && (
+                <div className="form-error block">
+                  {eventErrors[i]}
+                  {!studio.supports(ev.type) && <> Use <b>Disable on {provider?.display_name || providerName}</b> to keep it for the other providers.</>}
+                </div>
+              )}
+              {skipped.has(i) && studio.supports(ev.type) && (
+                <div className="hint-box">Not created on {provider?.display_name || providerName}; the other providers still get it.</div>
+              )}
               {existing && <InlineIssues issues={issuesAt(["functions", existing, "events", i])} />}
               <TriggerForm event={ev} fnName={name} onChange={(next) => setEvents((evs) => evs.map((e, j) => (j === i ? next : e)))} />
             </Section>
@@ -515,6 +601,38 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
 
       {step === "settings" && (
         <>
+          <Section title="Logging" hint="log level and live logs">
+            <div className="form">
+              <FormRow label="Log level" help="Sets PSKIT_LOG_LEVEL for this function: ctx.logger output below it is dropped.">
+                <Segmented
+                  label="Log level"
+                  value={str(asObject(fn.environment).PSKIT_LOG_LEVEL, "inherit")}
+                  onChange={(lvl) => {
+                    const env = { ...asObject(fn.environment) };
+                    if (lvl === "inherit") delete env.PSKIT_LOG_LEVEL;
+                    else env.PSKIT_LOG_LEVEL = lvl;
+                    setField("environment", Object.keys(env).length ? env : undefined);
+                  }}
+                  options={["inherit", "DEBUG", "INFO", "WARNING", "ERROR"].map((l) => ({ value: l, label: l === "inherit" ? `inherit (${str(asObject(asObject(draft.provider).environment).PSKIT_LOG_LEVEL, "INFO")})` : l }))}
+                />
+              </FormRow>
+              <FormRow label="Live logs" help={existing ? `From the deployed ${state.target?.provider || providerName}/${state.target?.stage || "dev"} (top bar).` : "Available after the function is created and deployed."}>
+                {existing ? (
+                  <Toggle checked={showLogs} label={showLogs ? "showing" : "off"} onChange={setShowLogs} />
+                ) : (
+                  <span className="muted">not deployed yet</span>
+                )}
+              </FormRow>
+            </div>
+            {showLogs && existing && (
+              <DeployedLogs provider={state.target?.provider || providerName} stage={state.target?.stage || "dev"} functions={[existing]} only={existing} streams />
+            )}
+            {existing && (
+              <p className="muted small">
+                All functions: <a href={href("logs")}>Logs</a> page.
+              </p>
+            )}
+          </Section>
           <Section title="Environment variables" hint="merged over the provider-wide ones">
             <KeyValueEditor value={asObject(fn.environment)} keyPattern={/^[A-Za-z_][A-Za-z0-9_]*$/} onChange={(v) => setField("environment", v)} />
           </Section>
@@ -660,4 +778,47 @@ function IamSection({ value, onChange }: { value: JsonObject; onChange: (v: Json
       </div>
     </Section>
   );
+}
+
+/**
+ * Keep `providers.<cloud>.functions.<fn>.events` in step with the edited triggers.
+ * On `current`, `skipped` (indexes into `after`) decides the list; on other clouds, triggers that were
+ * skipped there stay skipped and new ones are added when that cloud supports them. Renames move the override.
+ */
+function syncProviderOverrides(
+  raw: JsonObject,
+  providers: ProviderMeta[],
+  from: string | null,
+  to: string,
+  before: Json[],
+  after: Json[],
+  current: string,
+  skipped: Set<number>,
+): JsonObject {
+  let out: Json = raw;
+  for (const p of providers) {
+    const path = ["providers", p.name, "functions"];
+    const old = from ? asObject(getIn(out, [...path, from])) : {};
+    let entry: JsonObject = { ...old };
+    if (p.name === current) {
+      const kept = after.filter((_, i) => !skipped.has(i));
+      if (skipped.size) entry.events = kept;
+      else delete entry.events;
+    } else if (Array.isArray(old.events)) {
+      const overrideList = old.events;
+      const wasSkipped = (e: Json) => before.some((b) => deepEqual(b, e)) && !overrideList.some((o) => deepEqual(o, e));
+      entry.events = after.filter((e) => !wasSkipped(e) && p.capabilities.includes(normalizeEvent(e)?.type || ""));
+      if (deepEqual(entry.events, after)) delete entry.events;
+    }
+    if (from && from !== to) out = setIn(out, [...path, from], undefined);
+    if (Object.keys(entry).length) out = setIn(out, [...path, to], entry);
+    else if (getIn(out, [...path, to]) !== undefined) out = setIn(out, [...path, to], undefined);
+    entry = asObject(getIn(out, path));
+    if (getIn(out, path) !== undefined && !Object.keys(entry).length) out = setIn(out, path, undefined);
+    if (getIn(out, ["providers", p.name]) !== undefined && !Object.keys(asObject(getIn(out, ["providers", p.name]))).length) {
+      out = setIn(out, ["providers", p.name], undefined);
+    }
+  }
+  if ((out as JsonObject).providers !== undefined && !Object.keys(asObject((out as JsonObject).providers)).length) out = setIn(out, ["providers"], undefined);
+  return out as JsonObject;
 }

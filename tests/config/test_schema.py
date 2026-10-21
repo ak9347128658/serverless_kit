@@ -129,3 +129,40 @@ def test_generated_functions_get_only_listed_resources():
 def test_managed_database_rejected():
     with pytest.raises(ValidationError, match="external: true"):
         _service({"db": {"type": "database"}})
+
+
+def _with_disabled(**extra):
+    base = {
+        "service": "svc",
+        "provider": {"name": "aws"},
+        "functions": {"a": {"handler": "app.a"}, "b": {"handler": "app.b", "enabled": False}},
+    }
+    base.update(extra)
+    return ServiceConfig.model_validate(base)
+
+
+def test_disabled_functions_and_workflows_are_left_out():
+    cfg = _with_disabled(
+        resources={"q": {"type": "queue", "functions": ["a", "b"]}},
+        workflows={
+            "on": {"start_at": "s", "states": {"s": {"type": "task", "function": "a"}}},
+            "off": {"enabled": False, "start_at": "s", "states": {"s": {"type": "task", "function": "b"}}},
+        },
+    )
+    assert list(cfg.functions) == ["a"] and list(cfg.workflows) == ["on"]
+    assert cfg.resources["q"].functions == ["a"]
+    assert cfg.disabled == {"functions": ["b"], "workflows": ["off"]}
+    # Survives the copies Project.from_loaded makes.
+    assert cfg.model_copy(update={"functions": dict(cfg.functions)}).disabled == cfg.disabled
+
+
+def test_workflow_calling_a_disabled_function_is_an_error():
+    with pytest.raises(ValidationError, match="disabled; disable the workflow too"):
+        _with_disabled(workflows={"w": {"start_at": "s", "states": {"s": {"type": "task", "function": "b"}}}})
+
+
+def test_enabled_is_not_part_of_the_workflow_definition():
+    from py_serverless_kit.workflows import definition_dict
+
+    wf = WorkflowConfig.model_validate({"enabled": True, "start_at": "s", "states": {"s": {"type": "pass"}}})
+    assert "enabled" not in definition_dict(wf)

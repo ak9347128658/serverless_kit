@@ -18,7 +18,9 @@ path you already have instead.
   inspect and control runs; records live under ``<data_dir>/executions``.
 * ``GET /__pskit/logs?since=&limit=&level=&function=&q=&source=&before=`` returns
   captured logs (handler logging, print output, one entry per invocation, host
-  notes); ``GET /__pskit/stats`` returns per-function invocation counters.
+  notes); ``GET /__pskit/logs/streams`` summarises them per function and
+  ``DELETE /__pskit/logs[?function=]`` clears them. ``GET /__pskit/stats``
+  returns per-function invocation counters.
 
 Queue, storage and topic events may carry a ``driver`` binding (from a
 ``resources:`` entry). ``directory`` moves that queue/bucket to its own path;
@@ -1112,6 +1114,10 @@ class Host:
                 raw = self._read()
                 if parts == ["logs"]:
                     return self._logs(query)
+                if parts == ["logs", "streams"]:
+                    if self.command != "GET":
+                        return self._json(405, {"error": "GET log streams"})
+                    return self._json(200, {"items": host.logs.functions()})
                 if parts == ["stats"]:
                     return self._json(200, host.stats())
                 if parts and parts[0] == "executions":
@@ -1129,8 +1135,11 @@ class Host:
                 self._json(404, {"error": "unknown on-prem endpoint"})
 
             def _logs(self, query: Dict[str, str]) -> None:
+                if self.command == "DELETE":
+                    removed = host.logs.clear(query.get("function") or None)
+                    return self._json(200, {"deleted": removed})
                 if self.command != "GET":
-                    return self._json(405, {"error": "GET logs"})
+                    return self._json(405, {"error": "GET or DELETE logs"})
                 result = host.logs.query(
                     since=_int_arg(query, "since", 0),
                     limit=_int_arg(query, "limit", 200),

@@ -120,3 +120,26 @@ def test_install_captures_logging_and_streams_once():
     assert ("stdout", "hello world", "fn") in messages
     assert ("stdout", "partial line", "fn") in messages
     assert sum(1 for m in messages if m[1] == "careful 1") == 1
+
+
+def test_clear_and_function_summaries(tmp_path):
+    path = tmp_path / "host.jsonl"
+    buf = LogBuffer(path, capacity=100)
+    _fill(buf, 3, function="a")
+    _fill(buf, 2, function="b")
+    _fill(buf, 1)
+    summary = {s["function"]: s["count"] for s in buf.functions()}
+    assert summary == {"a": 3, "b": 2, None: 1}
+    assert buf.clear("a") == 3
+    assert {e["function"] for e in buf.query()["entries"]} == {"b", None}
+    assert buf.clear(hostlog.HOST_STREAM) == 1
+    assert {e["function"] for e in buf.query()["entries"]} == {"b"}
+    buf.append("INFO", "host", "after")
+    last = buf.last_seq
+    buf.close()
+    again = LogBuffer(path, capacity=100)
+    assert [e["message"] for e in again.query()["entries"]] == ["line 0", "line 1", "after"]
+    assert again.clear() == 3 and again.query()["entries"] == []
+    again.append("INFO", "host", "new")
+    assert again.last_seq > last
+    again.close()

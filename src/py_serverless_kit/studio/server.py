@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .._version import __version__
 from ..dashboard.server import _allowed_hosts, is_loopback
-from . import files, project
+from . import files, project, system
 from .discover import discover
 from .jobs import JobManager
 from .project import StudioError
@@ -69,6 +69,15 @@ class Studio:
 def _param(params: Dict[str, List[str]], name: str) -> Optional[str]:
     raw = (params.get(name) or [""])[0].strip()
     return raw or None
+
+
+def _int(params: Dict[str, List[str]], name: str, default: int) -> int:
+    raw = _param(params, name)
+    if raw is None:
+        return default
+    if not raw.isdigit():
+        raise StudioError(400, f"{name} must be a non-negative integer")
+    return int(raw)
 
 
 def _obj(body: Any) -> Dict[str, Any]:
@@ -263,9 +272,50 @@ def make_handler(app: Studio) -> type:
                 return 200, discover(
                     root, provider, _param(params, "kind") or "", _param(params, "region"), app.raw_config()
                 )
+            if parts == ["fs"] and method == "GET":
+                return 200, system.browse(_param(params, "path"))
+            if parts == ["setup"] and method == "GET":
+                provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
+                return 200, system.setup_status(provider, app.raw_config(), root)
+            if parts == ["setup", "env"] and method == "POST":
+                body = _obj(self._body())
+                value = body.get("value")
+                return 200, system.set_env(str(body.get("name") or ""), None if value is None else str(value))
+            if parts == ["setup", "aws-profile"] and method == "POST":
+                return 200, system.aws_profile(_obj(self._body()))
+            if parts == ["setup", "login"] and method == "POST":
+                body = _obj(self._body())
+                action = str(body.get("action") or "")
+                job = app.jobs.run_process("login", system.login_command(action), label=f"login: {action}")
+                return 202, {"job_id": job.id}
+            if parts == ["setup", "ssh-test"] and method == "POST":
+                body = _obj(self._body())
+                job = app.jobs.run_process("ssh-test", system.ssh_command(body.get("deploy")), label="SSH test")
+                return 202, {"job_id": job.id}
+            if parts and parts[0] == "logs":
+                provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
+                stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
+                if parts == ["logs"] and method == "GET":
+                    return 200, system.logs_query(
+                        root,
+                        provider,
+                        stage,
+                        since=_int(params, "since", 0),
+                        limit=max(1, min(1000, _int(params, "limit", 200))),
+                        level=_param(params, "level"),
+                        function=_param(params, "function"),
+                        q=_param(params, "q"),
+                        source=_param(params, "source"),
+                    )
+                if parts == ["logs", "streams"] and method == "GET":
+                    return 200, system.logs_streams(root, provider, stage, _param(params, "function"))
+                if parts == ["logs", "delete"] and method == "POST":
+                    return 200, system.logs_delete(root, provider, stage, _obj(self._body()))
             if parts == ["jobs"]:
                 if method == "GET":
                     return 200, {"jobs": app.jobs.list()}
+                if method == "DELETE":
+                    return 200, app.jobs.clear()
                 if method == "POST":
                     body = _obj(self._body())
                     args = body.get("args") or {}
@@ -273,6 +323,8 @@ def make_handler(app: Studio) -> type:
                         raise StudioError(400, "args must be an object")
                     job = app.jobs.start(str(body.get("command") or ""), body.get("provider"), body.get("stage"), args)
                     return 202, {"job_id": job.id}
+            if len(parts) == 2 and parts[0] == "jobs" and method == "DELETE":
+                return 200, app.jobs.clear(parts[1])
             if len(parts) == 2 and parts[0] == "jobs" and method == "GET":
                 since = _param(params, "since") or "0"
                 if not since.isdigit():

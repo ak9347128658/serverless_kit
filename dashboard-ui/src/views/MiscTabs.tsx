@@ -1,24 +1,53 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { api } from "../api";
-import type { Deployment, ResourceRecord } from "../types";
+import type { Deployment, LogDeleteRequest, ResourceRecord } from "../types";
 import { Badge, Chip } from "../components/Badge";
 import { DataTable, type Column } from "../components/DataTable";
 import { EmptyState } from "../components/Feedback";
 import { JsonView } from "../components/JsonView";
+import { LogStreams } from "../components/LogStreams";
 import { LogViewer } from "../components/LogViewer";
 
 export function LogsTab({ deployment, deploymentKey, live }: { deployment: Deployment; deploymentKey: string; live: boolean }) {
+  const [view, setView] = useState<"tail" | "streams">("tail");
+  const [generation, setGeneration] = useState(0);
   const fetchLogs = useCallback(
     (p: Parameters<typeof api.logs>[1]) => api.logs(deploymentKey, p),
     [deploymentKey],
   );
+  const fetchStreams = useCallback((fn?: string) => api.logStreams(deploymentKey, fn), [deploymentKey]);
+  const deleteStreams = useCallback((body: LogDeleteRequest) => api.deleteLogs(deploymentKey, body), [deploymentKey]);
   if (!live)
     return (
       <EmptyState title="Live data needs the dashboard server" icon="⚡">
-        Run <code>pskit dashboard --serve</code> to tail logs from a running on-premises host.
+        Run <code>pskit dashboard --serve</code> to tail, list and delete logs (on-premises host, AWS CloudWatch, Google
+        Cloud Logging, Azure Log Analytics).
       </EmptyState>
     );
-  return <LogViewer key={deploymentKey} fetchLogs={fetchLogs} functions={(deployment.functions || []).map((f) => f.name)} />;
+  const functions = (deployment.functions || []).map((f) => f.name);
+  return (
+    <div className="stack">
+      <div className="toolbar">
+        <button type="button" className={view === "tail" ? "btn btn-primary" : "btn"} onClick={() => setView("tail")}>
+          Live tail
+        </button>
+        <button type="button" className={view === "streams" ? "btn btn-primary" : "btn"} onClick={() => setView("streams")}>
+          Log streams
+        </button>
+      </div>
+      {view === "tail" ? (
+        <LogViewer key={`${deploymentKey}-${generation}`} fetchLogs={fetchLogs} functions={functions} />
+      ) : (
+        <LogStreams
+          key={deploymentKey}
+          fetchStreams={fetchStreams}
+          deleteStreams={deleteStreams}
+          functions={functions}
+          onDeleted={() => setGeneration((g) => g + 1)}
+        />
+      )}
+    </div>
+  );
 }
 
 export function ResourcesTab({ deployment }: { deployment: Deployment }) {

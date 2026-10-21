@@ -190,6 +190,7 @@ def validate(
             for name, fn in sorted(project.config.functions.items())
         ]
         result["engines"] = dict(project.engines)
+        result["disabled"] = project.config.disabled
         result["provider"] = project.config.provider.name
         result["stage"] = project.config.provider.stage
         result["ok"] = not any(i["level"] == "error" for i in result["issues"])

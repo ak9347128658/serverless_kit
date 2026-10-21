@@ -121,6 +121,42 @@ def project_yaml(name: str) -> str:
             }
         },
     }
+    if name == "azure":
+        # Native workflows are opt-in on Azure (Logic Apps): validate both engines.
+        config["workflows"]["native-flow"] = {
+            "engine": "native",
+            "start_at": "A",
+            "states": {
+                "A": {
+                    "type": "task",
+                    "function": "step",
+                    "retry": [{"errors": ["*"], "max_attempts": 2}],
+                    "catch": [{"errors": ["*"], "next": "Failed"}],
+                    "next": "B",
+                },
+                "B": {
+                    "type": "choice",
+                    "choices": [{"variable": "$.ok", "equals": True, "next": "Fan"}],
+                    "default": "C",
+                },
+                "Fan": {
+                    "type": "parallel",
+                    "branches": [{"start_at": "P", "states": {"P": {"type": "pass", "result": {"x": 1}}}}],
+                    "result_path": "$.fan",
+                    "next": "Each",
+                },
+                "Each": {
+                    "type": "map",
+                    "items_path": "$.items",
+                    "iterator": {"start_at": "I", "states": {"I": {"type": "task", "function": "step"}}},
+                    "result_path": "$.out",
+                    "next": "C",
+                },
+                "C": {"type": "wait", "seconds": 1, "next": "Done"},
+                "Done": {"type": "succeed"},
+                "Failed": {"type": "fail", "error": "Boom", "cause": "task failed"},
+            },
+        }
     return json.dumps(config, indent=2)  # JSON is valid YAML
 
 

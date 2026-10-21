@@ -331,8 +331,11 @@ def test_cli_workflow_lifecycle_and_logs(live_host):
     assert result.exit_code == 0 and "[step]" in result.output
 
 
-def test_cli_logs_requires_onprem(make_project, monkeypatch, tmp_path):
+def test_cli_logs_cloud_without_sdk(make_project, monkeypatch, tmp_path):
+    from py_serverless_kit.core import cloud_logs
     from py_serverless_kit.core.deployer import Deployer
+
+    monkeypatch.setattr(cloud_logs, "_installed", lambda module: False)
 
     project = make_project("service: xx\nprovider: {name: aws}\nfunctions: {a: {handler: app.handlers.hello}}\n")
     monkeypatch.chdir(tmp_path)
@@ -340,6 +343,6 @@ def test_cli_logs_requires_onprem(make_project, monkeypatch, tmp_path):
     assert result.exit_code == 1 and "not deployed yet" in result.output
     Deployer(project, echo=lambda _m: None).save_record(build_record(project))
     result = _cli("logs")
-    assert result.exit_code == 1 and "on-premises host" in result.output
+    assert result.exit_code == 1 and "boto3" in result.output
     result = _cli("workflow", "executions")
     assert result.exit_code == 1 and "no workflows" in result.output

@@ -31,6 +31,7 @@ LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 SOURCES = ("function", "host", "stdout", "stderr", "invocation")
 _RESERVED = set(vars(logging.LogRecord("", 0, "", 0, "", (), None))) | {"message", "asctime"}
 _MAX_MESSAGE = 16 * 1024
+HOST_STREAM = "__host__"  # entries not tied to a function
 _STATE = threading.local()
 
 
@@ -163,6 +164,55 @@ class LogBuffer:
             if isinstance(entry, dict) and isinstance(entry.get("seq"), int):
                 self._entries.append(entry)
                 self._seq = max(self._seq, entry["seq"])
+
+    def clear(self, function: Optional[str] = None) -> int:
+        """Drop entries (all, those of ``function``, or host entries for ``__host__``) from memory and disk.
+
+        ``seq`` keeps counting up, so live tails simply see no new entries.
+        """
+        with self._lock:
+            before = len(self._entries)
+            if function == HOST_STREAM:
+                kept = [e for e in self._entries if e.get("function")]
+            elif function:
+                kept = [e for e in self._entries if e.get("function") != function]
+            else:
+                kept = []
+            self._entries.clear()
+            self._entries.extend(kept)
+            removed = before - len(kept)
+            if self.path is not None:
+                if self._file is not None:
+                    self._file.close()
+                    self._file = None
+                for index in range(1, self.backups + 1):
+                    older = self.path.with_name(f"{self.path.name}.{index}")
+                    try:
+                        if older.exists():
+                            older.unlink()
+                    except OSError:
+                        pass
+                try:
+                    with open(self.path, "wb") as fh:
+                        for entry in kept:
+                            fh.write((json.dumps(entry, default=str, separators=(",", ":")) + "\n").encode("utf-8"))
+                except OSError:
+                    pass
+            return removed
+
+    def functions(self) -> List[Dict[str, Any]]:
+        """One summary per function (``None`` = host) found in the buffer."""
+        with self._lock:
+            snapshot = list(self._entries)
+        out: Dict[Any, Dict[str, Any]] = {}
+        for entry in snapshot:
+            key = entry.get("function")
+            item = out.get(key)
+            if item is None:
+                item = out[key] = {"function": key, "first": entry.get("ts"), "last": entry.get("ts"), "count": 0}
+            item["last"] = entry.get("ts")
+            item["count"] += 1
+        return sorted(out.values(), key=lambda i: (i["function"] is None, str(i["function"] or "")))
 
     def close(self) -> None:
         with self._lock:

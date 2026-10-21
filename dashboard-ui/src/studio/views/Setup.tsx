@@ -1,0 +1,391 @@
+import { useCallback, useEffect, useState } from "react";
+import { ErrorBanner, Spinner } from "../../components/Feedback";
+import { api, errorMessage } from "../api";
+import { JobConsole } from "../components/Console";
+import { useToast } from "../components/Feedback";
+import { ComboInput, FieldForm, FormRow, Section, Segmented, TextInput } from "../components/Forms";
+import { PageHeader } from "../components/Misc";
+import { useJob } from "../jobs";
+import { href } from "../route";
+import { useStudio } from "../store";
+import type { EnvHint, JsonObject, SetupCheck, SetupResult } from "../types";
+import { asObject, getIn, str } from "../util";
+
+type Os = "windows" | "macos" | "linux";
+const OS_LABEL: Record<Os, string> = { windows: "Windows", macos: "macOS", linux: "Linux" };
+const STATUS: Record<string, { icon: string; tone: string; label: string }> = {
+  ok: { icon: "✓", tone: "ok", label: "ready" },
+  missing: { icon: "✗", tone: "err", label: "missing" },
+  warning: { icon: "!", tone: "warn", label: "check" },
+  info: { icon: "i", tone: "info", label: "optional" },
+};
+
+const ACTION_LABEL: Record<string, string> = {
+  "ssh-test": "Test connection",
+  "aws-profile": "Add credentials",
+  env: "Set variables",
+  "az-login": "Sign in (az login)",
+  "gcloud-login": "Sign in (gcloud)",
+  "gcloud-adc": "Sign in (gcloud ADC)",
+  "aws-sso-login": "Sign in (aws sso)",
+};
+
+function guessOs(): Os {
+  const ua = navigator.userAgent;
+  if (/Windows/i.test(ua)) return "windows";
+  if (/Mac/i.test(ua)) return "macos";
+  return "linux";
+}
+
+function copy(text: string, toast: ReturnType<typeof useToast>) {
+  navigator.clipboard.writeText(text).then(
+    () => toast("Copied", "ok"),
+    () => toast("Copy failed: select the text instead", "warn"),
+  );
+}
+
+/** Prerequisites and credentials for the target provider, with install steps and ways to fix them in place. */
+export function SetupView() {
+  const { state, meta, draft } = useStudio();
+  const toast = useToast();
+  const target = state.target?.provider || str(getIn(draft, ["provider", "name"]), "aws");
+  const [provider, setProvider] = useState(target);
+  const [result, setResult] = useState<SetupResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [os, setOs] = useState<Os>(guessOs);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const job = useJob(jobId);
+
+  useEffect(() => setProvider(target), [target]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    api
+      .setup(provider)
+      .then((r) => {
+        setResult(r);
+        if (r.platform) setOs(r.platform);
+      })
+      .catch((exc: unknown) => setError(errorMessage(exc)))
+      .finally(() => setLoading(false));
+  }, [provider]);
+  useEffect(load, [load]);
+  // A login or SSH test finished: check again.
+  useEffect(() => {
+    if (job.status === "succeeded") load();
+  }, [job.status, load]);
+
+  const deploy = (() => {
+    const raw = asObject(getIn(draft, ["provider", "options"])).deploy;
+    return typeof raw === "string" ? { method: raw } : asObject(raw);
+  })();
+
+  const runAction = (action: string) => {
+    // Some fixes are forms on this page rather than commands.
+    const form = action === "aws-profile" ? "setup-aws" : action === "env" ? "setup-env" : null;
+    if (form) {
+      const el = document.getElementById(form);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        const toggle = el.querySelector<HTMLButtonElement>(".section-toggle[aria-expanded='false']");
+        toggle?.click();
+      }
+      return;
+    }
+    const call = action === "ssh-test" ? api.sshTest(deploy) : api.login(action);
+    call.then(
+      (r) => setJobId(r.job_id),
+      (exc: unknown) => toast(errorMessage(exc), "err"),
+    );
+  };
+
+  const checks = result?.checks || [];
+  const missing = checks.filter((c) => c.status === "missing").length;
+  const warnings = checks.filter((c) => c.status === "warning").length;
+  const name = meta.providers.find((p) => p.name === provider)?.display_name || provider;
+
+  return (
+    <div className="page">
+      <PageHeader
+        title="Setup & credentials"
+        subtitle="What this machine needs to deploy: tools, credentials and provider settings. Everything runs where pskit studio runs."
+        actions={
+          <button type="button" className="btn" onClick={load} disabled={loading}>
+            {loading ? "Checking…" : "Check again"}
+          </button>
+        }
+      />
+      <div className="row-gap wrap setup-bar">
+        <label className="row-gap">
+          <span className="muted small">Provider</span>
+          <select className="select" value={provider} onChange={(e) => setProvider(e.target.value)}>
+            {meta.providers.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.display_name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <Segmented label="Operating system" value={os} onChange={setOs} options={(Object.keys(OS_LABEL) as Os[]).map((o) => ({ value: o, label: OS_LABEL[o] }))} />
+        {result && (
+          <span className={`badge badge-${missing ? "err" : warnings ? "warn" : "ok"}`}>
+            {missing ? `${missing} missing` : warnings ? `${warnings} to check` : `ready to deploy to ${name}`}
+          </span>
+        )}
+      </div>
+      {error && <ErrorBanner message={error} onRetry={load} />}
+      {loading && !result && <Spinner label="Checking this machine…" />}
+      {jobId && (
+        <Section title={`Running: ${job.command || "command"}`} hint="the output of the last login / test">
+          <JobConsole job={job} onCancel={() => void api.cancelJob(jobId).catch(() => undefined)} />
+        </Section>
+      )}
+      {checks.length > 0 && (
+        <Section title="Checks" hint={`${checks.length} for ${name}`}>
+          <ul className="check-list">
+            {checks.map((c) => (
+              <CheckRow key={c.id} check={c} os={os} onAction={runAction} busy={job.status === "running"} />
+            ))}
+          </ul>
+        </Section>
+      )}
+      {provider === "aws" && (
+        <div id="setup-aws">
+          <AwsProfileForm regions={meta.providers.find((p) => p.name === "aws")?.regions || []} onSaved={load} />
+        </div>
+      )}
+      {result?.env && result.env.length > 0 && (
+        <div id="setup-env">
+          <EnvForm hints={result.env} onSaved={load} />
+        </div>
+      )}
+      {provider === "onprem" && <OnPremConnection />}
+    </div>
+  );
+}
+
+function CheckRow({ check, os, onAction, busy }: { check: SetupCheck; os: Os; onAction: (a: string) => void; busy: boolean }) {
+  const toast = useToast();
+  const s = STATUS[check.status] || STATUS.info;
+  const fix = check.fix;
+  const [open, setOpen] = useState(check.status === "missing");
+  const steps = fix?.steps?.[os] || [];
+  const hasFix = !!fix && (!!fix.summary || !!fix.links?.length || steps.length > 0 || !!fix.commands?.length || !!fix.action);
+  return (
+    <li className={`check-row check-${check.status}`}>
+      <div className="row-gap">
+        <span className={`check-icon badge badge-${s.tone}`} aria-label={s.label}>
+          {s.icon}
+        </span>
+        <div className="grow">
+          <b>{check.title}</b>
+          {check.detail && <div className="muted small">{check.detail}</div>}
+        </div>
+        {fix?.action && check.status !== "ok" && (
+          <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => onAction(fix.action as string)}>
+            {ACTION_LABEL[fix.action as string] || "Run"}
+          </button>
+        )}
+        {hasFix && (
+          <button type="button" className="btn btn-sm" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+            {open ? "Hide" : check.status === "ok" ? "Details" : "How to fix"}
+          </button>
+        )}
+      </div>
+      {open && fix && (
+        <div className="check-fix">
+          {fix.summary && <p>{fix.summary}</p>}
+          {fix.links && fix.links.length > 0 && (
+            <div className="chips">
+              {fix.links.map((l) => (
+                <a key={l.url} className="chip chip-btn" href={l.url} target="_blank" rel="noreferrer noopener">
+                  {l.label} ↗
+                </a>
+              ))}
+            </div>
+          )}
+          {steps.length > 0 && (
+            <ol className="steps">
+              {steps.map((st, i) => (
+                <li key={i}>{st}</li>
+              ))}
+            </ol>
+          )}
+          {!steps.length && fix.steps && Object.keys(fix.steps).length > 0 && (
+            <p className="muted small">No {OS_LABEL[os]}-specific steps; pick another operating system above.</p>
+          )}
+          {fix.commands && fix.commands.length > 0 && (
+            <div className="stack-xs">
+              {fix.commands.map((c) => (
+                <div key={c} className="cmd-row">
+                  <code className="mono pre-inline">{c}</code>
+                  <button type="button" className="btn btn-sm" onClick={() => copy(c, toast)}>
+                    Copy
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function AwsProfileForm({ regions, onSaved }: { regions: { id: string; label: string }[]; onSaved: () => void }) {
+  const toast = useToast();
+  const [profile, setProfile] = useState("default");
+  const [keyId, setKeyId] = useState("");
+  const [secret, setSecret] = useState("");
+  const [region, setRegion] = useState("us-east-1");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ok = /^[A-Za-z0-9_.-]{1,64}$/.test(profile) && keyId.trim().length >= 16 && secret.trim().length >= 16;
+  const submit = () => {
+    setBusy(true);
+    api
+      .awsProfile({ profile, access_key_id: keyId.trim(), secret_access_key: secret.trim(), region: region || undefined, session_token: token.trim() || undefined })
+      .then(
+        () => {
+          toast(`Saved AWS profile ${profile} in ~/.aws`, "ok");
+          setSecret("");
+          setToken("");
+          onSaved();
+        },
+        (exc: unknown) => toast(errorMessage(exc), "err"),
+      )
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Section title="AWS credentials (aws configure)" hint="~/.aws/credentials" defaultOpen={false}>
+      <p className="muted small">
+        Writes the same files as <code className="mono">aws configure</code>, on this machine. Other profiles are kept. Use the
+        profile with <code className="mono">AWS_PROFILE</code> below, or name it <b>default</b>.
+      </p>
+      <div className="form">
+        <FormRow label="Profile" required>
+          <ComboInput value={profile} options={["default", "pskit", "dev", "prod"]} onChange={setProfile} />
+        </FormRow>
+        <FormRow label="Access key ID" required>
+          <TextInput mono value={keyId} placeholder="AKIA…" onChange={setKeyId} />
+        </FormRow>
+        <FormRow label="Secret access key" required>
+          <TextInput mono type="password" value={secret} onChange={setSecret} />
+        </FormRow>
+        <FormRow label="Default region">
+          <ComboInput value={region} options={regions.map((r) => ({ value: r.id, label: r.label }))} onChange={setRegion} emptyLabel="none" />
+        </FormRow>
+        <FormRow label="Session token" help="Only for temporary credentials (STS / SSO).">
+          <TextInput mono type="password" value={token} onChange={setToken} />
+        </FormRow>
+        <div>
+          <button type="button" className="btn btn-primary" disabled={!ok || busy} onClick={submit}>
+            {busy ? "Saving…" : "Save profile"}
+          </button>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+function EnvForm({ hints, onSaved }: { hints: EnvHint[]; onSaved: () => void }) {
+  return (
+    <Section title="Environment variables" hint="read by Terraform and the provider" defaultOpen={hints.some((h) => !h.set)}>
+      <p className="muted small">
+        <b>Set for this session</b> applies to deploys started from this studio until it stops; nothing is written to disk. To keep
+        a value, set it in your shell profile (<code className="mono">export NAME=value</code>, or{" "}
+        <code className="mono">setx NAME value</code> on Windows) before starting <code className="mono">pskit studio</code>.
+      </p>
+      <ul className="check-list">
+        {hints.map((h) => (
+          <EnvRow key={h.name} hint={h} onSaved={onSaved} />
+        ))}
+      </ul>
+    </Section>
+  );
+}
+
+function EnvRow({ hint, onSaved }: { hint: EnvHint; onSaved: () => void }) {
+  const toast = useToast();
+  const [value, setValue] = useState(hint.value || "");
+  const save = (v: string) =>
+    api.setEnv(hint.name, v).then(
+      (r) => {
+        toast(r.set ? `${hint.name} set for this session` : `${hint.name} cleared`, "ok");
+        if (hint.secret) setValue("");
+        onSaved();
+      },
+      (exc: unknown) => toast(errorMessage(exc), "err"),
+    );
+  return (
+    <li className="check-row">
+      <div className="row-gap wrap">
+        <span className={`check-icon badge badge-${hint.set ? "ok" : "off"}`}>{hint.set ? "✓" : "–"}</span>
+        <div className="grow">
+          <code className="mono">{hint.name}</code>
+          {hint.help && <div className="muted small">{hint.help}</div>}
+        </div>
+        <div className="row-gap env-input">
+          <TextInput mono type={hint.secret ? "password" : "text"} value={value} placeholder={hint.set && hint.secret ? "•••• (set)" : "value"} onChange={setValue} />
+          <button type="button" className="btn btn-sm" disabled={!value} onClick={() => void save(value)}>
+            Set for this session
+          </button>
+          {hint.set && (
+            <button type="button" className="btn btn-sm btn-ghost" onClick={() => void save("")}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+/** The SSH / Docker connection of an on-premises deploy, editable here as well as on Overview. */
+function OnPremConnection() {
+  const { draft, meta, edit, issuesAt } = useStudio();
+  const options = asObject(getIn(draft, ["provider", "options"]));
+  const raw = options.deploy;
+  const deploy: JsonObject = typeof raw === "string" ? { method: raw } : asObject(raw);
+  const method = str(deploy.method, "local");
+  const fields = (meta.onprem.deploy_fields[method] || []).filter((f) => ["host", "user", "port", "pem", "known_hosts", "sudo", "docker_host"].includes(f.key));
+  const setDeploy = (next: JsonObject) => {
+    const clean: JsonObject = {};
+    for (const [k, v] of Object.entries(next)) if (v !== undefined && v !== "" && v !== null) clean[k] = v;
+    const keys = Object.keys(clean);
+    if (!keys.length || (keys.length === 1 && keys[0] === "method")) edit(["provider", "options", "deploy"], !clean.method || clean.method === "local" ? undefined : clean.method);
+    else edit(["provider", "options", "deploy"], clean);
+  };
+  return (
+    <Section title="On-premises connection" hint="provider.options.deploy">
+      <FormRow label="Where the host runs">
+        <Segmented
+          label="Deploy method"
+          value={method}
+          onChange={(m) => setDeploy({ ...deploy, method: m })}
+          options={(meta.onprem.deploy_methods.length ? meta.onprem.deploy_methods : ["local", "ssh", "docker"]).map((m) => ({
+            value: m,
+            label: m === "local" ? "This machine" : m === "ssh" ? "SSH server" : "Docker",
+          }))}
+        />
+      </FormRow>
+      {method === "local" ? (
+        <p className="muted small">The host runs on this machine: no SSH or Docker needed.</p>
+      ) : (
+        <FieldForm
+          fields={fields}
+          value={deploy}
+          idPrefix="setup-dep"
+          errorsFor={(k) => issuesAt(["provider", "options", "deploy", k]).map((i) => i.message)}
+          onChange={(k, v) => setDeploy({ ...deploy, [k]: v === undefined ? "" : v, method })}
+        />
+      )}
+      <p className="muted small">
+        More deploy settings (remote path, install mode, image…) are on <a href={href("overview")}>Overview &amp; provider</a>. Save
+        pskit.yml after changing them.
+      </p>
+    </Section>
+  );
+}

@@ -11,7 +11,10 @@ generated ``function_app.py`` that registers a decorated wrapper per trigger:
 * ``topic``    -> Service Bus topic + one subscription per function.
 
 Dependencies are installed by the remote Oryx build (``requirements.txt``).
-Workflows run on the embedded engine (an ``<name>-orchestrator`` HTTP function).
+Workflows run on the embedded engine (an ``<name>-orchestrator`` HTTP function) by
+default. ``engine: native`` compiles them to an Azure Logic App (Consumption) with an
+HTTP request trigger (see :mod:`py_serverless_kit.workflows.azure_logic`); its task
+states call ``/_pskit/invoke/<function>`` on the Function App with the host's function key.
 
 ``azurerm`` >= 4 requires a subscription id: set ``provider.options.subscription_id``
 or the ``ARM_SUBSCRIPTION_ID`` environment variable.
@@ -28,9 +31,23 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from ..config.schema import ServiceConfig
+from ..config.schema import ServiceConfig, WorkflowConfig
+from ..workflows import definition_dict
+from ..workflows.azure_logic import HTTP_TIMEOUT, LogicAppsError, compile_logic_app
 from . import schedule as sched
-from .base import HTTP, QUEUE, SCHEDULE, STORAGE, TOPIC, Issue, Provider, RenderContext, stable_suffix
+from .base import (
+    HTTP,
+    QUEUE,
+    SCHEDULE,
+    STORAGE,
+    TOPIC,
+    WORKFLOW_NATIVE,
+    Issue,
+    Provider,
+    ProviderError,
+    RenderContext,
+    stable_suffix,
+)
 from .terraform_doc import TerraformDoc, escape, ref, tf_id
 
 APP = "azurerm_linux_function_app"
@@ -62,7 +79,7 @@ class AzureProvider(Provider):
     terraform_version = ">= 4.9"
     terraform_local_name = "azurerm"
     default_region = "eastus"
-    capabilities = frozenset({HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC})
+    capabilities = frozenset({HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC, WORKFLOW_NATIVE})
     max_name_length = 60
     name_pattern = r"[^a-z0-9-]"
     runtimes = {f"python3.{v}": f"3.{v}" for v in (9, 10, 11, 12)}
@@ -70,7 +87,28 @@ class AzureProvider(Provider):
     extra_requirements = ["azure-functions"]
     max_timeout = 600
     standalone_resources = True
-    notes = "Linux Consumption Function App, Python v2 model. Workflows use the embedded engine."
+    notes = (
+        "Linux Consumption Function App, Python v2 model. Workflows use the embedded engine; "
+        "`engine: native` compiles them to Azure Logic Apps (opt-in)."
+    )
+
+    # ------------------------------------------------------------------ workflows
+    def workflow_engine(self, wf: WorkflowConfig) -> str:
+        # Logic Apps are opt-in: `auto` keeps the embedded engine so existing projects don't change.
+        if wf.engine == "auto":
+            return "embedded"
+        return super().workflow_engine(wf)
+
+    def native_tasks(self, config: ServiceConfig) -> List[str]:
+        """Functions called by Logic Apps task states (they need the invoke route)."""
+        found: set = set()
+        for wf in config.workflows.values():
+            try:
+                if self.workflow_engine(wf) == "native":
+                    found.update(wf.task_functions())
+            except ProviderError:
+                continue
+        return sorted(found)
 
     # ------------------------------------------------------------------ naming
     def app_name(self, service: str, stage: str) -> str:
@@ -100,6 +138,7 @@ class AzureProvider(Provider):
             used.add(candidate.lower())
             return candidate
 
+        tasks = set(self.native_tasks(config))
         for name, fn in sorted(config.functions.items()):
             for i, ev in enumerate(fn.events):
                 c = ev.config
@@ -139,8 +178,8 @@ class AzureProvider(Provider):
                     )
                     lines.append(f"def {ident}(msg: func.ServiceBusMessage) -> None:")
                     lines.append(f"    _pskit.service_bus(msg, {name!r})")
-            if not fn.events:
-                # Invoke-only functions (workflow tasks, invoke()) get a private POST route.
+            if not fn.events or name in tasks:
+                # Invoke-only functions and Logic Apps task functions get a private POST route.
                 ident = unique(f"{name}_invoke")
                 lines.append("")
                 lines.append(f'@app.function_name(name="{ident}")')
@@ -241,6 +280,37 @@ class AzureProvider(Provider):
                     issues.append(
                         Issue("warning", "topic.filter is not applied on Azure Service Bus subscriptions", where)
                     )
+        issues.extend(self._workflow_validation(config))
+        return issues
+
+    def _workflow_validation(self, config: ServiceConfig) -> List[Issue]:
+        issues: List[Issue] = []
+        for name, wf in sorted(config.workflows.items()):
+            try:
+                if self.workflow_engine(wf) != "native":
+                    continue
+            except ProviderError:
+                continue  # reported by Provider.validate
+            where = f"workflows.{name}"
+            try:
+                _, warnings = compile_logic_app(
+                    definition_dict(wf), lambda f: f"https://example/{f}", name, key="key", timeout=wf.timeout
+                )
+            except LogicAppsError as exc:
+                issues.append(Issue("error", str(exc), where))
+                continue
+            issues.extend(Issue("warning", w, where) for w in warnings)
+            for fn_name in sorted(set(wf.task_functions())):
+                fn = config.functions.get(fn_name)
+                if fn is not None and config.timeout_of(fn) > HTTP_TIMEOUT:
+                    issues.append(
+                        Issue(
+                            "warning",
+                            f"task function {fn_name!r} may run {config.timeout_of(fn)}s but Logic Apps HTTP calls "
+                            f"time out after {HTTP_TIMEOUT}s",
+                            where,
+                        )
+                    )
         return issues
 
     # ------------------------------------------------------------------ render
@@ -298,6 +368,12 @@ class AzureProvider(Provider):
                     "retention_in_days": max(30, cfg.provider.log_retention_days or 30),
                     "tags": tags,
                 },
+            )
+            # Workspace (customer) GUID: `pskit logs` / the dashboard query Function App logs with it.
+            doc.output(
+                "log_analytics_workspace_id",
+                ref(law, "workspace_id"),
+                description="Log Analytics workspace GUID holding the Function App logs",
             )
             ai = doc.resource(
                 "azurerm_application_insights",
@@ -411,12 +487,71 @@ class AzureProvider(Provider):
                 out["base_url"] = host
                 out["url"] = host + "/" + azure_route(http_events[0].path)
             fn_out[name] = out
-        wf_out = {
-            name: {"id": f"{app_name}/{name}-orchestrator", "url": host + f"/workflows/{name}"}
-            for name in sorted(cfg.workflows)
-        }
+        wf_out: Dict[str, Any] = {}
+        for name in sorted(cfg.workflows):
+            if ctx.workflow_engines.get(name) == "native":
+                continue
+            wf_out[name] = {"id": f"{app_name}/{name}-orchestrator", "url": host + f"/workflows/{name}"}
+        wf_out.update(self._logic_apps(doc, ctx, rg_name, app, host))
         doc.output(
             "pskit",
             {"functions": fn_out, "workflows": wf_out, "endpoint": host},
             description="py-serverless-kit deployment summary",
         )
+
+    # ------------------------------------------------------------------ Logic Apps
+    def _logic_apps(self, doc: TerraformDoc, ctx: RenderContext, rg_name: str, app: str, host: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        native = [(n, wf) for n, wf in sorted(ctx.config.workflows.items()) if ctx.workflow_engines.get(n) == "native"]
+        if not native:
+            return out
+        keys = doc.data(
+            "azurerm_function_app_host_keys", "keys", {"name": ref(app, "name"), "resource_group_name": rg_name}
+        )
+        url_token, key_token = "__PSKIT_HOST__", "__PSKIT_FUNCTION_KEY__"
+        for name, wf in native:
+            actions, warnings = compile_logic_app(
+                definition_dict(wf),
+                lambda f: f"{url_token}/_pskit/invoke/{f}",
+                name,
+                key=key_token,
+                timeout=wf.timeout,
+                sync=bool(wf.options.get("sync", True)),
+            )
+            doc.warnings.extend(warnings)
+            workflow = doc.resource(
+                "azurerm_logic_app_workflow",
+                f"wf-{name}",
+                {
+                    "name": ctx.physical_name(name),
+                    "location": ctx.region,
+                    "resource_group_name": rg_name,
+                    "tags": ctx.tags(),
+                },
+            )
+            trigger = doc.resource(
+                "azurerm_logic_app_trigger_http_request",
+                f"wf-{name}-trigger",
+                {"name": "manual", "logic_app_id": ref(workflow, "id"), "method": "POST", "schema": "{}"},
+            )
+            # Each action resource rewrites the workflow definition: create them one at a time, in run order.
+            previous = trigger
+            for i, (action_name, action) in enumerate(actions):
+                text = escape(json.dumps(action, sort_keys=True))
+                text = text.replace(url_token, host).replace(key_token, ref(keys, "default_function_key"))
+                previous = doc.resource(
+                    "azurerm_logic_app_action_custom",
+                    f"wf-{name}-{i:03d}-{action_name}",
+                    {
+                        "name": action_name,
+                        "logic_app_id": ref(workflow, "id"),
+                        "body": text,
+                        "depends_on": [previous],
+                    },
+                )
+            out[name] = {
+                "id": ref(workflow, "id"),
+                "url": ref(trigger, "callback_url"),
+                "console": "https://portal.azure.com/#resource" + ref(workflow, "id") + "/logicApp",
+            }
+        return out

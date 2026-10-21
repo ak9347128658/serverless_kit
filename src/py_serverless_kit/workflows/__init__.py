@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 from ..config.schema import WorkflowDefinition
 
-_CONFIG_ONLY = {"description", "engine", "timeout", "options"}
+_CONFIG_ONLY = {"description", "enabled", "engine", "timeout", "options"}
 
 
 def definition_dict(wf: WorkflowDefinition) -> Dict[str, Any]:

@@ -6,7 +6,7 @@ Run `pskit providers` (or `pskit providers --json`) to print this matrix from th
 |---|---|---|---|---|---|---|---|---|---|
 | [`aws`](#aws-aws-lambda) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | native | 3.9–3.13 | 900 s |
 | [`gcp`](#gcp-google-cloud-functions-2nd-gen) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | native | 3.9–3.13 | 3600 s (540 s event) |
-| [`azure`](#azure-azure-functions) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | embedded | 3.9–3.12 | 600 s |
+| [`azure`](#azure-azure-functions) | stable | ✓ | ✓ | ✓ | ✓ | ✓ | embedded (native opt-in) | 3.9–3.12 | 600 s |
 | [`alibaba`](#alibaba-function-compute-30) | beta | ✓ | ✓ | – | ✓ | ✓ | embedded | 3.9, 3.10, 3.12 | 3600 s |
 | [`tencent`](#tencent-serverless-cloud-function-scf) | beta | ✓ | ✓ | – | ✓ | – | embedded | 3.9, 3.10 | 900 s |
 | [`huawei`](#huawei-functiongraph) | beta | ✓ | ✓ | – | ✓ | ✓ | embedded | 3.9, 3.10, 3.12 | 900 s |
@@ -138,10 +138,13 @@ One **Linux Consumption Function App** hosts every function of a service, using 
 | queue | Storage Queue in the app's storage account (poison queue `<name>-poison`) |
 | storage | Blob container + blob trigger (created/updated only) |
 | topic | Service Bus namespace/topic + one subscription per function |
+| workflows | embedded orchestrator function by default; `engine: native` → **Azure Logic App** (Consumption) |
 
-**Resources:** `azurerm_resource_group`, `azurerm_storage_account`, `azurerm_service_plan`, `azurerm_linux_function_app`, `azurerm_application_insights` + `azurerm_log_analytics_workspace`, `azurerm_storage_queue`, `azurerm_storage_container`, `azurerm_servicebus_*`.
+**Resources:** `azurerm_resource_group`, `azurerm_storage_account`, `azurerm_service_plan`, `azurerm_linux_function_app`, `azurerm_application_insights` + `azurerm_log_analytics_workspace`, `azurerm_storage_queue`, `azurerm_storage_container`, `azurerm_servicebus_*`; for native workflows `azurerm_logic_app_workflow`, `azurerm_logic_app_trigger_http_request`, `azurerm_logic_app_action_custom` and the `azurerm_function_app_host_keys` data source.
 
-**Limits:** `auth: iam`/`jwt` aren't supported. `environment` is app-wide (warning on conflicting values). Timers ignore `timezone`. Blob `deleted` events aren't available. `fifo`, `dead_letter` and `topic.filter` aren't applied. Invoke-only functions get `POST /_pskit/invoke/<name>` (function key).
+**Native workflows (Logic Apps, opt-in).** `engine: auto` keeps the embedded engine on Azure; set `engine: native` on a workflow to deploy it as a Logic App with an HTTP request trigger. Start it with `POST` to the trigger's callback URL (`pskit info` shows it as the workflow `url`; it contains a SAS signature, so treat it like a secret). Task states call `POST /_pskit/invoke/<function>` on the Function App with the host's default function key, so every task function gets that route. See [workflows.md](workflows.md#compiler-notes-and-limits) for the limits.
+
+**Limits:** `auth: iam`/`jwt` aren't supported. `environment` is app-wide (warning on conflicting values). Timers ignore `timezone`. Blob `deleted` events aren't available. `fifo`, `dead_letter` and `topic.filter` aren't applied. Invoke-only functions (and task functions of native workflows) get `POST /_pskit/invoke/<name>` (function key).
 
 ---
 
@@ -412,6 +415,8 @@ Publish from outside the process:
 | `POST /__pskit/workflows/<name>` | start the embedded workflow: `202 {"execution_id", ...}`. `?wait=true` returns the result |
 | `GET /__pskit/executions`, `GET /__pskit/executions/<id>`, `POST /__pskit/executions/<id>/cancel` | list, inspect and cancel runs ([workflow executions](workflow-executions.md)) |
 | `GET /__pskit/logs` | captured logs ([below](#logs-and-stats)) |
+| `GET /__pskit/logs/streams` | entry count and first/last time per function (`null` = host notes) |
+| `DELETE /__pskit/logs[?function=]` | clear entries: all, one function's, or `function=__host__` for host notes. Also rewrites `host.jsonl` |
 | `GET /__pskit/stats` | invocation counters per function and queue depths |
 
 From a handler in that process (`PSKIT_ONPREM_ROOT` is set), call `submit_queue`, `submit_topic`, `put_object` or `delete_object` in `py_serverless_kit.runtime.onprem_host`.
@@ -434,6 +439,7 @@ pskit logs                          # newest 100 entries
 pskit logs -f --function worker     # follow one function
 pskit logs --level error --source invocation -n 500
 pskit logs -q timeout --json        # one JSON object per line
+pskit logs --delete worker --yes    # clear one function's entries
 ```
 
 `GET /__pskit/logs` (admin token when set):

@@ -1,10 +1,16 @@
+import { useState } from "react";
+import { api, errorMessage } from "../api";
+import { compatProblems, setEnabledOn, skipTriggersOn } from "../compat";
+import { JobConsole } from "../components/Console";
 import { useConfirm, useToast } from "../components/Feedback";
-import { EnumSelect, FieldForm, FormRow, KeyValueEditor, NumberInput, Section, Segmented, TextInput } from "../components/Forms";
+import { ComboInput, EnumSelect, FieldForm, FormRow, KeyValueEditor, Section, Segmented, TextInput } from "../components/Forms";
+import { useJob } from "../jobs";
+import { href } from "../route";
 import { InlineIssues, PageHeader } from "../components/Misc";
 import { capabilityLabel, ProviderCards } from "../components/ProviderCard";
 import { useStudio } from "../store";
 import type { Field, Json, JsonObject } from "../types";
-import { asArray, asObject, getIn, isObject, normalizeEvent, SERVICE_RE, setIn, str } from "../util";
+import { asObject, getIn, isObject, SERVICE_RE, setIn, str } from "../util";
 
 const PACKAGE_FIELDS: Field[] = [
   { key: "source", label: "Source directory", type: "string", default: ".", help: "Folder bundled into the deployment, relative to pskit.yml." },
@@ -12,6 +18,22 @@ const PACKAGE_FIELDS: Field[] = [
   { key: "exclude", label: "Exclude globs", type: "list", help: "e.g. tests/**, *.md" },
   { key: "vendor", label: "Vendor dependencies", type: "bool", help: "Force (on) or skip (off) pip install into the bundle. Default: provider decides." },
 ];
+
+export const MEMORY = [128, 256, 512, 1024, 1536, 2048, 3008, 4096, 8192, 10240];
+
+export function memoryLabel(mb: number): string {
+  return mb >= 1024 && mb % 512 === 0 ? `${mb / 1024} GB` : `${mb} MB`;
+}
+
+export function timeoutChoices(max?: number): number[] {
+  return [3, 10, 30, 60, 120, 300, 600, 900, 1800, 3600].filter((s) => !max || s <= max);
+}
+
+export function durationLabel(seconds: number): string {
+  if (seconds < 60 || seconds % 60) return `${seconds} s`;
+  if (seconds < 3600 || seconds % 3600) return `${seconds / 60} min`;
+  return `${seconds / 3600} h`;
+}
 
 const ONPREM_SPECIAL = new Set(["deploy", "services", "execution_retention", "workflow_workers", "log_buffer", "log_level", "capture_output"]);
 
@@ -27,31 +49,29 @@ export function OverviewView() {
     if (name === providerName) return;
     const next = meta.providers.find((p) => p.name === name);
     if (!next) return;
-    const lost: string[] = [];
-    for (const [fn, cfg] of Object.entries(asObject(draft.functions))) {
-      for (const ev of asArray(asObject(cfg).events)) {
-        const t = normalizeEvent(ev)?.type;
-        if (t && !next.capabilities.includes(t)) lost.push(`${fn}: ${capabilityLabel(t)} trigger`);
-      }
-    }
-    const nativeWf = Object.entries(asObject(draft.workflows)).filter(([, w]) => str(asObject(w).engine) === "native");
-    if (!next.capabilities.includes("workflow_native")) nativeWf.forEach(([w]) => lost.push(`workflow ${w}: engine native`));
+    const problems = compatProblems(draft, next);
+    const lost = problems.map((p) => p.message);
     const answer = await confirm({
       title: `Switch to ${next.display_name}?`,
       body: (
         <div className="stack">
           {lost.length ? (
             <>
-              <p>These won't validate on {next.display_name}:</p>
+              <p>These won't run on {next.display_name}:</p>
               <ul className="bullets">
                 {lost.slice(0, 12).map((l) => (
                   <li key={l}>{l}</li>
                 ))}
                 {lost.length > 12 && <li>…and {lost.length - 12} more</li>}
               </ul>
+              <p className="small">
+                <b>Switch &amp; disable them on {next.display_name}</b> keeps them for the other clouds: the unsupported triggers
+                and workflows are switched off only under <code className="mono">providers.{name}</code>. Turn them back on from
+                the Deploy page or the function itself.
+              </p>
             </>
           ) : (
-            <p>Every function and trigger is supported on {next.display_name}.</p>
+            <p>Every function, trigger and workflow is supported on {next.display_name}.</p>
           )}
           <p className="muted small">
             The current provider options move to <code className="mono">providers.{providerName}</code> so switching back
@@ -59,10 +79,17 @@ export function OverviewView() {
           </p>
         </div>
       ),
-      confirmLabel: "Switch provider",
+      confirmLabel: lost.length ? `Switch & disable on ${next.display_name}` : "Switch provider",
+      extra: lost.length ? [{ label: "Switch only (fix later)", value: "plain" }] : undefined,
     });
-    if (answer !== "confirm") return;
+    if (answer !== "confirm" && answer !== "plain") return;
     let raw: Json = draft;
+    if (answer === "confirm") {
+      for (const p of problems) {
+        if (p.kind === "trigger" && p.fn && p.types) raw = skipTriggersOn(raw as JsonObject, name, p.fn, p.types);
+        else if (p.wf) raw = setEnabledOn(raw as JsonObject, name, "workflows", p.wf, false);
+      }
+    }
     const oldOptions = prov.options;
     const oldRegion = prov.region;
     if (isObject(oldOptions) && Object.keys(oldOptions).length) raw = setIn(raw, ["providers", providerName, "options"], oldOptions);
@@ -105,13 +132,25 @@ export function OverviewView() {
       <Section title="Defaults for every function">
         <div className="form-grid">
           <FormRow label="Region" htmlFor="region" help={provider ? `default: ${provider.default_region || "none"}` : undefined} error={issues(["provider", "region"])}>
-            <TextInput id="region" mono value={str(prov.region)} placeholder={provider?.default_region} onChange={(v) => edit(["provider", "region"], v || undefined)} />
+            {provider?.regions && provider.regions.length ? (
+              <ComboInput
+                id="region"
+                value={str(prov.region)}
+                options={provider.regions.map((r) => ({ value: r.id, label: r.label }))}
+                emptyLabel={`default (${provider.default_region || "provider default"})`}
+                placeholder={provider.default_region}
+                onChange={(v) => edit(["provider", "region"], v || undefined)}
+              />
+            ) : (
+              <TextInput id="region" mono value={str(prov.region)} placeholder={provider?.default_region || "not used"} onChange={(v) => edit(["provider", "region"], v || undefined)} />
+            )}
           </FormRow>
           <FormRow label="Stage" htmlFor="stage" help="dev, staging, prod… (lowercase, ≤ 16)" error={issues(["provider", "stage"])}>
-            <TextInput
+            <ComboInput
               id="stage"
-              mono
               value={str(prov.stage)}
+              options={["dev", "test", "staging", "prod"]}
+              emptyLabel="default (dev)"
               placeholder="dev"
               onChange={(v) => edit(["provider", "stage"], v.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 16) || undefined)}
             />
@@ -127,10 +166,24 @@ export function OverviewView() {
             />
           </FormRow>
           <FormRow label="Memory (MB)" htmlFor="mem" help="64–32768" error={issues(["provider", "memory"])}>
-            <NumberInput id="mem" integer min={64} max={32768} value={typeof prov.memory === "number" ? prov.memory : undefined} placeholder="256" onChange={(v) => edit(["provider", "memory"], v)} />
+            <ComboInput
+              id="mem"
+              numeric
+              value={typeof prov.memory === "number" ? String(prov.memory) : ""}
+              options={MEMORY.map((m) => ({ value: String(m), label: memoryLabel(m) }))}
+              emptyLabel="default (256 MB)"
+              onChange={(v) => edit(["provider", "memory"], v === "" ? undefined : Number(v))}
+            />
           </FormRow>
           <FormRow label="Timeout (s)" htmlFor="timeout" help={provider ? `max ${provider.max_timeout}s on ${provider.display_name}` : undefined} error={issues(["provider", "timeout"])}>
-            <NumberInput id="timeout" integer min={1} max={provider?.max_timeout || 3600} value={typeof prov.timeout === "number" ? prov.timeout : undefined} placeholder="30" onChange={(v) => edit(["provider", "timeout"], v)} />
+            <ComboInput
+              id="timeout"
+              numeric
+              value={typeof prov.timeout === "number" ? String(prov.timeout) : ""}
+              options={timeoutChoices(provider?.max_timeout).map((s) => ({ value: String(s), label: durationLabel(s) }))}
+              emptyLabel="default (30 s)"
+              onChange={(v) => edit(["provider", "timeout"], v === "" ? undefined : Number(v))}
+            />
           </FormRow>
           <FormRow label="Architecture">
             <Segmented
@@ -144,7 +197,14 @@ export function OverviewView() {
             />
           </FormRow>
           <FormRow label="Log retention (days)" htmlFor="logret">
-            <NumberInput id="logret" integer min={1} value={typeof prov.log_retention_days === "number" ? prov.log_retention_days : undefined} placeholder="14" onChange={(v) => edit(["provider", "log_retention_days"], v)} />
+            <ComboInput
+              id="logret"
+              numeric
+              value={typeof prov.log_retention_days === "number" ? String(prov.log_retention_days) : ""}
+              options={[1, 3, 7, 14, 30, 60, 90, 180, 365].map((d) => ({ value: String(d), label: `${d} day${d === 1 ? "" : "s"}` }))}
+              emptyLabel="default (14 days)"
+              onChange={(v) => edit(["provider", "log_retention_days"], v === "" ? undefined : Number(v))}
+            />
           </FormRow>
         </div>
       </Section>
@@ -221,6 +281,11 @@ function OnPremSection() {
             onChange={(k, v) => setDeploy({ ...deploy, [k]: v === undefined ? "" : v, method })}
           />
         )}
+        {(method === "ssh" || (method === "docker" && !!str(deploy.host))) && <SshTest deploy={deploy} />}
+        <p className="muted small">
+          Missing ssh, scp or Docker on this machine? <a href={href("setup")}>Setup &amp; credentials</a> checks them and shows how
+          to install them.
+        </p>
       </Section>
       <Section title="Built-in services" hint="provider.options.services" defaultOpen={Object.keys(services).length > 0}>
         <p className="muted small">
@@ -263,5 +328,35 @@ function OnPremSection() {
         </Section>
       )}
     </>
+  );
+}
+
+function SshTest({ deploy }: { deploy: JsonObject }) {
+  const toast = useToast();
+  const [jobId, setJobId] = useState<string | null>(null);
+  const job = useJob(jobId);
+  const host = str(deploy.host);
+  const start = () =>
+    api.sshTest(deploy).then(
+      (r) => setJobId(r.job_id),
+      (exc: unknown) => toast(errorMessage(exc), "err"),
+    );
+  return (
+    <div className="stack-xs">
+      <div className="row-gap">
+        <button
+          type="button"
+          className="btn"
+          disabled={!host || job.status === "running"}
+          title={host ? `ssh ${str(deploy.user, "pskit")}@${host} echo pskit-ok` : "Set the SSH host first"}
+          onClick={() => void start()}
+        >
+          Test SSH connection
+        </button>
+        {job.status === "succeeded" && <span className="badge badge-ok">connected</span>}
+        {job.status === "failed" && <span className="badge badge-err">failed: see the log</span>}
+      </div>
+      {jobId && <JobConsole job={job} />}
+    </div>
   );
 }

@@ -104,6 +104,7 @@ functions:
 |---|---|---|
 | `handler` | string, required | — |
 | `description` | string | `""` |
+| `enabled` | bool | `true`; `false` keeps the function in the file but skips it on deploy (workflows take `enabled` too) |
 | `runtime`, `memory`, `timeout`, `architecture` | as provider | inherit from `provider` |
 | `environment`, `tags` | map | `{}` (merged over provider-level) |
 | `events` | list | `[]` (no events = invoke-only function) |
@@ -188,6 +189,22 @@ providers:
 ```
 
 The block for the active provider (`provider.name` or `--provider`) is deep-merged into the config. Inside a block, `ProviderConfig` keys (`region`, `stage`, `runtime`, `memory`, `timeout`, `architecture`, `environment`, `tags`, `iam`, `log_retention_days`, `options`, `state`, `terraform`) may be written directly as shorthand for `provider: {...}`.
+
+#### Switch something off on one cloud
+
+Not every cloud runs every trigger. Keep the function for the others and turn it (or one of its triggers) off only where it can't run:
+
+```yaml
+providers:
+  cloudflare:
+    functions:
+      thumbnails: {enabled: false}          # not deployed to Cloudflare
+      api: {events: [{http: GET /orders}]}  # on Cloudflare `api` gets only this trigger (lists replace)
+    workflows:
+      order-pipeline: {enabled: false}
+```
+
+Disabled functions and workflows are reported as warnings by `pskit validate`; a workflow that calls a disabled function is an error. Studio writes these overrides for you (Deploy page, provider switch, function wizard).
 
 ### `stages:`: per-stage overrides
 

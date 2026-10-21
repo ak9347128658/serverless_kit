@@ -11,10 +11,12 @@ import type { Meta, ProjectState } from "./types";
 import { asObject, str } from "./util";
 import { CodeView } from "./views/Code";
 import { DeployView } from "./views/Deploy";
+import { LogsView } from "./views/Logs";
 import { FunctionsView } from "./views/Functions";
 import { NewProject } from "./views/NewProject";
 import { OverviewView } from "./views/Overview";
 import { ResourcesView } from "./views/Resources";
+import { SetupView } from "./views/Setup";
 import { WorkflowsView } from "./views/Workflows";
 import { YamlView } from "./views/Yaml";
 
@@ -126,11 +128,13 @@ function TokenScreen() {
 
 const NAV: { view: View; label: string; icon: string }[] = [
   { view: "overview", label: "Overview & provider", icon: "◎" },
+  { view: "setup", label: "Setup & credentials", icon: "⚙" },
   { view: "functions", label: "Functions", icon: "λ" },
   { view: "workflows", label: "Workflows", icon: "⇉" },
   { view: "resources", label: "Resources", icon: "▤" },
   { view: "code", label: "Code", icon: "{}" },
   { view: "deploy", label: "Deploy", icon: "▲" },
+  { view: "logs", label: "Logs", icon: "☰" },
   { view: "yaml", label: "YAML", icon: "≡" },
 ];
 
@@ -213,6 +217,12 @@ function Shell() {
       break;
     case "deploy":
       page = <DeployView />;
+      break;
+    case "setup":
+      page = <SetupView />;
+      break;
+    case "logs":
+      page = <LogsView rest={route.rest} />;
       break;
     case "yaml":
       page = <YamlView />;

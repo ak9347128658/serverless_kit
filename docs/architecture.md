@@ -82,7 +82,7 @@ adapter: Response/result -> native response
 
 **Resources.** `resources:` entries become `PSKIT_RESOURCE_<KEY>_*` environment variables (`ServiceConfig.binding_environment`, plus provider-known ARNs/URLs/ids), and `runtime/resources.py` reads them back. On premises, an event's `driver` binding makes the host's `Broker` use `runtime/drivers/redis.py` (queues) or `runtime/drivers/s3.py` (storage) instead of directories.
 
-**On-premises observability.** `runtime/hostlog.py` captures logging, stdout/stderr, one entry per invocation, and host notes into a ring buffer plus `<data_dir>/logs/host.jsonl`, tagged per thread with the current function and request id. The host serves it at `/__pskit/logs`, with counters at `/__pskit/stats`. `pskit logs` and `pskit dashboard --serve` (`dashboard/server.py`) read those endpoints through `core/onprem_control.py`, which keeps the admin token server-side.
+**On-premises observability.** `runtime/hostlog.py` captures logging, stdout/stderr, one entry per invocation, and host notes into a ring buffer plus `<data_dir>/logs/host.jsonl`, tagged per thread with the current function and request id. The host serves it at `/__pskit/logs`, with counters at `/__pskit/stats`. `pskit logs` and `pskit dashboard --serve` (`dashboard/server.py`) read those endpoints through `core/onprem_control.py`, which keeps the admin token server-side. `core/cloud_logs.py` puts one interface (query, streams, delete) over the host and the cloud log services (CloudWatch Logs, Cloud Logging, Log Analytics) so the CLI, dashboard and studio share it.
 
 ## State handling
 

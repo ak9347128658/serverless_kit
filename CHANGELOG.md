@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-21
+
+### Added
+- `enabled: false` on functions and workflows: kept in `pskit.yml`, skipped on deploy. Combined with `providers.<cloud>` overrides it switches items (or single triggers) off on one cloud only.
+- **Azure native workflows** on Azure Logic Apps (Consumption) with `engine: native` (`auto` stays embedded). The pskit output includes the trigger callback URL, and `pskit workflow start` uses it. Azure also outputs `log_analytics_workspace_id` when Application Insights is on.
+- **Cloud logs** (`core/cloud_logs.py`): `pskit logs` and the dashboard read logs from AWS CloudWatch, GCP Cloud Logging and Azure Log Analytics, as well as on-prem. Log streams can be listed and deleted (AWS, on-prem) with `pskit logs --streams / --delete / --delete-all` and in the dashboard. On-prem hosts gain `GET /__pskit/logs/streams` and `DELETE /__pskit/logs`.
+- **`pskit doctor`** (`core/setup_check.py`): checks Terraform, the cloud CLI, credentials, required provider options and on-prem SSH/Docker, with download links and per-OS install steps.
+- `pskit --help` lists every command and workflow subcommand with examples; help is no longer truncated.
+- Studio:
+  - **Setup & credentials** page: the checks above, an `aws configure`-style profile form, provider environment variables for the session, browser logins (`az login`, `gcloud auth ...`) and an SSH connection test.
+  - **Logs** page and per-function live logs: tail, list streams, delete selected or all.
+  - File picker for the on-prem SSH private key.
+  - Dropdowns (with a custom value) for region, stage, memory, timeout, log retention, plan SKUs, SSH user, timezone and more.
+  - Schedules **at a specific time**: daily, weekdays, chosen days, monthly or yearly at HH:MM in a timezone.
+  - Trigger options each provider rejects or ignores are derived from its validation and shown in the form. Unsupported auth modes are disabled, and only supported trigger types are offered.
+  - The queue, bucket and topic source picker offers a new resource, a project resource, a pick from the cloud account (optionally added as an external resource), or a typed name.
+  - Enable or disable a function or workflow everywhere or only on the current provider. Before deploy, and when switching provider, unsupported items are listed with a one-click "disable on this provider".
+  - Clear the recent jobs list (all finished jobs, or one).
+
 ## [0.8.0] - 2026-10-21
 
 ### Added

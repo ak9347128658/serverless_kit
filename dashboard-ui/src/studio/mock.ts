@@ -307,6 +307,60 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
     const lines = job.all.filter((l) => l.seq > since);
     return r({ job_id: job.job_id, command: job.command, status: job.status, exit_code: job.exit_code, lines, next: job.all.length, started_at: job.started_at });
   }
+  if (path === "/api/jobs" && method === "DELETE") {
+    const done = Object.keys(jobs).filter((k) => jobs[k].status !== "running");
+    done.forEach((k) => delete jobs[k]);
+    return r({ removed: done.length });
+  }
+  if (path.startsWith("/api/jobs/") && method === "DELETE") {
+    const id = decodeURIComponent(path.split("/")[3]);
+    if (!jobs[id]) throw new ApiError(404, "unknown job");
+    delete jobs[id];
+    return r({ removed: 1 });
+  }
+  if (path === "/api/fs") {
+    const dir = String(query?.path || "/home/dev/.ssh");
+    return r({
+      path: dir,
+      parent: dir === "/" ? null : dir.replace(/\/[^/]+$/, "") || "/",
+      home: "/home/dev",
+      roots: ["/"],
+      entries: [
+        { name: "config", path: `${dir}/config`, type: "file", size: 120, key: false },
+        { name: "id_ed25519", path: `${dir}/id_ed25519`, type: "file", size: 411, key: true },
+        { name: "id_ed25519.pub", path: `${dir}/id_ed25519.pub`, type: "file", size: 98, key: false },
+        { name: "server.pem", path: `${dir}/server.pem`, type: "file", size: 1675, key: true },
+      ],
+    });
+  }
+  if (path === "/api/setup") {
+    return r({
+      provider: String(query?.provider || "aws"),
+      ok: false,
+      platform: "linux",
+      checks: [
+        { id: "terraform", title: "Terraform", status: "ok", detail: "Terraform v1.9.8", fix: null },
+        {
+          id: "cli",
+          title: "AWS CLI",
+          status: "missing",
+          detail: "aws is not on PATH (optional, used for SSO logins)",
+          fix: {
+            summary: "Install the AWS CLI v2.",
+            links: [{ label: "Install guide", url: "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" }],
+            steps: { linux: ["curl -o awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip", "unzip awscliv2.zip && sudo ./aws/install"] },
+            commands: ["aws --version"],
+          },
+        },
+        { id: "credentials", title: "AWS credentials", status: "missing", detail: "No credentials found", fix: { summary: "Add an access key.", action: "aws-profile" } },
+      ],
+      env: [{ name: "AWS_PROFILE", help: "Profile in ~/.aws to use", secret: false, set: false, value: null }],
+    });
+  }
+  if (path === "/api/setup/env") return r({ name: b.name, set: !!b.value });
+  if (path === "/api/setup/aws-profile") return r({ profile: b.profile, path: "~/.aws/credentials" });
+  if (path === "/api/logs") return r({ supported: false, reason: "mock: deploy first", entries: [], next: 0 });
+  if (path === "/api/logs/streams") return r({ supported: false, reason: "mock: deploy first", items: [] });
   if (path === "/api/vscode" && method === "GET") return r({ ...vscode });
   if (path === "/api/vscode/start") {
     const id = startJob("vscode", vscode.image_present ? ["docker run -d … codercom/code-server:4.96.4", "waiting for code-server…", "ready"] : ["Pulling codercom/code-server:4.96.4", "4.96.4: Pulling from codercom/code-server", "Downloading  312MB/598MB", "Downloading  598MB/598MB", "Status: Downloaded newer image", "docker run -d …", "ready"]);

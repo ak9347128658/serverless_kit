@@ -102,3 +102,128 @@ def test_unsupported_runtime(make_project):
       a: {handler: app.handlers.hello}
     """)
     assert any("does not support python3.13" in i.message for i in _errors(project))
+
+
+NATIVE = """
+service: demo
+provider: {name: azure, options: {subscription_id: sub}}
+functions:
+  api:
+    handler: app.handlers.hello
+    events: [{http: GET /hello}]
+  step:
+    handler: app.handlers.step
+    timeout: 300
+workflows:
+  orders:
+    engine: native
+    timeout: 900
+    start_at: Check
+    states:
+      Check: {type: task, function: api, next: Done}
+      Done: {type: task, function: step, end: true}
+  embedded:
+    start_at: Only
+    states:
+      Only: {type: task, function: step, end: true}
+"""
+
+
+def test_auto_engine_stays_embedded(make_project):
+    project = make_project(NATIVE)
+    assert project.engines == {"orders": "native", "embedded": "embedded"}
+    assert "embedded-orchestrator" in project.config.functions
+    assert "orders-orchestrator" not in project.config.functions
+    assert "workflow_native" in project.provider.capabilities
+
+
+def test_native_workflow_renders_logic_app(make_project, render):
+    project = make_project(NATIVE)
+    issues = project.validate()
+    assert [i for i in issues if i.level == "error"] == []
+    assert any("time out after 120s" in i.message and "'step'" in i.message for i in issues)
+    tf = render(project)
+    res = tf["resource"]
+    wf = res["azurerm_logic_app_workflow"]["wf_orders"]
+    assert wf["name"] == "demo-dev-orders"
+    trigger = res["azurerm_logic_app_trigger_http_request"]["wf_orders_trigger"]
+    assert trigger == {
+        "name": "manual",
+        "logic_app_id": "${azurerm_logic_app_workflow.wf_orders.id}",
+        "method": "POST",
+        "schema": "{}",
+    }
+    actions = res["azurerm_logic_app_action_custom"]
+    labels = sorted(actions)
+    # Created one after another, starting after the trigger.
+    assert actions[labels[0]]["depends_on"] == ["azurerm_logic_app_trigger_http_request.wf_orders_trigger"]
+    for prev, label in zip(labels, labels[1:]):
+        assert actions[label]["depends_on"] == [f"azurerm_logic_app_action_custom.{prev}"]
+    run = next(a for a in actions.values() if a["name"] == "run")
+    assert "https://${azurerm_linux_function_app.app.default_hostname}/_pskit/invoke/api" in run["body"]
+    assert "${data.azurerm_function_app_host_keys.keys.default_function_key}" in run["body"]
+    json.loads(run["body"].replace("${", "{"))  # a JSON document once Terraform interpolates it
+    keys = tf["data"]["azurerm_function_app_host_keys"]["keys"]
+    assert keys["name"] == "${azurerm_linux_function_app.app.name}"
+    out = tf["output"]["pskit"]["value"]["workflows"]
+    assert out["orders"]["url"] == "${azurerm_logic_app_trigger_http_request.wf_orders_trigger.callback_url}"
+    assert out["embedded"]["url"].endswith("/workflows/embedded")
+
+
+def test_native_task_functions_get_invoke_route(make_project):
+    project = make_project(NATIVE)
+    src = project.provider.shim_files(project.config)["function_app.py"]
+    compile(src, "function_app.py", "exec")
+    assert "route='_pskit/invoke/api', methods=['POST'], auth_level=func.AuthLevel.FUNCTION" in src
+    assert "route='_pskit/invoke/step'" in src
+    assert "@app.route(route='hello', methods=['GET']" in src
+
+
+def test_native_workflow_user_strings_are_escaped(make_project, render):
+    project = make_project("""
+    service: demo
+    provider: {name: azure, options: {subscription_id: sub}}
+    functions:
+      step: {handler: app.handlers.step}
+    workflows:
+      flow:
+        engine: native
+        start_at: P
+        states:
+          P: {type: pass, result: {text: "${not_terraform}"}, next: F}
+          F: {type: fail, error: Boom, cause: "100%{x}"}
+    """)
+    tf = render(project)
+    bodies = " ".join(a["body"] for a in tf["resource"]["azurerm_logic_app_action_custom"].values())
+    assert "$${not_terraform}" in bodies
+    assert "%%{x}" in bodies
+
+
+def test_native_workflow_unsupported_glob_is_an_error(make_project):
+    project = make_project("""
+    service: demo
+    provider: {name: azure, options: {subscription_id: sub}}
+    functions:
+      step: {handler: app.handlers.step}
+    workflows:
+      flow:
+        engine: native
+        start_at: C
+        states:
+          C:
+            type: choice
+            choices: [{variable: $.name, matches: "a?c", next: D}]
+            default: D
+          D: {type: succeed}
+    """)
+    errors = [i for i in project.validate() if i.level == "error"]
+    assert errors and errors[0].where == "workflows.flow" and "can't be expressed" in errors[0].message
+
+
+def test_log_analytics_workspace_output(make_project, render):
+    tf = render(make_project(full_config("azure", options={"subscription_id": "sub"})))
+    out = tf["output"]["log_analytics_workspace_id"]["value"]
+    assert out == "${azurerm_log_analytics_workspace.logs.workspace_id}"
+    tf = render(make_project(full_config("azure", options={"subscription_id": "sub", "app_insights": False})))
+    assert "log_analytics_workspace_id" not in tf["output"]
+    assert "azurerm_log_analytics_workspace" not in tf["resource"]

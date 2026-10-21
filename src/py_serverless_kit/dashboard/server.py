@@ -4,7 +4,9 @@ The API adds live data that a static page cannot have:
 
 * ``GET  /api/deployments``                                  every deployment record
 * ``GET  /api/deployments/<key>/health``                     on-prem host health and invocation stats
-* ``GET  /api/deployments/<key>/logs?since=&limit=&...``     on-prem host log tail
+* ``GET  /api/deployments/<key>/logs?since=&limit=&...``     log tail (on-prem host, CloudWatch, Cloud Logging, ...)
+* ``GET  /api/deployments/<key>/logs/streams?function=``      log streams (per function / container)
+* ``POST /api/deployments/<key>/logs/delete``                 delete streams: ``{ids | function | all: true}``
 * ``GET  /api/deployments/<key>/executions?workflow=&...``   workflow executions (paginated)
 * ``GET  /api/deployments/<key>/executions/<id>``            one execution with history and output
 * ``POST /api/deployments/<key>/workflows/<name>/start``     start an execution (body = input JSON)
@@ -12,8 +14,8 @@ The API adds live data that a static page cannot have:
 
 ``<key>`` is the ``.pskit/<provider>-<stage>`` directory name. The server binds
 loopback by default, checks the ``Host`` header (DNS rebinding) and the
-``Origin`` of every POST, and talks to on-prem hosts itself so admin tokens
-never reach the browser.
+``Origin`` of every POST, and talks to on-prem hosts and cloud log APIs itself
+(with this machine's credentials) so tokens never reach the browser.
 """
 
 from __future__ import annotations
@@ -106,36 +108,75 @@ class Dashboard:
             return {"live": False, "reason": str(exc)}
         return {"live": True, "health": health, "stats": stats}
 
-    def logs(self, record: Dict[str, Any], params: Dict[str, List[str]]) -> Dict[str, Any]:
-        from ..core.onprem_control import HostUnavailable, control_for
+    def _logs(self, record: Dict[str, Any]) -> Any:
+        from ..core.cloud_logs import log_backend
 
-        control = control_for(record, self.root)
-        if control is None:
-            return {
-                "supported": False,
-                "reason": (
-                    f"Live logs are read from the on-premises host. For {record.get('provider')} use the "
-                    "cloud console linked from each function."
-                ),
-                "entries": [],
-                "next": 0,
-            }
+        return log_backend(record, self.root)
+
+    @staticmethod
+    def _log_call(fn: Callable[[], Any]) -> Any:
+        from ..core.cloud_logs import LogError
+        from ..core.onprem_control import HostUnavailable
+
         try:
-            result = control.logs(
-                since=_int(params, "since", 0, 0, 2**62),
-                limit=_int(params, "limit", 200, 1, 1000),
+            return fn()
+        except HostUnavailable as exc:
+            raise ApiError(502, f"on-premises host unreachable: {exc}") from exc
+        except LogError as exc:
+            raise ApiError(502, str(exc)) from exc
+        except (KeyError, LookupError) as exc:
+            raise ApiError(404, str(exc.args[0] if exc.args else exc)) from exc
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        except PermissionError as exc:
+            raise ApiError(502, str(exc)) from exc
+
+    def logs(self, record: Dict[str, Any], params: Dict[str, List[str]]) -> Dict[str, Any]:
+        backend = self._logs(record)
+        if not backend.supported:
+            return {**backend.info(), "entries": [], "next": 0}
+        since = _int(params, "since", 0, 0, 2**62)
+        limit = _int(params, "limit", 200, 1, 1000)
+        result = self._log_call(
+            lambda: backend.query(
+                since=since,
+                limit=limit,
                 level=_str(params, "level"),
                 function=_str(params, "function"),
                 q=_str(params, "q"),
                 source=_str(params, "source"),
             )
-        except HostUnavailable as exc:
-            raise ApiError(502, f"on-premises host unreachable: {exc}") from exc
+        )
         out = dict(result or {})
         out.setdefault("entries", [])
         out.setdefault("next", 0)
         out["supported"] = True
         return out
+
+    def log_streams(self, record: Dict[str, Any], params: Dict[str, List[str]]) -> Dict[str, Any]:
+        backend = self._logs(record)
+        if not backend.supported:
+            return {**backend.info(), "items": []}
+        return dict(self._log_call(lambda: backend.streams(_str(params, "function"))) or {})
+
+    def delete_logs(self, record: Dict[str, Any], body: Any) -> Dict[str, Any]:
+        if body is None:
+            body = {}
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        ids = body.get("ids")
+        if ids is not None and (not isinstance(ids, list) or not all(isinstance(i, str) for i in ids)):
+            raise ApiError(400, "ids must be a list of strings")
+        function = body.get("function")
+        if function is not None and not isinstance(function, str):
+            raise ApiError(400, "function must be a string")
+        everything = body.get("all") is True
+        if not ids and not function and not everything:
+            raise ApiError(400, "pass ids, function or all: true")
+        backend = self._logs(record)
+        if not backend.supported or not backend.can_delete:
+            raise ApiError(400, backend.reason or "deleting logs is not supported for this deployment")
+        return dict(self._log_call(lambda: backend.delete(ids=ids or None, function=function, all=everything)) or {})
 
     def _backend(self, record: Dict[str, Any]) -> Any:
         from ..core.executions import backend_for
@@ -365,11 +406,15 @@ def make_handler(app: Dashboard) -> type:
                     return 200, app.health(record)
                 if rest == ["logs"]:
                     return 200, app.logs(record, params)
+                if rest == ["logs", "streams"]:
+                    return 200, app.log_streams(record, params)
                 if rest == ["executions"]:
                     return 200, app.executions(record, params)
                 if len(rest) == 2 and rest[0] == "executions":
                     return 200, app.execution(record, rest[1], params)
             if method == "POST":
+                if rest == ["logs", "delete"]:
+                    return 200, app.delete_logs(record, self._body())
                 if len(rest) == 3 and rest[0] == "workflows" and rest[2] == "start":
                     return 202, app.start(record, rest[1], self._body())
                 if len(rest) == 3 and rest[0] == "executions" and rest[2] == "cancel":

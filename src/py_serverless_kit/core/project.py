@@ -67,7 +67,10 @@ class Project:
     # ---------------------------------------------------------------- checks
     def validate(self) -> List[Issue]:
         issues = self.provider.validate(self.config)
-        source = (self.root / self.config.package.source).resolve()
+        for kind, names in self.config.disabled.items():
+            for name in names:
+                issues.append(Issue("warning", "disabled (enabled: false): not deployed", f"{kind}.{name}"))
+        source =(self.root / self.config.package.source).resolve()
         if not source.is_dir():
             issues.append(Issue("error", f"package.source {source} is not a directory", "package.source"))
         for name, fn in self.config.functions.items():

@@ -4,6 +4,9 @@ Add `-v` to any command to see the full traceback. Start with `pskit validate`, 
 
 ## Installation and tooling
 
+Run `pskit doctor` (or `pskit doctor -p <provider>`) first: it reports missing tools, credentials and provider
+options with the install steps for your OS.
+
 **`Neither terraform nor tofu was found on PATH`**
 : Install Terraform ≥ 1.5 or OpenTofu, or point `PSKIT_TERRAFORM_BIN` (or `provider.terraform.binary`) at the binary.
 

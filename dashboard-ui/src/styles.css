@@ -997,6 +997,23 @@ button {
   align-items: center;
   font-size: 12px;
 }
+.logstreams {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.logstreams-table {
+  width: 100%;
+}
+.logstreams-table .check-col {
+  width: 32px;
+}
+.logstreams-table tr.selected td {
+  background: var(--accent-soft, rgba(80, 140, 255, 0.08));
+}
+.logstreams-table td.mono {
+  overflow-wrap: anywhere;
+}
 
 /* feedback */
 .empty {
@@ -1094,4 +1111,8 @@ button {
   .brand small {
     display: none;
   }
+}
+.logstreams .small,
+.logstreams-table .small {
+  font-size: 12px;
 }

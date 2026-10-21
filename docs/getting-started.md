@@ -15,6 +15,9 @@ Requirements:
 
 You don't need Terraform or credentials for local development, `pskit validate` or `pskit package`.
 
+`pskit doctor -p <provider>` checks all of this (and the cloud's CLI, required provider options, and SSH / Docker for
+on-premises) and prints install steps and links for your OS.
+
 ## 2. Scaffold a project
 
 ```bash

@@ -41,6 +41,18 @@ provider and stage you pick in the top bar). Problems link to the field they con
 `pskit.yml`; undo/redo work across pages. Nothing touches disk until you save, and closing the tab with unsaved changes
 asks first.
 
+## Setup, logs and provider differences
+
+- **Setup & credentials** runs the same checks as `pskit doctor` for the provider in the top bar: Terraform, the cloud's CLI, credentials, required provider options and, for on premises, ssh/scp/Docker and the key file. Each problem shows the download link and the steps for Windows, macOS or Linux. You can also:
+  - save an AWS access key as a profile in `~/.aws`;
+  - set provider variables such as `ARM_SUBSCRIPTION_ID` or `CLOUDFLARE_API_TOKEN` for this studio session only (secret values are never sent back to the browser);
+  - start a browser login (`az login`, `gcloud auth application-default login`, `aws sso login`);
+  - test the SSH connection of an on-prem deploy.
+- **Logs** shows the logs of the deployed provider/stage (on-prem, AWS, GCP and Azure with a Log Analytics workspace). You can list the stored log streams and delete the ones you select, or all of them (AWS and on-prem). Each function's **Logging** section sets its log level and can show its live logs.
+- **Private key**: the SSH key field has **Browse…**, which lists folders on the machine running studio (it starts in `~/.ssh`). Only names and sizes are listed; file contents are never read.
+- **Provider differences**: trigger types the provider can't run aren't offered. Options it rejects (for example `auth: jwt` on Azure) or ignores (a timezone on Azure timers) are listed on each trigger, worked out from the provider's own validation.
+- **Enable / disable**: functions and workflows can be disabled everywhere (`enabled: false`) or only on the current provider (`providers.<cloud>...enabled: false`). A single trigger can be disabled on one provider too. The Deploy page and the provider switch list everything that won't run on the target and offer to disable it there.
+
 ## Saving: what changes in pskit.yml
 
 - Values keep their written form: `${env:API_KEY}`, `${self:custom.x}` and `${opt:...}` are saved as written, never resolved.

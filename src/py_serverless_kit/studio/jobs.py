@@ -260,6 +260,20 @@ class JobManager:
             out.append(snap)
         return out
 
+    def clear(self, job_id: Optional[str] = None) -> Dict[str, Any]:
+        """Forget finished jobs (all of them, or one). Running jobs are kept."""
+        with self._lock:
+            if job_id is not None:
+                job = self.get(job_id)
+                if job.status == "running":
+                    raise StudioError(409, "the job is still running; cancel it first", code="busy", job_id=job.id)
+                del self._jobs[job_id]
+                return {"removed": 1}
+            done = [k for k, j in self._jobs.items() if j.status != "running"]
+            for key in done:
+                del self._jobs[key]
+            return {"removed": len(done)}
+
     def cancel(self, job_id: str) -> Dict[str, Any]:
         job = self.get(job_id)
         if job.status != "running":

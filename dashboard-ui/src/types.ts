@@ -91,6 +91,43 @@ export interface LogsResponse {
   entries: LogEntry[];
   next: number;
   oldest?: number;
+  /** "seq": on-prem host sequence numbers; "time": cloud logs, `since`/`next` are millisecond timestamps. */
+  mode?: "seq" | "time";
+  can_delete?: boolean;
+  /** Provider console link, shown when logs can't be read here. */
+  console?: string | null;
+}
+
+/** One log stream: a CloudWatch stream, or one function's entries on an on-prem host. */
+export interface LogStream {
+  id: string;
+  function?: string | null;
+  name?: string | null;
+  group?: string;
+  first?: string | null;
+  last?: string | null;
+  bytes?: number | null;
+  count?: number | null;
+}
+
+export interface LogStreamsResponse {
+  supported: boolean;
+  reason?: string;
+  can_delete?: boolean;
+  mode?: "seq" | "time";
+  console?: string | null;
+  items: LogStream[];
+}
+
+export interface LogDeleteRequest {
+  ids?: string[];
+  function?: string;
+  all?: boolean;
+}
+
+export interface LogDeleteResult {
+  deleted: number;
+  errors?: string[];
 }
 
 export type ExecutionStatus = "RUNNING" | "SUCCEEDED" | "FAILED" | "ABORTED" | "CANCELLED" | "TIMED_OUT" | string;

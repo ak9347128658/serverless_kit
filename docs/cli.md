@@ -6,6 +6,17 @@ pskit [--version] [-h] <command> [options]
 
 `py-serverless-kit` is an alias of `pskit`.
 
+`pskit --help` lists every command and `workflow` subcommand, grouped (getting started, develop, deploy, operate,
+reference) with a one-line example each. `pskit COMMAND --help` shows every option of a command plus examples.
+
+| Group | Commands |
+|---|---|
+| Getting started | `init`, `studio`, `doctor` |
+| Develop | `dev`, `invoke`, `validate` |
+| Deploy | `package`, `plan`, `deploy`, `info`, `remove`, `tf` |
+| Operate | `logs`, `dashboard`, `workflow run / show / start / executions / status / cancel` |
+| Reference | `providers` |
+
 ## Common project options
 
 Every command that loads a project accepts:
@@ -123,6 +134,43 @@ on-prem drivers, provider options, code) and running validate / deploy / invoke.
 It prints `http://127.0.0.1:8770/#token=...`. The token is required on every API call, so open that exact URL.
 See [studio.md](studio.md).
 
+## `pskit doctor`
+
+Check that this machine can deploy to a provider, and print how to fix what's missing on the current OS: Terraform /
+OpenTofu, Python, the cloud's CLI, credentials, required provider options and optional SDKs. For `onprem` it checks
+what the deploy method needs: nothing for `local`; `ssh` / `scp`, the host and the private key for `ssh`; the Docker
+CLI and a running daemon for `docker`. Nothing is sent anywhere and no command prompts; each tool probe has a short
+timeout. It doesn't take the common project options.
+
+| Flag | Default | |
+|---|---|---|
+| `-p, --provider NAME` | `provider.name` in pskit.yml | provider to check. Required without a pskit.yml |
+| `-c, --config FILE` | `pskit.yml` | config to read provider options from |
+| `--json` | | the full report (ids, statuses, links, steps for every OS) |
+
+```bash
+pskit doctor
+pskit doctor -p azure
+pskit doctor -p onprem --json
+```
+
+```text
+pskit doctor: aws
+ ✓ Python: Python 3.12.10
+ ✓ Terraform (or OpenTofu): Terraform v1.9.8
+ ! AWS CLI: aws not found on PATH; used to sign in and inspect resources
+     Install AWS CLI, then open a new terminal.
+       winget install Amazon.AWSCLI
+       Install the AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+ ✗ AWS credentials: no AWS credentials in the environment or ~/.aws
+     Add an access key profile here, run `aws configure`, or `aws sso login` for SSO profiles.
+       $ aws configure
+```
+
+`✓` ok, `✗` missing (exit code 1), `!` recommended, `i` optional. A missing cloud CLI is only a warning: Terraform
+needs credentials, not the CLI. The same checks appear in `pskit studio` (Setup), where you can also add an AWS
+profile, run `az login` / `gcloud auth application-default login`, and test an SSH connection.
+
 ## `pskit dev`
 
 Local HTTP server that routes requests to your handlers, with hot reload.
@@ -189,7 +237,7 @@ See [workflow-executions.md](workflow-executions.md).
 
 ## `pskit logs`
 
-Show the logs of the deployed **on-premises** host: handler logging, `print` output, one entry per invocation, and host notes. For cloud providers, use the console link from `pskit info`.
+Show, list or delete the logs of a deployment. On premises: the host's buffer (handler logging, `print` output, one entry per invocation, host notes). AWS: CloudWatch Logs. GCP: Cloud Logging (read only). Azure: Log Analytics when the deployment has a `log_analytics_workspace_id` output (read only). Elsewhere, use the console link from `pskit info`. Requirements per provider: [dashboard.md](dashboard.md#log-sources).
 
 | Flag | Default | |
 |---|---|---|
@@ -200,12 +248,20 @@ Show the logs of the deployed **on-premises** host: handler logging, `print` out
 | `--source` | | `function`, `host`, `stdout`, `stderr` or `invocation` |
 | `-q, --grep TEXT` | | only entries containing this text (case-insensitive) |
 | `--json` | | one JSON object per line |
+| `--streams` | | list log streams (CloudWatch streams, or one per function on premises) with their ids |
+| `--delete STREAM` | | delete a stream by id (repeatable). On premises the id is a function name, or `__host__` for host notes |
+| `--delete-all` | | delete every stream, or only those of `--function` |
+| `-y, --yes` | | don't ask before deleting |
 
 ```bash
 pskit logs -f
 pskit logs --function worker --level warning -n 500
 pskit logs --stage prod --source invocation --json | jq .fields.duration_ms
+pskit logs --provider aws --streams
+pskit logs --provider aws --function worker --delete-all --yes
 ```
+
+On AWS, `--level` and `--source` are applied to parsed lines and `-q` becomes a CloudWatch filter pattern. `-f` polls every 3 seconds on clouds.
 
 The admin token comes from the generated `pskit_host.json`. See [providers.md](providers.md#logs-and-stats).
 

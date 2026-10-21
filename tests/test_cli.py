@@ -253,3 +253,56 @@ def test_terraform_validate_aws(project_dir):
     runner = TerraformRunner(project.work_dir)
     runner._run(["init", "-backend=false", "-input=false", "-no-color"], capture=True)
     runner._run(["validate", "-no-color"], capture=True)
+
+
+def test_root_help_lists_every_command_and_subcommand():
+    import click
+
+    out = CliRunner().invoke(cli, ["--help"]).output
+    assert "..." not in out.split("Commands:")[1].split("Getting started")[0]  # short help not truncated
+    for name, command in cli.commands.items():
+        assert name in out, name
+        if isinstance(command, click.Group):
+            for sub in command.commands:
+                assert f"pskit {name} {sub}" in out, f"{name} {sub}"
+    for name, command in cli.commands.items():
+        result = CliRunner().invoke(cli, [name, "--help"])
+        assert result.exit_code == 0, name
+        if name not in ("logs",):
+            assert "Examples:" in result.output, name
+
+
+def test_doctor(tmp_path, monkeypatch):
+    from py_serverless_kit.core import setup_check
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["doctor"])
+    assert result.exit_code == 2 and "pskit doctor -p aws" in result.output
+
+    def fake(provider, raw=None, root=None):
+        status = "missing" if provider == "gcp" else "ok"
+        item = {
+            "id": "tool:terraform",
+            "title": "Terraform",
+            "status": status,
+            "detail": "not found",
+            "fix": {
+                "summary": "Install Terraform",
+                "links": [{"label": "Install", "url": "https://example.test/tf"}],
+                "steps": {"windows": ["winget install X"], "macos": ["brew install X"], "linux": ["apt install X"]},
+                "commands": [],
+                "action": None,
+            },
+        }
+        return {"provider": provider, "ok": status == "ok", "checks": [item]}
+
+    monkeypatch.setattr(setup_check, "check", fake)
+    ok_run = CliRunner().invoke(cli, ["doctor", "-p", "aws"])
+    assert ok_run.exit_code == 0, ok_run.output
+    bad = CliRunner().invoke(cli, ["doctor", "-p", "gcp"])
+    assert bad.exit_code == 1 and "https://example.test/tf" in bad.output and "Install Terraform" in bad.output
+    js = CliRunner().invoke(cli, ["doctor", "-p", "gcp", "--json"])
+    assert json.loads(js.output)["provider"] == "gcp"
+    assert CliRunner().invoke(cli, ["doctor", "-p", "nope"]).exit_code == 2
+    (tmp_path / "pskit.yml").write_text("service: s\nprovider: aws\n")
+    assert "aws" in CliRunner().invoke(cli, ["doctor"]).output

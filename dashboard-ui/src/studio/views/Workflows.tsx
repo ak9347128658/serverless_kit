@@ -1,6 +1,8 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Modal } from "../../components/Drawer";
 import { EmptyState } from "../../components/Feedback";
+import { isEnabled } from "../compat";
+import { EnableControl } from "../components/EnableControl";
 import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FormRow, JsonInput, NumberInput, Section, Segmented, TextInput } from "../components/Forms";
 import { InlineIssues, PageHeader } from "../components/Misc";
@@ -48,7 +50,9 @@ function WorkflowList() {
         title="Workflows"
         subtitle={
           native
-            ? `On ${provider?.display_name} workflows compile to the native engine (Step Functions / Cloud Workflows) unless you pick embedded.`
+            ? providerName === "azure"
+              ? "On Azure Functions workflows run on the embedded engine by default; pick engine native to compile them to Azure Logic Apps."
+              : `On ${provider?.display_name} workflows compile to the native engine (Step Functions / Cloud Workflows) unless you pick embedded.`
             : `On ${provider?.display_name || providerName} workflows run on pskit's embedded engine inside a generated orchestrator function.`
         }
         actions={
@@ -77,7 +81,7 @@ function WorkflowList() {
             const states = Object.entries(asObject(wf.states));
             const engine = state.validation?.engines?.[name] || str(wf.engine, "auto");
             return (
-              <div key={name} className="card wf-card">
+              <div key={name} className={`card wf-card${isEnabled(draft, providerName, "workflows", name) ? "" : " row-disabled"}`}>
                 <a href={href("workflows", name)} className="wf-card-main">
                   <b>{name}</b>
                   <span className="muted small">{str(wf.description) || `${states.length} states, starts at ${str(wf.start_at)}`}</span>
@@ -92,6 +96,7 @@ function WorkflowList() {
                 </a>
                 <div className="row-gap">
                   <span className="badge badge-info">{engine}</span>
+                  <EnableControl section="workflows" name={name} compact />
                   <span className="grow" />
                   <button
                     type="button"

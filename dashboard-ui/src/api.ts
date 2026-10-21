@@ -4,7 +4,10 @@ import type {
   ExecutionDetail,
   ExecutionList,
   HealthResponse,
+  LogDeleteRequest,
+  LogDeleteResult,
   LogsResponse,
+  LogStreamsResponse,
 } from "./types";
 
 export class ApiError extends Error {
@@ -89,6 +92,10 @@ export const api = {
     key: string,
     p: { since?: number; limit?: number; level?: string; function?: string; q?: string; source?: string },
   ) => request<LogsResponse>(`${base(key)}/logs${query(p)}`),
+  logStreams: (key: string, fn?: string) =>
+    request<LogStreamsResponse>(`${base(key)}/logs/streams${query({ function: fn })}`),
+  deleteLogs: (key: string, body: LogDeleteRequest) =>
+    request<LogDeleteResult>(`${base(key)}/logs/delete`, { method: "POST", body: JSON.stringify(body) }),
   executions: (
     key: string,
     p: { workflow?: string; status?: string; limit?: number; offset?: number; token?: string | null },

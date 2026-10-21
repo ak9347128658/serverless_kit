@@ -227,3 +227,32 @@ def test_entry_point_provider_accepted(tmp_path, monkeypatch):
     write(tmp_path, "service: svc\nprovider: {name: mycloud}\nproviders: {mycloud: {region: x1}}\n")
     cfg = load_config(cwd=tmp_path).config
     assert cfg.provider.name == "mycloud" and cfg.provider.region == "x1"
+
+
+def test_provider_override_disables_items_on_one_cloud(tmp_path):
+    from py_serverless_kit.config.loader import load_config
+
+    (tmp_path / "pskit.yml").write_text(
+        """
+service: demo
+provider: {name: aws}
+functions:
+  api: {handler: app.api, events: [{http: GET /x}, {queue: jobs}]}
+  worker: {handler: app.worker}
+workflows:
+  flow: {start_at: s, states: {s: {type: task, function: worker}}}
+providers:
+  cloudflare:
+    functions:
+      api: {events: [{http: GET /x}]}
+      worker: {enabled: false}
+    workflows:
+      flow: {enabled: false}
+""",
+        "utf-8",
+    )
+    aws = load_config(cwd=tmp_path).config
+    assert sorted(aws.functions) == ["api", "worker"] and len(aws.functions["api"].events) == 2
+    cf = load_config(cwd=tmp_path, provider="cloudflare").config
+    assert list(cf.functions) == ["api"] and [e.type for e in cf.functions["api"].events] == ["http"]
+    assert cf.disabled == {"functions": ["worker"], "workflows": ["flow"]}

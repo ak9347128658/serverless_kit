@@ -4,7 +4,7 @@
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
 
-export type FieldType = "string" | "int" | "number" | "bool" | "enum" | "list" | "map" | "secret" | "json" | "code";
+export type FieldType = "string" | "int" | "number" | "bool" | "enum" | "list" | "map" | "secret" | "json" | "code" | "file";
 
 export interface Field {
   key: string;
@@ -19,6 +19,8 @@ export interface Field {
   max?: number;
   /** May be given as `<key>_env: VAR` instead of a literal value. */
   env_ok?: boolean;
+  /** Offered in a dropdown; another value can still be typed. */
+  suggestions?: Json[];
 }
 
 export interface Driver {
@@ -44,6 +46,16 @@ export interface ProviderMeta {
   max_timeout: number;
   notes?: string;
   options: Field[];
+  regions?: { id: string; label: string }[];
+  /** Trigger options this provider rejects (error) or ignores (warning), per event type. */
+  trigger_support?: Partial<Record<EventType, TriggerRule[]>>;
+}
+
+export interface TriggerRule {
+  key: string;
+  value: Json;
+  level: "error" | "warning";
+  message: string;
 }
 
 export interface Meta {
@@ -87,6 +99,7 @@ export interface ValidateResult {
   yaml?: string;
   functions?: { name: string; generated?: boolean; kind?: string }[];
   engines?: Record<string, string>;
+  disabled?: { functions: string[]; workflows: string[] };
 }
 
 export interface FileEntry {
@@ -128,6 +141,7 @@ export interface JobLine {
 export interface Job {
   job_id: string;
   command: string;
+  label?: string;
   status: JobStatus;
   exit_code?: number | null;
   lines: JobLine[];
@@ -143,4 +157,54 @@ export interface VsCodeState {
   url?: string | null;
   container?: string | null;
   log_job?: string | null;
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  type: "file" | "dir";
+  size?: number | null;
+  /** Name looks like a private key (id_*, *.pem, *.key, *.ppk). */
+  key?: boolean;
+}
+
+export interface FsListing {
+  path: string;
+  parent: string | null;
+  home: string;
+  roots: string[];
+  entries: FsEntry[];
+  truncated?: boolean;
+}
+
+export type CheckStatus = "ok" | "missing" | "warning" | "info";
+
+export interface SetupCheck {
+  id: string;
+  title: string;
+  status: CheckStatus;
+  detail: string;
+  fix?: {
+    summary?: string;
+    links?: { label: string; url: string }[];
+    steps?: { windows?: string[]; macos?: string[]; linux?: string[] };
+    commands?: string[];
+    action?: string | null;
+  } | null;
+}
+
+export interface EnvHint {
+  name: string;
+  help?: string;
+  secret?: boolean;
+  set?: boolean;
+  value?: string | null;
+}
+
+export interface SetupResult {
+  provider: string;
+  ok: boolean;
+  checks: SetupCheck[];
+  env?: EnvHint[];
+  platform?: "windows" | "macos" | "linux";
 }

@@ -98,6 +98,12 @@ class HostControl:
         }
         return dict(self.request("GET", "/__pskit/logs", query=query) or {})
 
+    def log_streams(self) -> Dict[str, Any]:
+        return dict(self.request("GET", "/__pskit/logs/streams") or {})
+
+    def clear_logs(self, function: Optional[str] = None) -> Dict[str, Any]:
+        return dict(self.request("DELETE", "/__pskit/logs", query={"function": function}) or {})
+
     def start_workflow(self, workflow: str, data: Any, wait: bool = False) -> Dict[str, Any]:
         path = "/__pskit/workflows/" + quote(workflow, safe="")
         return dict(
