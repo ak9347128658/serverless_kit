@@ -1,0 +1,110 @@
+# Studio: build a project without writing YAML
+
+`pskit studio` opens a local web app for creating and editing a pskit project in forms: functions and triggers,
+workflows, resources, on-premises drivers, provider settings and handler code. You can deploy from it too. Everything
+it produces is an ordinary `pskit.yml` plus Python files, so the CLI, CI and code review work exactly as before.
+
+```bash
+pip install py-serverless-kit
+cd my-service            # an existing project, or an empty folder
+pskit studio --open
+```
+
+```text
+pskit studio for /home/me/my-service
+Open http://127.0.0.1:8770/#token=q3V...  (Ctrl+C to stop)
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-d, --dir DIR` | `.` | Project folder (the one holding `pskit.yml`, or an empty folder for a new project) |
+| `--host` | `127.0.0.1` | Bind address. Anything other than loopback prints a warning: studio can edit files and deploy |
+| `--port` | `8770` | Port |
+| `--open` | off | Open the browser |
+| `--vscode-image` | `codercom/code-server:4.96.4` | Image for **Full VS Code** (also `PSKIT_STUDIO_VSCODE_IMAGE`) |
+
+## What you can do
+
+| Page | What it does |
+|---|---|
+| **New project** | Appears when the folder has no `pskit.yml`: service name, one of the 11 providers, starter template |
+| **Overview & provider** | Pick the provider from cards that show what each supports (HTTP, schedule, queue, storage, topic, native workflows). Switching first lists the triggers that would stop working. Region, runtime, memory, timeout, architecture, environment, tags and the provider's own options (project, subscription, compartment, account id, ...). On premises adds the deploy method (local / ssh / docker), host, port, admin token, services and host tuning |
+| **Functions** | A table of functions and a four-step **Create function** wizard like the AWS Lambda console: basics, triggers, environment & permissions, review (a YAML diff). Trigger types the selected provider can't run are disabled, with a tooltip naming the providers that can. HTTP has a path-parameter preview, CORS and auth. Schedule has rate presets and a cron editor with a plain-English preview. Queue/storage/topic can be **new**, a **resource** from the Resources page, **Browse account** (lists what already exists in your cloud), or a typed name. Creating a function writes a handler stub into your code |
+| **Workflows** | A visual step-function builder: an auto-laid-out diagram (next, choice, default and catch edges) with a palette for task, choice, wait, pass, parallel, map, succeed and fail. The inspector edits each state: task function (or create a new one), choice rules with and/or/not groups, retry and catch, wait seconds or path, pass result, fail error. Parallel branches and map iterators open as nested workflows. Engine (auto / native / embedded) and timeout |
+| **Resources** | Managed or external buckets, queues, topics, databases, caches and custom services. Connection values (secrets as `${env:VAR}`), which functions get the binding, **Browse account**. For on premises there's a driver picker grouped by cloud: SQS / S3, Azure Queue / Blob, Pub/Sub / GCS, MNS / OSS, Cloudflare Queues / R2, COS, OBS, Oracle, IBM COS, Spaces, MinIO, Redis, directory and **custom class**. Each driver shows its own fields, and secret fields can be read from an environment variable (`<key>_env`) |
+| **Code** | A file tree and a VS Code-style editor (CodeMirror: Python, YAML, JSON highlighting, search, tabs, Ctrl+S), or **Full VS Code**: see below |
+| **Deploy** | Validate, package, plan, deploy, info and remove, with a live log. Remove, and any stage named `prod*`, need a typed confirmation. Also **Invoke** a function with a JSON payload, and run a workflow locally |
+| **YAML** | The generated `pskit.yml`, a diff against the file on disk, and a raw-YAML editing mode |
+
+Every edit goes into an in-memory draft and is validated as you type (the same checks as `pskit validate`, for the
+provider and stage you pick in the top bar). Problems link to the field they concern. **Save** (Ctrl/Cmd+S) writes
+`pskit.yml`; undo/redo work across pages. Nothing touches disk until you save, and closing the tab with unsaved changes
+asks first.
+
+## Saving: what changes in pskit.yml
+
+- Values keep their written form: `${env:API_KEY}`, `${self:custom.x}` and `${opt:...}` are saved as written, never resolved.
+- Comments are **not** kept, and key order follows the studio's layout. Before every save the previous file is copied
+  to `.pskit/studio/backups/pskit.<timestamp>.yml` (the last 20 are kept).
+- If `pskit.yml` changed on disk since you loaded it (an editor, `git pull`), Save offers to reload, overwrite or cancel.
+- A file that uses `extends:` is shown with a notice: only the main file is edited.
+- A config that fails validation can still be saved, so you can stop half-way. The problems stay listed.
+
+## Browse account
+
+**Browse account** lists queues, buckets, topics and state machines that already exist, so you pick one instead of
+typing its name. It runs with the credentials of the machine running studio:
+
+| Provider | Lists | Needs |
+|---|---|---|
+| AWS | SQS queues, S3 buckets, SNS topics, Step Functions state machines | `pip install "py-serverless-kit[aws]"`, AWS credentials |
+| GCP | Pub/Sub topics and subscriptions, Cloud Storage buckets | `google-cloud-pubsub` / `google-cloud-storage`, `provider.options.project` or `GOOGLE_CLOUD_PROJECT` |
+| Azure | Storage queues and blob containers | `azure-storage-queue` / `azure-storage-blob`, `AZURE_STORAGE_CONNECTION_STRING` |
+| On premises | Existing queue and bucket directories under the host's data directory | nothing |
+| Others | Not available | type the name |
+
+A missing SDK or credential shows a message in the picker; you can always type the name instead.
+
+## Full VS Code (code-server in Docker)
+
+**Code → Full VS Code** runs [code-server](https://github.com/coder/code-server) on your project and embeds it:
+
+1. Studio checks for the Docker CLI and a running daemon. If either is missing, it shows how to install Docker.
+2. **Pull & start** pulls the image if it isn't present (the log streams in the panel), then starts
+   `pskit-studio-<id>` with your project mounted at `/home/coder/project`, published on `127.0.0.1` only, and waits
+   until it answers.
+3. The editor opens inside the studio, with **Open in new tab** and **Stop**. A container that's already running is
+   reused. Stop removes it; your files stay in the project folder.
+
+It runs with `--auth none` because it is reachable only from this machine. On Linux and macOS it runs as your user, so
+new files aren't owned by root.
+
+**Studio itself inside a container** (Docker-in-Docker / sibling containers): mount the Docker socket and tell studio
+where the project lives on the host, because the code-server container is started by the host's daemon:
+
+```bash
+docker run --rm -p 127.0.0.1:8770:8770 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$PWD":/work -w /work \
+  -e PSKIT_STUDIO_HOST_ROOT="$PWD" \
+  python:3.12-slim sh -c "pip install py-serverless-kit && apt-get update && apt-get install -y docker.io && pskit studio --host 0.0.0.0"
+```
+
+## Security
+
+Studio can write files in the project and run deploys with your cloud credentials, so:
+
+- It binds to `127.0.0.1` by default.
+- Every API call needs the session token from the printed URL. Anyone who has that URL has full access, so don't share
+  it. A new token is generated each time studio starts.
+- Requests with a foreign `Host` header (DNS rebinding) or a cross-site `Origin` are refused, and bodies are capped at 2 MiB.
+- The file editor only reaches files inside the project. It never touches `.pskit/`, `.git/`, `.venv/`,
+  `node_modules/` or `__pycache__`, and refuses binary files or files over 1 MiB.
+- Deploy commands run as `python -m py_serverless_kit ...` with explicit arguments, never through a shell.
+
+## Developing the studio UI
+
+The UI lives in `dashboard-ui/` next to the dashboard (they share components). `npm run build` writes both
+`src/py_serverless_kit/dashboard/template.html` and `src/py_serverless_kit/studio/studio.html`; CI fails if either is
+out of date. `npm run dev:studio` serves the UI with hot reload against a running `pskit studio --port 8770`, or against
+a built-in mock API with `VITE_MOCK=1`. See [`deploy_docs/CONTRIBUTING.md`](../deploy_docs/CONTRIBUTING.md).

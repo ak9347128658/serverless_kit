@@ -19,9 +19,10 @@ htmlcov/
 *.tfstate
 *.tfstate.*
 node_modules/
-# Dashboard UI (source in dashboard-ui/, build output is src/py_serverless_kit/dashboard/template.html)
+# Dashboard + studio UI (source in dashboard-ui/, build output is dashboard/template.html and studio/studio.html)
 dashboard-ui/node_modules/
 dashboard-ui/dist/
+dashboard-ui/dist-studio/
 
 # Secrets
 .env

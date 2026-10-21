@@ -383,6 +383,41 @@ def dashboard(
         webbrowser.open(path.as_uri())
 
 
+@cli.command()
+@click.option(
+    "-d", "--dir", "directory", default=".", type=click.Path(file_okay=False, exists=True), help="Project root."
+)
+@click.option("--host", "bind_host", default="127.0.0.1", show_default=True, help="Bind address.")
+@click.option("--port", default=8770, show_default=True)
+@click.option("--open", "open_browser", is_flag=True, help="Open in the browser.")
+@click.option("--vscode-image", default=None, help="code-server image for the full VS Code view.")
+def studio(directory: str, bind_host: str, port: int, open_browser: bool, vscode_image: Optional[str]) -> None:
+    """Build functions, triggers, workflows and resources in the browser (writes pskit.yml)."""
+    from ..studio.server import is_loopback, make_server, studio_url
+
+    root = Path(directory).resolve()
+    try:
+        httpd = make_server(root, bind_host, port, vscode_image=vscode_image)
+    except OSError as exc:
+        raise click.ClickException(f"cannot listen on {bind_host}:{port}: {exc}") from exc
+    url = studio_url(httpd)
+    if not is_loopback(bind_host):
+        fail(
+            f"warning: listening on {bind_host}. The studio edits files and runs deploys; anyone with the "
+            "link (it contains the session token) can do the same."
+        )
+    ok(f"pskit studio for {root}")
+    echo(f"Open {url}  (Ctrl+C to stop)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+
+
 # ----------------------------------------------------------------------------- local
 @cli.command()
 @project_options

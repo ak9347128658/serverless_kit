@@ -252,7 +252,11 @@ def make_handler(app: Dashboard) -> type:
             body = json.dumps(payload, default=str).encode("utf-8")
             self._send(status, body, "application/json; charset=utf-8")
 
-        def _body(self) -> Any:
+        def _read_raw(self) -> bytes:
+            """Read the request body once (cached). Raises 400/413 for a bad or oversized length."""
+            cached = getattr(self, "_raw_body", None)
+            if cached is not None:
+                return cached
             raw_length = self.headers.get("content-length") or "0"
             try:
                 length = int(raw_length)
@@ -260,7 +264,11 @@ def make_handler(app: Dashboard) -> type:
                 raise ApiError(400, "invalid content-length") from None
             if length < 0 or length > MAX_BODY:
                 raise ApiError(413, f"request body must be at most {MAX_BODY} bytes")
-            raw = self.rfile.read(length) if length else b""
+            self._raw_body: Optional[bytes] = self.rfile.read(length) if length else b""
+            return self._raw_body
+
+        def _body(self) -> Any:
+            raw = self._read_raw()
             if not raw.strip():
                 return None
             try:
@@ -315,6 +323,7 @@ def make_handler(app: Dashboard) -> type:
             self._handle("POST")
 
         def _handle(self, method: str) -> None:
+            self._raw_body = None
             if not self._host_ok():
                 return self._json(421, {"error": "unexpected Host header"})
             url = urlsplit(self.path)
@@ -327,6 +336,9 @@ def make_handler(app: Dashboard) -> type:
                         return self._send(200, body, "text/html; charset=utf-8", {"content-security-policy": _CSP})
                     raise ApiError(404, "not found")
                 if method == "POST":
+                    # Read the body before any check can reject the request: answering with unread
+                    # data in the socket makes Windows reset the connection before the client reads it.
+                    self._read_raw()
                     problem = self._post_ok()
                     if problem:
                         raise ApiError(403, problem)

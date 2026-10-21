@@ -15,6 +15,7 @@ Write a Python function once, describe its triggers in `pskit.yml`, and deploy i
 | [Providers](providers.md) | Capability matrix plus one section per cloud: options, credentials, resources, limits |
 | [CLI reference](cli.md) | Every `pskit` command and flag |
 | [Local development](local-development.md) | `pskit dev`, `pskit invoke`, `.env`, testing with `LocalRunner` |
+| [Studio](studio.md) | `pskit studio`: build functions, triggers, workflows, resources and on-prem drivers in a web UI, edit code (built-in editor or VS Code in Docker) and deploy |
 | [Dashboard](dashboard.md) | The deployment UI: static page, or live with logs and workflow executions (`--serve`) |
 | [Architecture](architecture.md) | How config becomes Terraform and how the runtime dispatches events; third-party providers |
 | [Migrating from AWS](migrating-from-aws.md) | Moving existing Lambda functions and Step Functions to pskit, then to other clouds |

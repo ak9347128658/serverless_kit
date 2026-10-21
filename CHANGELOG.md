@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-21
+
+### Added
+- **`pskit studio`**: a local web UI to build a project without writing YAML.
+  - New-project wizard; provider cards for all 11 targets with their capabilities; provider, region, runtime and provider-option forms; on-prem deploy method, services and tuning.
+  - AWS-console-style **Create function** wizard. Trigger types follow what the selected provider supports, with HTTP path-parameter preview and CORS/auth, a cron/rate builder, and a queue/storage/topic source picker (new, from Resources, **Browse account** or typed).
+  - Visual workflow builder: a diagram plus an inspector for every state type, choice rule groups, retry/catch, and nested parallel/map.
+  - Resources with an on-prem driver picker for every built-in driver and custom classes; secret fields read from env vars.
+  - Code page with a CodeMirror editor, or **Full VS Code**: code-server pulled into Docker on demand, run on the project and embedded.
+  - Deploy page (validate/package/plan/deploy/info/remove with live logs, invoke, local workflow runs); raw-YAML mode with a diff against disk.
+  - Edits stay in a draft that is validated live and saved with backups and conflict detection. `${...}` values are kept as written.
+  - Session token, loopback bind, Host/Origin checks. See `docs/studio.md`.
+- Studio account discovery: lists existing SQS queues, S3 buckets, SNS topics and state machines (boto3); Pub/Sub topics and subscriptions and GCS buckets (google-cloud-*); Azure queues and containers (connection string); and on-prem directories.
+- `providers/onprem_catalog.py`: a data catalog of on-prem driver fields, kept in sync with validation by a test.
+
+### Fixed
+- The dashboard server reads a POST body before rejecting the request (403/415), so Windows no longer resets the connection before the client reads the error.
+
 ## [0.7.0] - 2026-10-21
 
 ### Added

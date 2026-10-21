@@ -107,6 +107,22 @@ Generate the HTML dashboard from every `.pskit/*/deployment.json`. It doesn't ta
 
 See [dashboard.md](dashboard.md).
 
+## `pskit studio`
+
+Open the local web UI for editing the project in forms instead of YAML (functions, triggers, workflows, resources,
+on-prem drivers, provider options, code) and running validate / deploy / invoke. It doesn't take the common project options.
+
+| Flag | Default | |
+|---|---|---|
+| `-d, --dir` | `.` | project folder (an empty folder starts the new-project wizard) |
+| `--host` | `127.0.0.1` | bind address. A non-loopback address prints a warning |
+| `--port` | `8770` | port |
+| `--open` | | open in the browser |
+| `--vscode-image IMAGE` | `codercom/code-server:4.96.4` | image for Full VS Code (also `PSKIT_STUDIO_VSCODE_IMAGE`) |
+
+It prints `http://127.0.0.1:8770/#token=...`. The token is required on every API call, so open that exact URL.
+See [studio.md](studio.md).
+
 ## `pskit dev`
 
 Local HTTP server that routes requests to your handlers, with hot reload.

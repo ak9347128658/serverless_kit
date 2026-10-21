@@ -124,6 +124,8 @@ Create `examples/NN-name/` with `pskit.yml`, handler code and a `README.md`. `te
 
 ### Dashboard UI
 
+The same Vite project also builds the studio (`pskit studio`): `vite.studio.config.ts` with entry `studio.html` writes `src/py_serverless_kit/studio/studio.html`. `npm run build` builds both, and `npm run dev:studio` runs it against `pskit studio --port 8770` (or `VITE_MOCK=1 npm run dev:studio` with an in-browser mock API). The Python side is `src/py_serverless_kit/studio/` and its form catalog comes from `/api/meta`, so new providers, events, drivers and options appear in the UI without UI changes.
+
 The dashboard page is built from [`dashboard-ui/`](../dashboard-ui) (Vite + React 18 + TypeScript). The build output is committed as `src/py_serverless_kit/dashboard/template.html`, a single file with JS and CSS inline. `dashboard/generator.py` fills its `{{TITLE}}` and `{{DATA}}` placeholders.
 
 - Never hand-edit `template.html`. Change `dashboard-ui/src/` and rebuild:

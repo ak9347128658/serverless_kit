@@ -1,0 +1,402 @@
+import { useState } from "react";
+import { Chip } from "../../components/Badge";
+import { DataTable, type Column } from "../../components/DataTable";
+import { Drawer } from "../../components/Drawer";
+import { useConfirm, useToast } from "../components/Feedback";
+import { EnumSelect, FieldForm, FormRow, KeyValueEditor, Segmented, TextInput, Toggle } from "../components/Forms";
+import { DiscoverModal, InlineIssues, PageHeader } from "../components/Misc";
+import { href, navigate } from "../route";
+import { useStudio } from "../store";
+import type { Driver, Json, JsonObject } from "../types";
+import { asArray, asObject, CLASS_RE, getIn, NAME_RE, setIn, str, uniqueName, type Path } from "../util";
+
+interface Row {
+  name: string;
+  res: JsonObject;
+}
+
+const MANAGEABLE = ["storage", "queue", "topic"];
+const CLOUD_ORDER = ["aws", "azure", "gcp", "alibaba", "tencent", "huawei", "oracle", "ibm", "digitalocean", "cloudflare", "self-hosted", "any"];
+const CLOUD_LABEL: Record<string, string> = {
+  aws: "AWS",
+  azure: "Azure",
+  gcp: "Google Cloud",
+  alibaba: "Alibaba Cloud",
+  tencent: "Tencent Cloud",
+  huawei: "Huawei Cloud",
+  oracle: "Oracle Cloud",
+  ibm: "IBM Cloud",
+  digitalocean: "DigitalOcean",
+  cloudflare: "Cloudflare",
+  "self-hosted": "Self-hosted",
+  any: "Built-in & custom",
+};
+
+export function ResourcesView({ rest }: { rest: string[] }) {
+  const { draft, replace, issuesAt } = useStudio();
+  const confirm = useConfirm();
+  const toast = useToast();
+  const resources = asObject(draft.resources);
+  const rows: Row[] = Object.entries(resources).map(([name, res]) => ({ name, res: asObject(res) }));
+  const editing = rest[0] === "new" ? "new" : rest[0] && rest[0] in resources ? rest[0] : null;
+
+  const usedBy = (name: string) =>
+    Object.entries(asObject(draft.functions))
+      .filter(([, fn]) => asArray(asObject(fn).events).some((e) => Object.values(asObject(e)).some((c) => asObject(c).resource === name)))
+      .map(([n]) => n);
+
+  const remove = async (name: string) => {
+    const users = usedBy(name);
+    const ok = await confirm({
+      title: `Delete resource ${name}?`,
+      body: users.length ? `Triggers in ${users.join(", ")} use it and will stop validating until you change them.` : "Bound functions lose its PSKIT_RESOURCE_* variables. Nothing is deleted in the cloud.",
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (ok !== "confirm") return;
+    let raw: Json = setIn(draft, ["resources", name], undefined);
+    if (getIn(raw, ["providers", "onprem", "resources", name]) !== undefined) raw = setIn(raw, ["providers", "onprem", "resources", name], undefined);
+    replace(raw as JsonObject);
+    toast(`Deleted ${name} (not saved yet)`, "info");
+  };
+
+  const columns: Column<Row>[] = [
+    {
+      key: "name",
+      header: "Resource",
+      sortValue: (r) => r.name,
+      render: (r) => (
+        <div className="cell-name">
+          <a href={href("resources", r.name)}>
+            <b>{r.name}</b>
+          </a>
+          <span className="muted mono small">{str(r.res.name) || r.name}</span>
+        </div>
+      ),
+    },
+    { key: "type", header: "Type", sortValue: (r) => str(r.res.type), render: (r) => <span className="badge badge-accent">{str(r.res.type)}</span> },
+    {
+      key: "mode",
+      header: "Mode",
+      render: (r) => (r.res.external ? <span className="badge badge-warn">external</span> : <span className="badge badge-ok">managed</span>),
+    },
+    {
+      key: "driver",
+      header: "On-prem driver",
+      render: (r) => {
+        const d = str(asObject(r.res.options).driver) || str(asObject(getIn(draft, ["providers", "onprem", "resources", r.name, "options"])).driver);
+        return d ? <span className="mono small">{d}</span> : <span className="muted">builtin</span>;
+      },
+    },
+    {
+      key: "fns",
+      header: "Bound to",
+      render: (r) => {
+        const fns = asArray(r.res.functions).map((f) => str(f));
+        return fns.length ? <span className="chips">{fns.map((f) => <Chip key={f}>{f}</Chip>)}</span> : <span className="muted">all functions</span>;
+      },
+    },
+    {
+      key: "issues",
+      header: "",
+      render: (r) => (issuesAt(["resources", r.name]).some((i) => i.level === "error") ? <span className="badge badge-err">error</span> : null),
+    },
+    {
+      key: "actions",
+      header: "",
+      render: (r) => (
+        <span onClick={(e) => e.stopPropagation()}>
+          <button type="button" className="btn btn-sm btn-danger" onClick={() => void remove(r.name)}>
+            Delete
+          </button>
+        </span>
+      ),
+    },
+  ];
+
+  return (
+    <div className="page">
+      <PageHeader
+        title="Resources"
+        subtitle="Buckets, queues, topics, databases and any other service your functions use, once for every cloud."
+        actions={
+          <a className="btn btn-primary" href={href("resources", "new")}>
+            + Add resource
+          </a>
+        }
+      />
+      <div className="card">
+        <DataTable
+          columns={columns}
+          rows={rows}
+          rowKey={(r) => r.name}
+          onRowClick={(r) => navigate("resources", r.name)}
+          emptyTitle="No resources yet"
+          emptyHint="Declare a bucket, queue, topic, database or custom service, managed by pskit or one that already exists."
+        />
+      </div>
+      {editing && <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} />}
+    </div>
+  );
+}
+
+function ResourceDrawer({ name: existing, onClose }: { name: string | null; onClose: () => void }) {
+  const studio = useStudio();
+  const { draft, meta, providerName, replace, issuesAt, state } = studio;
+  const toast = useToast();
+  const resources = asObject(draft.resources);
+  const [name, setName] = useState(existing || uniqueName("my-resource", Object.keys(resources)));
+  const [res, setRes] = useState<JsonObject>(() => (existing ? { ...asObject(resources[existing]) } : { type: "storage" }));
+  const onpremPath: Path = providerName === "onprem" ? [] : ["providers", "onprem", "resources"];
+  const [onpremOptions, setOnpremOptions] = useState<JsonObject>(() =>
+    providerName === "onprem"
+      ? asObject(asObject(existing ? resources[existing] : {}).options)
+      : asObject(getIn(draft, [...onpremPath, existing || "", "options"])),
+  );
+  const [browse, setBrowse] = useState(false);
+  const type = str(res.type, "storage");
+  const managedAllowed = MANAGEABLE.includes(type);
+  const external = res.external === true || !managedAllowed;
+  const functions = Object.keys(asObject(draft.functions));
+  const nameError = !NAME_RE.test(name) ? "letters, digits, - and _; start with a letter" : name !== existing && name in resources ? "already exists" : null;
+  const driverList: Driver[] = (meta.onprem.drivers as Record<string, Driver[] | undefined>)[type] || [];
+  const target = state.target?.provider || providerName;
+
+  const set = (key: string, value: Json | undefined) =>
+    setRes((r) => {
+      const next = { ...r };
+      if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+
+  const apply = () => {
+    if (nameError) return;
+    const body: JsonObject = { ...res };
+    if (!managedAllowed) body.external = true;
+    if (body.external !== true) delete body.external;
+    const cleanOpts: JsonObject = {};
+    for (const [k, v] of Object.entries(onpremOptions)) if (v !== undefined && v !== "" && v !== null) cleanOpts[k] = v;
+    let raw: Json = draft;
+    if (existing && existing !== name) {
+      raw = setIn(raw, ["resources", existing], undefined);
+      if (onpremPath.length) raw = setIn(raw, [...onpremPath, existing], undefined);
+    }
+    if (providerName === "onprem") {
+      if (Object.keys(cleanOpts).length) body.options = cleanOpts;
+      else delete body.options;
+    } else {
+      // Keep the on-prem driver in a provider override so the base config stays portable.
+      const overridePath = [...onpremPath, name];
+      if (Object.keys(cleanOpts).length) raw = setIn(raw, overridePath, { ...asObject(getIn(raw, overridePath)), options: cleanOpts });
+      else if (getIn(raw, overridePath) !== undefined) raw = setIn(raw, [...overridePath, "options"], undefined);
+    }
+    raw = existing === name ? setIn(raw, ["resources", name], body) : setIn(raw, ["resources"], { ...asObject((raw as JsonObject).resources), [name]: body });
+    replace(raw as JsonObject);
+    toast(`${existing ? "Updated" : "Added"} resource ${name} (not saved yet)`, "ok");
+    onClose();
+  };
+
+  const driver = str(onpremOptions.driver) || "builtin";
+  const selected = driverList.find((d) => d.name === driver);
+  const fieldKeys = new Set((selected?.fields || []).flatMap((f) => [f.key, `${f.key}_env`]));
+  const extraArgs: JsonObject = {};
+  if (driver === "custom") {
+    for (const [k, v] of Object.entries(onpremOptions)) if (k !== "driver" && !fieldKeys.has(k)) extraArgs[k] = v;
+  }
+
+  return (
+    <Drawer
+      open
+      title={existing ? `Resource ${existing}` : "Add resource"}
+      onClose={onClose}
+      actions={
+        <button type="button" className="btn btn-primary" disabled={!!nameError} onClick={apply}>
+          {existing ? "Apply" : "Add"}
+        </button>
+      }
+    >
+      <div className="form">
+        {existing && <InlineIssues issues={issuesAt(["resources", existing])} />}
+        <FormRow label="Key" required error={nameError} help="How handlers refer to it: resource(&quot;key&quot;), and triggers use resource: key.">
+          <TextInput mono value={name} onChange={setName} invalid={!!nameError} autoFocus={!existing} />
+        </FormRow>
+        <FormRow label="Type">
+          <EnumSelect
+            value={type}
+            options={meta.resource_types.length ? meta.resource_types : ["storage", "queue", "topic", "database", "cache", "custom"]}
+            onChange={(t) => setRes((r) => ({ ...r, type: t, ...(MANAGEABLE.includes(t) ? {} : { external: true }) }))}
+          />
+        </FormRow>
+        <FormRow
+          label="Mode"
+          help={external ? "Already exists or runs elsewhere. pskit never creates or deletes it." : "pskit creates it on deploy and removes it with pskit remove."}
+        >
+          <Segmented
+            label="Mode"
+            value={external ? "external" : "managed"}
+            onChange={(m) => set("external", m === "external" ? true : undefined)}
+            options={[
+              { value: "managed", label: "Managed by pskit", disabled: !managedAllowed, title: managedAllowed ? undefined : `pskit doesn't create ${type} resources` },
+              { value: "external", label: "External / existing" },
+            ]}
+          />
+        </FormRow>
+        <FormRow label="Native name" help={external ? "The exact bucket/queue/topic name (or put an arn in connection)." : "Defaults to the key; pskit prefixes service and stage where the provider needs it."}>
+          <div className="row-gap">
+            <TextInput mono value={str(res.name)} placeholder={name} onChange={(v) => set("name", v)} />
+            {external && managedAllowed && (
+              <button type="button" className="btn" onClick={() => setBrowse(true)}>
+                Browse account…
+              </button>
+            )}
+          </div>
+        </FormRow>
+        <FormRow label="Connection" help="Values handed to handlers as PSKIT_RESOURCE_<KEY>_<NAME>. Use ${env} for secrets, never a literal password.">
+          <KeyValueEditor value={asObject(res.connection)} keyPattern={/^[A-Za-z][A-Za-z0-9_]*$/} keyPlaceholder="host" onChange={(v) => set("connection", v)} addLabel="Add connection value" />
+        </FormRow>
+        <FormRow label="Bound functions" help="Empty = every function (generated orchestrators excluded).">
+          <div className="check-grid">
+            {functions.map((f) => {
+              const list = asArray(res.functions).map((x) => str(x));
+              return (
+                <label key={f} className="check">
+                  <input
+                    type="checkbox"
+                    checked={list.includes(f)}
+                    onChange={(e) => set("functions", e.target.checked ? [...list, f] : list.filter((x) => x !== f))}
+                  />
+                  {f}
+                </label>
+              );
+            })}
+            {!functions.length && <span className="muted">No functions yet.</span>}
+          </div>
+        </FormRow>
+
+        {driverList.length > 0 && (
+          <div className="driver-box card card-pad">
+            <h3>On-premises driver</h3>
+            <p className="muted small">
+              {providerName === "onprem" ? (
+                <>
+                  Where the on-prem host reads this {type} from. Stored in <code className="mono">resources.{name}.options</code>.
+                </>
+              ) : (
+                <>
+                  Used when you deploy with <code className="mono">--provider onprem</code>. Stored in{" "}
+                  <code className="mono">providers.onprem.resources.{name}.options</code>, so {meta.providers.find((p) => p.name === providerName)?.display_name} isn't affected.
+                </>
+              )}
+            </p>
+            <DriverPicker drivers={driverList} value={driver} onChange={(d) => setOnpremOptions(d === "builtin" ? {} : { driver: d })} />
+            {selected && selected.notes && <p className="muted small">{selected.notes}</p>}
+            {selected && selected.fields.length > 0 && (
+              <FieldForm
+                fields={selected.fields}
+                value={onpremOptions}
+                envStyle="key"
+                idPrefix={`drv-${driver}`}
+                onChange={(k, v) =>
+                  setOnpremOptions((o) => {
+                    const next: JsonObject = { ...o, driver };
+                    if (v === undefined || v === "") delete next[k];
+                    else next[k] = v;
+                    return next;
+                  })
+                }
+              />
+            )}
+            {driver === "custom" && (
+              <>
+                {!(selected?.fields || []).some((f) => f.key === "class") && (
+                  <FormRow label="Class" required error={onpremOptions.class && !CLASS_RE.test(str(onpremOptions.class)) ? "use package.module:ClassName" : !onpremOptions.class ? "required" : null}>
+                    <TextInput mono value={str(onpremOptions.class)} placeholder="app.backends:RabbitQueue" onChange={(v) => setOnpremOptions((o) => ({ ...o, driver, class: v }))} />
+                  </FormRow>
+                )}
+                {onpremOptions.class && !CLASS_RE.test(str(onpremOptions.class)) && (selected?.fields || []).some((f) => f.key === "class") && (
+                  <div className="form-error">class must look like package.module:ClassName</div>
+                )}
+                <FormRow label="Constructor arguments" help="Passed as keyword arguments. A key ending in _env is read from the host's environment.">
+                  <KeyValueEditor
+                    value={extraArgs}
+                    secrets={false}
+                    keyPattern={/^[A-Za-z_][A-Za-z0-9_]*$/}
+                    keyPlaceholder="url_env"
+                    addLabel="Add argument"
+                    onChange={(kv) =>
+                      setOnpremOptions((o) => {
+                        const next: JsonObject = { driver };
+                        for (const [k, v] of Object.entries(o)) if (k === "driver" || fieldKeys.has(k) || k === "class") next[k] = v;
+                        return { ...next, ...(kv || {}) };
+                      })
+                    }
+                  />
+                </FormRow>
+                <p className="muted small">
+                  The class implements submit / claim / settle / depth / recover (queues) or scan / put / get / delete (storage). See examples/19-custom-drivers.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+        <details className="advanced">
+          <summary>Provider-specific options</summary>
+          <p className="muted small">resources.{name}.options for the main provider, as JSON key/value pairs.</p>
+          {providerName === "onprem" ? (
+            <p className="muted small">On-prem options are set with the driver above.</p>
+          ) : (
+            <KeyValueEditor value={asObject(res.options)} secrets={false} onChange={(v) => set("options", v)} addLabel="Add option" />
+          )}
+        </details>
+        <Toggle checked={external} onChange={(b) => managedAllowed && set("external", b ? true : undefined)} label="external (pskit doesn't create it)" />
+      </div>
+      <DiscoverModal
+        open={browse}
+        provider={target}
+        kind={type === "storage" ? "storage" : type === "queue" ? "queue" : "topic"}
+        region={str(asObject(draft.provider).region) || undefined}
+        onClose={() => setBrowse(false)}
+        onPick={(item) => {
+          set("name", item.name);
+          if (item.arn) set("connection", { ...asObject(res.connection), arn: item.arn });
+        }}
+      />
+    </Drawer>
+  );
+}
+
+function DriverPicker({ drivers, value, onChange }: { drivers: Driver[]; value: string; onChange: (d: string) => void }) {
+  const groups = new Map<string, Driver[]>();
+  const withBuiltin = drivers.some((d) => d.name === "builtin") ? drivers : [{ name: "builtin", label: "Built-in (folder on the host)", cloud: "any", fields: [] }, ...drivers];
+  for (const d of withBuiltin) groups.set(d.cloud, [...(groups.get(d.cloud) || []), d]);
+  const ordered = Array.from(groups.entries()).sort((a, b) => {
+    const ia = CLOUD_ORDER.indexOf(a[0]);
+    const ib = CLOUD_ORDER.indexOf(b[0]);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  return (
+    <div className="driver-groups" role="radiogroup" aria-label="Driver">
+      {ordered.map(([cloud, list]) => (
+        <div key={cloud} className="driver-group">
+          <div className="muted small driver-cloud">{CLOUD_LABEL[cloud] || cloud}</div>
+          <div className="chips">
+            {list.map((d) => (
+              <button
+                key={d.name}
+                type="button"
+                role="radio"
+                aria-checked={d.name === value}
+                className={d.name === value ? "chip chip-accent chip-btn" : "chip chip-btn"}
+                onClick={() => onChange(d.name)}
+                title={d.notes}
+              >
+                {d.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}

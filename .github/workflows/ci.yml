@@ -59,7 +59,7 @@ jobs:
           python scripts/validate_all_providers.py --provider ${{ matrix.provider }}
 
   dashboard-ui:
-    name: dashboard UI build is committed
+    name: dashboard and studio UI builds are committed
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,8 +71,10 @@ jobs:
       - name: Build
         working-directory: dashboard-ui
         run: npm ci && npm run build
-      - name: template.html matches dashboard-ui/
-        run: git diff --exit-code src/py_serverless_kit/dashboard/template.html
+      - name: template.html and studio.html match dashboard-ui/
+        run: |
+          git diff --exit-code src/py_serverless_kit/dashboard/template.html src/py_serverless_kit/studio/studio.html
+          test -z "$(git status --porcelain src/py_serverless_kit/studio/studio.html)"
 
   build:
     runs-on: ubuntu-latest

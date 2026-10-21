@@ -36,6 +36,7 @@ functions:
 pskit deploy                      # terraform apply on AWS
 pskit deploy --provider gcp       # same code, Google Cloud Functions
 pskit dashboard --open            # every function, trigger, URL and resource id
+pskit studio --open               # or build all of the above in a web UI instead of YAML
 ```
 
 ---
@@ -60,6 +61,7 @@ Teams that build on AWS Lambda and Step Functions end up with code full of API G
 - **Terraform underneath:** real, reviewable `main.tf.json`, any backend (S3, GCS, azurerm, ...), works with OpenTofu. Escape hatches: `terraform.extra`, `${tf:...}` references, per-function `options`.
 - **Config that scales:** `extends:`, per-provider `providers:` blocks, per-stage `stages:` blocks, and `${env:}`, `${opt:}`, `${self:}`, `${file()}` variables.
 - **Local dev:** `pskit dev` (hot-reloading HTTP server), `pskit invoke` with synthetic queue/storage/schedule events, and a `LocalRunner` for pytest.
+- **Studio:** `pskit studio` builds the project in a web UI instead of YAML. It covers provider cards for all 11 targets, an AWS-console-style function wizard whose trigger list follows what the provider supports, a visual workflow builder, resources with an on-prem driver picker (every built-in driver plus custom classes) and **Browse account** pickers for existing queues and buckets. It also has a built-in code editor or full VS Code (code-server, pulled into Docker on demand) and deploy/invoke with live logs.
 - **Dashboard:** a self-contained React page listing every deployment, function, trigger, endpoint, ARN/id, console link, workflow and resource. `pskit dashboard --serve` adds live on-prem logs and stats and workflow executions (start, follow, cancel). `pskit logs -f` tails an on-prem host from the terminal.
 - **Production details:** deterministic artifacts (no redeploy when nothing changed), partial batch failures (`BatchResult`), structured JSON logs, consistent HTTP error mapping, stack traces hidden from clients, a stdlib-only runtime (no extra dependencies inside your function), and hooks (`before_deploy`, ...).
 
@@ -249,6 +251,7 @@ Eighteen runnable examples live in [`examples/`](https://github.com/ak9347128658
 | [Providers](https://github.com/ak9347128658/serverless_kit/blob/main/docs/providers.md) | Options, credentials, resources and limits per cloud |
 | [CLI](https://github.com/ak9347128658/serverless_kit/blob/main/docs/cli.md) | Every command and flag |
 | [Local development](https://github.com/ak9347128658/serverless_kit/blob/main/docs/local-development.md) | `pskit dev`, `invoke`, testing |
+| [Studio](https://github.com/ak9347128658/serverless_kit/blob/main/docs/studio.md) | Build and deploy a project in a web UI |
 | [Dashboard](https://github.com/ak9347128658/serverless_kit/blob/main/docs/dashboard.md) | The deployment UI |
 | [Architecture](https://github.com/ak9347128658/serverless_kit/blob/main/docs/architecture.md) | Internals and third-party providers |
 | [Migrating from AWS](https://github.com/ak9347128658/serverless_kit/blob/main/docs/migrating-from-aws.md) | Lambda + Step Functions → pskit |
