@@ -228,7 +228,16 @@ ENV_HINTS: Dict[str, List[Dict[str, Any]]] = {
         {"name": "ARM_TENANT_ID", "help": "Tenant id (service principal)", "secret": False},
         {"name": "ARM_CLIENT_ID", "help": "Service principal app id", "secret": False},
         {"name": "ARM_CLIENT_SECRET", "help": "Service principal secret", "secret": True},
-        {"name": "AZURE_STORAGE_CONNECTION_STRING", "help": "Lets studio list queues/containers", "secret": True},
+        {
+            "name": "AZURE_STORAGE_CONNECTION_STRING",
+            "help": "Storage account for Browse account and test messages (default: read from the deployment)",
+            "secret": True,
+        },
+        {
+            "name": "AZURE_SERVICEBUS_CONNECTION_STRING",
+            "help": "Service Bus namespace for test topic messages (default: read from the deployment)",
+            "secret": True,
+        },
     ],
     "gcp": [
         {"name": "GOOGLE_CLOUD_PROJECT", "help": "Project id (provider.options.project default)", "secret": False},

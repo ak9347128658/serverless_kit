@@ -443,12 +443,63 @@ def _send_gcp(project_id: Optional[str], trig: Dict[str, Any], payload: Any) -> 
     return {"message_ids": ids, "topic": topic}
 
 
-def _send_azure(trig: Dict[str, Any], payload: Any) -> Dict[str, Any]:
+def azure_connections(project: Any) -> Dict[str, Optional[str]]:
+    """Connection strings for the Function App's storage account and Service Bus namespace.
+
+    ``AZURE_STORAGE_CONNECTION_STRING`` / ``AZURE_SERVICEBUS_CONNECTION_STRING`` win; otherwise they are read from
+    the Terraform state of the deployment (pskit created both), so no setup is needed after ``pskit deploy``.
+    """
+    out: Dict[str, Optional[str]] = {
+        "storage": os.environ.get("AZURE_STORAGE_CONNECTION_STRING") or None,
+        "servicebus": os.environ.get("AZURE_SERVICEBUS_CONNECTION_STRING") or None,
+    }
+    if out["storage"] and out["servicebus"]:
+        return out
+    state: Dict[str, Any] = {}
+    local = project.work_dir / "terraform.tfstate"
+    try:
+        if local.is_file():
+            state = json.loads(local.read_text("utf-8"))
+        elif (project.work_dir / "main.tf.json").is_file():
+            from ..terraform.runner import TerraformRunner
+
+            runner = TerraformRunner(project.work_dir, binary=project.config.provider.terraform.binary, echo=lambda _m: None)
+            runner.init()
+            state = runner.state_pull()
+    except Exception:  # noqa: BLE001 - fall back to the "set the variable" message
+        state = {}
+    for res in state.get("resources") or []:
+        if res.get("mode") != "managed":
+            continue
+        for inst in res.get("instances") or []:
+            attrs = inst.get("attributes") or {}
+            if res.get("type") == "azurerm_storage_account" and not out["storage"]:
+                out["storage"] = attrs.get("primary_connection_string") or None
+            if res.get("type") == "azurerm_servicebus_namespace" and not out["servicebus"]:
+                out["servicebus"] = attrs.get("default_primary_connection_string") or None
+    return out
+
+
+_AZ_STORAGE_HINT = (
+    "no storage connection string: deploy first (pskit reads it from the deployment), or set "
+    "AZURE_STORAGE_CONNECTION_STRING, e.g. with\n"
+    "  az storage account show-connection-string -g <resource-group> -n <storage-account> --query connectionString -o tsv"
+)
+_AZ_BUS_HINT = (
+    "no Service Bus connection string: deploy first (pskit reads it from the deployment), or set "
+    "AZURE_SERVICEBUS_CONNECTION_STRING, e.g. with\n"
+    "  az servicebus namespace authorization-rule keys list -g <resource-group> --namespace-name <namespace> "
+    "-n RootManageSharedAccessKey --query primaryConnectionString -o tsv"
+)
+
+
+def _send_azure(trig: Dict[str, Any], payload: Any, conns: Optional[Dict[str, Optional[str]]] = None) -> Dict[str, Any]:
     kind, target = trig["type"], str(trig.get("name") or "")
+    conns = conns or {}
     if kind == "topic":
-        conn = os.environ.get("AZURE_SERVICEBUS_CONNECTION_STRING")
+        conn = conns.get("servicebus") or os.environ.get("AZURE_SERVICEBUS_CONNECTION_STRING")
         if not conn:
-            raise TriggerError("set AZURE_SERVICEBUS_CONNECTION_STRING to publish to Service Bus topics")
+            raise TriggerError(_AZ_BUS_HINT)
         try:
             from azure.servicebus import ServiceBusClient, ServiceBusMessage  # type: ignore[import-not-found,import-untyped,unused-ignore]
         except ImportError:
@@ -457,11 +508,9 @@ def _send_azure(trig: Dict[str, Any], payload: Any) -> Dict[str, Any]:
         with ServiceBusClient.from_connection_string(conn) as client, client.get_topic_sender(target) as sender:
             sender.send_messages(ServiceBusMessage(message if isinstance(message, str) else _dumps(message)))
         return {"sent": 1, "topic": target}
-    conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+    conn = conns.get("storage") or os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
     if not conn:
-        raise TriggerError(
-            "set AZURE_STORAGE_CONNECTION_STRING (the Function App's storage account) to send queue messages or upload blobs"
-        )
+        raise TriggerError(_AZ_STORAGE_HINT)
     if kind == "queue":
         try:
             from azure.storage.queue import QueueClient, TextBase64EncodePolicy  # type: ignore[import-not-found,import-untyped,unused-ignore]
@@ -537,7 +586,7 @@ def send(
         elif provider == "gcp" and trig["type"] in ("queue", "topic", "storage"):
             out = _send_gcp(project.config.provider.options.get("project"), trig, payload)
         elif provider == "azure":
-            out = _send_azure(trig, payload)
+            out = _send_azure(trig, payload, azure_connections(project))
         else:
             url = str(fn_rec.get("url"))
             out = _http("POST", url, _dumps(envelope(trig["type"], payload)).encode(), {"content-type": "application/json"})
@@ -648,7 +697,7 @@ def send_resource(project: Any, record: Optional[Dict[str, Any]], key: str, payl
         elif provider == "gcp":
             out = _send_gcp(project.config.provider.options.get("project"), trig, payload)
         else:
-            out = _send_azure(trig, payload)
+            out = _send_azure(trig, payload, azure_connections(project))
     except TriggerError:
         raise
     except Exception as exc:  # noqa: BLE001 - credentials, permissions, missing resources: report them

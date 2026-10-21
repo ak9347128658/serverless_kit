@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 - **Test resources directly**: `pskit resources send KEY` sends a message to a queue, uploads an object to a bucket or publishes to a topic, for managed resources (once deployed) and external / custom-named ones (right away). `pskit resources send --list` shows how to test every resource: sample payload, pskit and cloud CLI commands and console steps; for database, cache and custom resources it shows the `PSKIT_RESOURCE_*` variables and a Python / Node.js snippet. Studio: **Test a resource** panel and a **Test** button on every resource row.
 
+### Fixed
+- Azure: `pskit resources send` and `pskit trigger` read the storage account and Service Bus connection strings from the deployment's Terraform state, so `AZURE_STORAGE_CONNECTION_STRING` / `AZURE_SERVICEBUS_CONNECTION_STRING` are only needed as overrides. The error now shows the `az` command that prints them.
+
 ## [1.1.0] - 2026-10-21
 
 ### Added

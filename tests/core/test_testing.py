@@ -255,3 +255,52 @@ def test_cli_resources_send(make_project, monkeypatch, tmp_path):
     result = CliRunner().invoke(cli, ["resources", "send", "uploads", "-d", '{"key": "k", "content": "c"}', "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["uploaded"] == "s3://company-uploads/k"
+
+
+def test_azure_connection_strings_come_from_the_deployment(make_project, monkeypatch):
+    import sys
+    import types
+
+    project = make_project(RESOURCES.replace("name: aws, region: eu-west-1", "name: azure"))
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
+    monkeypatch.delenv("AZURE_SERVICEBUS_CONNECTION_STRING", raising=False)
+    project.work_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "resources": [
+            {"mode": "managed", "type": "azurerm_storage_account", "name": "app",
+             "instances": [{"attributes": {"primary_connection_string": "DefaultEndpointsProtocol=https;AccountName=x"}}]},
+            {"mode": "managed", "type": "azurerm_servicebus_namespace", "name": "bus",
+             "instances": [{"attributes": {"default_primary_connection_string": "Endpoint=sb://bus/"}}]},
+        ]
+    }
+    (project.work_dir / "terraform.tfstate").write_text(json.dumps(state))
+    conns = testing.azure_connections(project)
+    assert conns == {"storage": "DefaultEndpointsProtocol=https;AccountName=x", "servicebus": "Endpoint=sb://bus/"}
+    monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", "from-env")
+    assert testing.azure_connections(project)["storage"] == "from-env"
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING")
+
+    sent = []
+
+    class QueueClient:
+        @classmethod
+        def from_connection_string(cls, conn, queue, message_encode_policy=None):
+            sent.append(("conn", conn, queue))
+            return cls()
+
+        def send_message(self, text):
+            sent.append(("msg", text))
+
+    fake = types.ModuleType("azure.storage.queue")
+    fake.QueueClient = QueueClient  # type: ignore[attr-defined]
+    fake.TextBase64EncodePolicy = lambda: None  # type: ignore[attr-defined]
+    for name in ("azure", "azure.storage"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "azure.storage.queue", fake)
+    record = {"provider": "azure", "status": "deployed", "functions": []}
+    out = testing.send_resource(project, record, "jobs", {"order_id": 1})
+    assert out["sent"] == 1
+    assert sent == [("conn", "DefaultEndpointsProtocol=https;AccountName=x", "jobs"), ("msg", '{"order_id":1}')]
+    (project.work_dir / "terraform.tfstate").unlink()
+    with pytest.raises(TriggerError, match="az storage account show-connection-string"):
+        testing.send_resource(project, record, "jobs", {"order_id": 1})
