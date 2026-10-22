@@ -538,3 +538,4 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .code-block { position: relative; }
 .code-block .code-copy { position: absolute; top: 14px; right: 8px; }
 .code-block .md-code { max-height: 420px; overflow: auto; padding-right: 64px; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-align: left; }

@@ -779,6 +779,35 @@ def check_resource(project: Any, record: Optional[Dict[str, Any]], key: str) -> 
             "checked_from": "this machine"}
 
 
+def host_call(
+    project: Any, record: Optional[Dict[str, Any]], method: str, path: str, query: Optional[Dict[str, Any]] = None
+) -> Any:
+    """Call the deployed on-prem host's admin API (``/__pskit/...``); errors become :class:`TriggerError`."""
+    from .onprem_control import control_for
+
+    if project.config.provider.name != "onprem":
+        raise TriggerError("browsing data works for on-prem resources (the host reads them); use the cloud console here")
+    control = control_for(record or {}, project.root) if record else None
+    if control is None:
+        raise TriggerError("the on-prem host is not deployed yet: run `pskit deploy`")
+    try:
+        return control.request(method, path, query=query)
+    except KeyError as exc:
+        raise TriggerError(f"{exc.args[0] if exc.args else exc} (redeploy if you just added it)") from None
+    except (ValueError, OSError, PermissionError) as exc:
+        raise TriggerError(str(exc)) from None
+
+
+def browse_resource(
+    project: Any, record: Optional[Dict[str, Any]], key: str, offset: int = 0, limit: int = 50, prefix: str = ""
+) -> Dict[str, Any]:
+    """A page of a resource's messages or objects, read by the on-prem host (nothing is consumed)."""
+    if key not in project.config.resources:
+        raise TriggerError(f"unknown resource {key!r}")
+    return dict(host_call(project, record, "GET", f"/__pskit/resources/{key}/data",
+                          {"offset": offset, "limit": limit, "prefix": prefix}))
+
+
 def purge_resource(project: Any, record: Optional[Dict[str, Any]], key: str) -> Dict[str, Any]:
     """Delete the messages / objects of a built-in on-prem queue, bucket or topic on the host."""
     from .onprem_control import control_for

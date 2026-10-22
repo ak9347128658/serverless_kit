@@ -201,10 +201,14 @@ def resource_test_guide(root: Path, provider: str, stage: str) -> Dict[str, Any]
     return resource_guide(project, deployment_record(root, provider, stage))
 
 
-def resource_action(root: Path, provider: str, stage: str, key: str, action: str) -> Dict[str, Any]:
+def resource_action(
+    root: Path, provider: str, stage: str, key: str, action: str, extra: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """``check`` (is it reachable?) or ``clear`` (delete a built-in on-prem resource's data)."""
     from ..core.project import Project
-    from ..core.testing import TriggerError, check_resource, purge_resource
+    from ..core.testing import TriggerError, browse_resource, check_resource, host_call, purge_resource
+
+    extra = extra or {}
 
     try:
         project = Project.load(cwd=root, provider=provider, stage=stage)
@@ -214,6 +218,16 @@ def resource_action(root: Path, provider: str, stage: str, key: str, action: str
     try:
         if action == "check":
             return check_resource(project, record, key)
+        if action == "data":
+            return browse_resource(project, record, key, int(extra.get("offset") or 0), int(extra.get("limit") or 50),
+                                   str(extra.get("prefix") or ""))
+        if action == "object":
+            obj = str(extra.get("object") or "")
+            if extra.get("delete"):
+                return dict(host_call(project, record, "DELETE", f"/__pskit/resources/{key}/object", {"key": obj}))
+            return dict(host_call(project, record, "GET", f"/__pskit/resources/{key}/object", {"key": obj}))
+        if action == "message-delete":
+            return dict(host_call(project, record, "DELETE", f"/__pskit/resources/{key}/message", {"id": str(extra.get("id") or "")}))
         if action == "usage":
             from ..core.resource_usage import usage
 

@@ -6,6 +6,7 @@ import { useStudio } from "../store";
 import type { JsonObject, OnPremCatalogItem, OnPremService, OnPremServicesState, OnPremTarget } from "../types";
 import { asObject, NAME_RE, uniqueName } from "../util";
 import { JobConsole } from "./Console";
+import { Markdown } from "./Markdown";
 import { useConfirm, useToast } from "./Feedback";
 import { FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
 import type { GuideRef } from "./ResourceGuides";
@@ -33,6 +34,7 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState<OnPremCatalogItem | null | "pick">(null);
   const [details, setDetails] = useState<string | null>(null);
+  const [usage, setUsage] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useJob(jobId);
   const { draft, replace } = useStudio();
@@ -139,6 +141,9 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
                 <td className="mono small">{svc.port ? `${svc.address}:${svc.port}` : "—"}</td>
                 <td>
                   <span className="row-gap">
+                    <button type="button" className="btn btn-sm btn-primary" onClick={() => setUsage(svc.key)} title="Connect from any program: code, terminal, security">
+                      How to use
+                    </button>
                     <button type="button" className="btn btn-sm" onClick={() => setDetails(svc.key)}>
                       Details
                     </button>
@@ -175,6 +180,7 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
         />
       )}
       {details && <DetailsDrawer serviceKey={details} onClose={() => setDetails(null)} />}
+      {usage && <ServiceUsageDrawer serviceKey={usage} onClose={() => setUsage(null)} />}
     </div>
   );
 }
@@ -204,6 +210,10 @@ function CreateDrawer({
   const [port, setPort] = useState<number | undefined>(undefined);
   const [address, setAddress] = useState("");
   const [image, setImage] = useState("");
+  const [login, setLogin] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [bind, setBind] = useState("");
   const [attach, setAttach] = useState<string[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -234,17 +244,23 @@ function CreateDrawer({
       .catch((exc: unknown) => toast(errorMessage(exc), "err"));
   }, [job.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const passwordError =
+    password && !/^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$/.test(password) ? "8-128 characters: letters, digits and !#%*+,.:=?@^_~-" : null;
+  const loginError = login && !/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(login) ? "3-64 characters, starting with a letter" : null;
   const keyError = !NAME_RE.test(key) ? "letters, digits, - and _; start with a letter" : taken.includes(key) ? "already used" : null;
   const sshError = target.method === "ssh" && !(ssh.host || "").trim() ? "the server's host name or IP" : null;
 
   const submit = async () => {
-    if (!item || keyError || sshError) return;
+    if (!item || keyError || sshError || passwordError || loginError) return;
     setSubmitError(null);
     const body: JsonObject = { key, service: item.id, target: (target.method === "ssh" ? { ...ssh, method: "ssh" } : { method: "local" }) as unknown as JsonObject };
     if (role) body.role = role;
     if (port) body.port = port;
     if (address.trim()) body.address = address.trim();
     if (image.trim()) body.image = image.trim();
+    if (login.trim()) body.user = login.trim();
+    if (password) body.password = password;
+    if (bind) body.bind = bind;
     if (TRIGGER_ROLES.includes(role)) body.attach = attach;
     try {
       setJobId((await api.onpremCreate(body)).job_id);
@@ -261,7 +277,12 @@ function CreateDrawer({
       onClose={onClose}
       actions={
         item && (
-          <button type="button" className="btn btn-primary" disabled={!!keyError || !!sshError || running || job.status === "succeeded"} onClick={() => void submit()}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!!keyError || !!sshError || !!passwordError || !!loginError || running || job.status === "succeeded"}
+            onClick={() => void submit()}
+          >
             {running ? "Creating…" : job.status === "succeeded" ? "Created" : item.kind === "runtime" ? "Install" : "Create"}
           </button>
         )
@@ -348,6 +369,41 @@ function CreateDrawer({
               <FormRow label="Port" help={`Published on the server. Default ${item.port}${item.extra_ports?.length ? ` (also ${item.extra_ports.join(", ")})` : ""}.`}>
                 <NumberInput integer min={1} max={65535} value={port} placeholder={String(item.port || "")} onChange={setPort} />
               </FormRow>
+              <div className="driver-box card card-pad">
+                <h3>Security</h3>
+                {item.auth === false ? (
+                  <p className="muted small">
+                    {item.label} runs without authentication in this setup. Keep it on 127.0.0.1 (this machine only) or a private network, and open the
+                    port only to the servers that need it.
+                  </p>
+                ) : (
+                  <>
+                    <FormRow label="User" error={loginError} help={`Created in the service. Default: ${item.default_user || "pskit"}.`}>
+                      <TextInput mono value={login} placeholder={item.default_user || "pskit"} onChange={setLogin} invalid={!!loginError} />
+                    </FormRow>
+                    <FormRow label="Password" error={passwordError} help="Empty: a strong random one. Stored only in the env file and .pskit/, never in pskit.yml.">
+                      <div className="row-gap">
+                        <TextInput mono type={showPassword ? "text" : "password"} value={password} placeholder="generated" onChange={setPassword} invalid={!!passwordError} />
+                        <button type="button" className="btn btn-sm" onClick={() => setPassword(generatePassword())}>
+                          Generate
+                        </button>
+                        <Toggle checked={showPassword} onChange={setShowPassword} label="Show" />
+                      </div>
+                    </FormRow>
+                  </>
+                )}
+                <FormRow label="Listen on" help="127.0.0.1: only programs on that machine can connect. 0.0.0.0: other servers too (limit it with the firewall).">
+                  <Segmented
+                    label="Listen on"
+                    value={bind || (target.method === "ssh" ? "0.0.0.0" : "127.0.0.1")}
+                    onChange={setBind}
+                    options={[
+                      { value: "127.0.0.1", label: "This machine only (127.0.0.1)" },
+                      { value: "0.0.0.0", label: "Network (0.0.0.0)" },
+                    ]}
+                  />
+                </FormRow>
+              </div>
               {TRIGGER_ROLES.includes(role) && (
                 <FormRow label="Trigger functions" help="Adds a queue / storage event on resource: key to each selected function.">
                   <div className="check-grid">
@@ -376,6 +432,51 @@ function CreateDrawer({
           {jobId && <JobConsole job={job} />}
         </div>
       )}
+    </Drawer>
+  );
+}
+
+function generatePassword(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789_-.";
+  const bytes = new Uint32Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => chars[b % chars.length]).join("");
+}
+
+/** Connect to a service from any program: details, Python / Node.js clients, terminal, security. */
+function ServiceUsageDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: () => void }) {
+  const [doc, setDoc] = useState<string | null>(null);
+  const [reveal, setReveal] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setError(null);
+    api
+      .onpremUsage(serviceKey, reveal)
+      .then((d) => setDoc(d.markdown))
+      .catch((exc: unknown) => setError(errorMessage(exc)));
+  }, [serviceKey, reveal]);
+  return (
+    <Drawer
+      open
+      title={`How to use ${serviceKey}`}
+      onClose={onClose}
+      actions={
+        doc ? (
+          <button type="button" className="btn" onClick={() => void navigator.clipboard?.writeText(doc)}>
+            Copy guide
+          </button>
+        ) : undefined
+      }
+    >
+      <div className="row-gap">
+        <Toggle checked={reveal} onChange={setReveal} label="Show passwords and URLs" />
+        <span className="muted small">
+          Terminal: <code className="mono">pskit resources onprem usage {serviceKey}</code>
+        </span>
+      </div>
+      {error && <div className="form-error">{error}</div>}
+      {!doc && !error && <p className="muted">Loading…</p>}
+      {doc && <Markdown text={doc} />}
     </Drawer>
   );
 }

@@ -117,12 +117,13 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  resources   list | send | check | usage | clear | delete | onprem
+  resources   list | send | check | usage | data | clear | delete | onprem
               pskit resources list -s dev
               pskit resources delete aws_s3_bucket.b_uploads -s dev
               pskit resources send jobs -d '{"order_id": 1}'
               pskit resources check orders-db
               pskit resources usage jobs
+              pskit resources data jobs --offset 0 -n 20
               pskit resources clear jobs --yes
               pskit resources onprem create jobs --service redis --attach worker --save
   workflow    run | show | start | executions | status | cancel
@@ -597,6 +598,48 @@ def resources_usage(project, key: str) -> None:  # noqa: ANN001
     click.echo(out["markdown"].encode(encoding, "replace").decode(encoding))
 
 
+@resources.command("data", short_help="Browse what an on-prem queue, topic or bucket holds (paginated).")
+@project_options
+@click.argument("key")
+@click.option("--offset", default=0, show_default=True, help="Skip this many items.")
+@click.option("-n", "--limit", default=20, show_default=True, help="Items per page (max 500).")
+@click.option("--prefix", default="", help="Buckets: only keys below this prefix.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def resources_data(project, key: str, offset: int, limit: int, prefix: str, as_json: bool) -> None:  # noqa: ANN001
+    """Show a page of resource KEY: waiting messages (nothing is consumed) or objects.
+
+    \b
+    Examples:
+      pskit resources data jobs
+      pskit resources data jobs --offset 20 -n 20
+      pskit resources data uploads --prefix in/
+    """
+    from ..core.deployer import Deployer
+    from ..core.testing import TriggerError, browse_resource
+
+    try:
+        page = browse_resource(project, Deployer(project, echo=echo).load_record(), key, offset, limit, prefix)
+    except TriggerError as exc:
+        raise click.ClickException(str(exc)) from None
+    if as_json:
+        click.echo(json.dumps(page, indent=2))
+        return
+    total = page.get("total")
+    if not page.get("supported"):
+        info(f"{page.get('note')}" + (f" (depth {total})" if total is not None else ""))
+        return
+    shown = len(page["items"])
+    info(f"{key}: items {offset + 1 if shown else 0}-{offset + shown} of {total if total is not None else '?'}")
+    for item in page["items"]:
+        if page["type"] == "storage":
+            echo(f"  {item['size']:>10}  {item['key']}")
+        else:
+            extra = " (leased)" if item.get("leased") else ""
+            echo(f"  {item['id'][:24]:<26}{item['body'][:100]}{extra}")
+    if total is not None and offset + shown < total:
+        echo(f"next page: pskit resources data {key} --offset {offset + shown} -n {limit}")
+
+
 @resources.command("clear", short_help="Delete the data of a built-in on-prem queue, bucket or topic.")
 @project_options
 @click.argument("key")
@@ -714,6 +757,9 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--pem", default=None, help="Private key for --ssh.")
 @click.option("--sudo", is_flag=True, help="Run docker / installs with sudo -n on the server.")
 @click.option("--local", "local", is_flag=True, help="Create it on this machine even if the functions deploy over SSH.")
+@click.option("--user", "login", default=None, help="User to create (default: pskit; Redis / Valkey: default).")
+@click.option("--password", default=None, help="Password to set (default: a generated one). Prefer --password-env.")
+@click.option("--password-env", default=None, help="Read the password from this environment variable.")
 @click.option("-a", "--attach", multiple=True, help="Add a trigger on this function (queue / storage). Repeatable.")
 @click.option("--save", is_flag=True, help="Write the resource (and triggers) into pskit.yml.")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
@@ -730,6 +776,9 @@ def resources_onprem_create(  # noqa: PLR0913
     pem: Optional[str],
     sudo: bool,
     local: bool,
+    login: Optional[str],
+    password: Optional[str],
+    password_env: Optional[str],
     attach: tuple,
     save: bool,
     config_path: Optional[str],
@@ -748,9 +797,15 @@ def resources_onprem_create(  # noqa: PLR0913
         target = {"method": "ssh", "user": user or "root", "host": host, "port": int(ssh_port or 22), "sudo": sudo}
         if pem:
             target["identity_file"] = pem
+    if password_env:
+        if password_env not in os.environ:
+            raise click.ClickException(f"environment variable {password_env} is not set")
+        password = os.environ[password_env]
     body = {
         "key": key,
         "service": service,
+        "user": login,
+        "password": password,
         "role": role,
         "port": port,
         "image": image,
@@ -806,6 +861,20 @@ def resources_onprem_status(key: str, reveal: bool, config_path: Optional[str]) 
 
     root, _path, _raw = _raw_project(config_path)
     click.echo(json.dumps(_service_call(status, root, key, reveal=reveal), indent=2))
+
+
+@resources_onprem.command("usage", short_help="Connect to a service from any program: code, terminal, security.")
+@click.argument("key")
+@click.option("--reveal", is_flag=True, help="Show passwords and URLs in the guide.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_usage(key: str, reveal: bool, config_path: Optional[str]) -> None:
+    """How to use service KEY from any program: connection details, Python / Node.js clients, terminal tools."""
+    from ..core.onprem_services import service_usage
+
+    root, _path, _raw = _raw_project(config_path)
+    text = _service_call(service_usage, root, key, reveal=reveal)["markdown"]
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    click.echo(text.encode(encoding, "replace").decode(encoding))
 
 
 @resources_onprem.command("logs", short_help="The service container's recent output.")

@@ -221,3 +221,62 @@ def test_elasticmq_resource_recreates_its_queue(tmp_path):
     req = svc.check_request({"key": "sq", "service": "elasticmq"}, tmp_path, RAW)
     resource, env, _notes = svc._connection(req, "pw")
     assert resource["options"]["create_queue"] is True and env == {}
+
+
+def test_credentials_are_validated_and_url_encoded(tmp_path):
+    fake = FakeDocker()
+    entry = _create(tmp_path, fake, key="cache", role="cache", user="app_user", password="Str0ng.pass#1")
+    run = next(c for c in fake.calls if c[:2] == ["docker", "run"])
+    assert "REDIS_USER=app_user" in run and "REDIS_PASSWORD=Str0ng.pass#1" in run
+    env = parse_env_text((tmp_path / ".env.onprem").read_text("utf-8"))
+    assert env["PSKIT_CACHE_URL"] == "redis://app_user:Str0ng.pass%231@127.0.0.1:6379/0"
+    assert entry["user"] == "app_user"
+    default = _create(tmp_path, FakeDocker(), key="cache2", role="cache")
+    assert parse_env_text((tmp_path / ".env.onprem").read_text("utf-8"))["PSKIT_CACHE2_URL"].startswith("redis://:")
+    assert default["user"] == "default"
+    db = _create(tmp_path, FakeDocker(), key="db", service="postgres", user="orders", password="abcdefgh")
+    assert db["resource"]["connection"]["user"] == "orders"
+    for body, message in (
+        ({"key": "k", "service": "kafka", "password": "abcdefgh"}, "without authentication"),
+        ({"key": "k", "service": "redis", "password": "short"}, "password must"),
+        ({"key": "k", "service": "redis", "password": "has space 123"}, "password must"),
+        ({"key": "k", "service": "redis", "user": "1bad"}, "user must"),
+    ):
+        with pytest.raises(svc.ServiceError, match=message):
+            svc.check_request(body, tmp_path, RAW)
+
+
+def test_any_program_clients_are_valid_code(tmp_path):
+    import shutil
+    import subprocess
+
+    from py_serverless_kit.core.onprem_clients import direct, via_host
+
+    values = {"url_env": "PSKIT_X_URL", "key": "jobs", "queue_url": "http://h:9324/000000000000/jobs", "endpoint": "http://h:9",
+              "bootstrap_servers": "h:9092", "topic": "events", "stream": "jobs", "subject": "jobs.jobs", "queue": "jobs",
+              "bucket": "files", "host": "h", "port": 1}
+    snippets = [direct(f, values) for f in ("redis", "redis_stream", "sqs", "kafka", "nats", "rabbitmq", "s3", "postgres",
+                                            "mysql", "mongodb", "cache_redis", "memcached", "smtp")]
+    snippets += [via_host(k, "jobs", "jobs", "http://127.0.0.1:8080") for k in ("queue", "storage", "topic")]
+    for snip in snippets:
+        assert snip is not None
+        compile(snip["python"], "client.py", "exec")
+        if shutil.which("node"):
+            proc = subprocess.run(["node", "--check", "-"], input=snip["node"], capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr + snip["node"]
+
+
+def test_service_usage_guides(tmp_path):
+    fake = FakeDocker()
+    for key, body in (("jobs", {}), ("st", {"service": "valkey", "role": "stream"}), ("events", {"service": "kafka"}),
+                      ("tasks", {"service": "nats"}), ("db", {"service": "postgres"}), ("files", {"service": "minio"})):
+        _create(tmp_path, fake, key=key, **body)
+        md = svc.service_usage(tmp_path, key)["markdown"]
+        assert "## Use it from any program" in md and "## Security" in md, key
+        assert "```python" in md and "```js" in md, key
+    hidden = svc.service_usage(tmp_path, "db")["markdown"]
+    shown = svc.service_usage(tmp_path, "db", reveal=True)["markdown"]
+    password = parse_env_text((tmp_path / ".env.onprem").read_text("utf-8"))["PSKIT_DB_PASSWORD"]
+    assert password not in hidden and password in shown
+    assert "without authentication" not in svc.service_usage(tmp_path, "db")["markdown"]
+    assert "No authentication" in svc.service_usage(tmp_path, "events")["markdown"]

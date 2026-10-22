@@ -167,6 +167,28 @@ def _body_text(message: Any) -> str:
     return json.dumps(message)
 
 
+_PREVIEW = 4000
+
+
+def _brief(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """A message for the data browser: body cut to a preview, no private keys."""
+    body = msg.get("body")
+    text = body if isinstance(body, str) else json.dumps(body)
+    out = {
+        "id": str(msg.get("id") or ""),
+        "body": text[:_PREVIEW],
+        "truncated": len(text) > _PREVIEW,
+        "attributes": msg.get("attributes") or {},
+        "receives": msg.get("receives"),
+        "enqueued_at": msg.get("enqueued_at"),
+    }
+    if "leased" in msg:
+        out["leased"] = bool(msg["leased"])
+    if "delivered" in msg:
+        out["delivered_to"] = msg.get("delivered") or []
+    return out
+
+
 def _split_message(item: Any) -> Tuple[Any, Dict[str, Any]]:
     if isinstance(item, dict) and "message" in item and set(item) <= {"message", "attributes"}:
         raw = item.get("attributes") or {}
@@ -482,6 +504,54 @@ class Broker:
                 _write_json(path, current)
                 done += 1
         return done
+
+    # ---------------------------------------------------------------- browse
+    def peek_queue(self, name: str, offset: int, limit: int, now: float) -> Dict[str, Any]:
+        """A page of waiting messages, oldest first, without receiving them."""
+        driver = self._queue_drivers.get(name)
+        if driver is not None:
+            # A custom class is wrapped; it may implement peek(offset, limit) -> (items, total).
+            peek = getattr(getattr(driver, "inner", driver), "peek", None)
+            if peek is None:
+                depth = int(driver.depth())
+                return {"supported": False, "total": depth if depth >= 0 else None, "items": [],
+                        "note": "this driver cannot list messages without receiving them; only the depth is shown"}
+            items, total = peek(offset, limit)
+            return {"supported": True, "total": total, "items": [_brief(m) for m in items]}
+        with self._lock:
+            directory = self.queue_dir(name) / "messages"
+            files = sorted(directory.glob("*.json")) if directory.is_dir() else []
+            items = []
+            for path in files[offset : offset + limit]:
+                msg = _read_json(path, None)
+                if isinstance(msg, dict):
+                    msg["leased"] = float(msg.get("visible_at") or 0) > now
+                    items.append(_brief(msg))
+        return {"supported": True, "total": len(files), "items": items}
+
+    def peek_topic(self, name: str, offset: int, limit: int) -> Dict[str, Any]:
+        with self._lock:
+            directory = self.topic_dir(name) / "pending"
+            files = sorted(directory.glob("*.json")) if directory.is_dir() else []
+            items = [_brief(m) for m in (_read_json(p, None) for p in files[offset : offset + limit]) if isinstance(m, dict)]
+        return {"supported": True, "total": len(files), "items": items}
+
+    def list_bucket(self, bucket: str, offset: int, limit: int, prefix: str = "") -> Dict[str, Any]:
+        found = self.scan_bucket(bucket)
+        keys = sorted(k for k in found if k.startswith(prefix))
+        items = [{"key": k, "size": found[k][1], "etag": str(found[k][0])} for k in keys[offset : offset + limit]]
+        return {"supported": True, "total": len(keys), "items": items}
+
+    def delete_message(self, name: str, ident: str) -> bool:
+        if name in self._queue_drivers:
+            raise ValueError(f"queue {name} uses a driver; delete messages in that service")
+        if not ident or any(c in ident for c in "/\\*?["):
+            raise ValueError("invalid message id")
+        with self._lock:
+            for path in (self.queue_dir(name) / "messages").glob(f"*-{ident}.json"):
+                path.unlink()
+                return True
+        return False
 
     def _next_seq(self, queue: Path) -> int:
         seq_path = queue / "seq"
@@ -1368,12 +1438,13 @@ class Host:
                     if self.command != "GET":
                         return self._json(405, {"error": "GET the resource list"})
                     return self._json(200, host.resources())
-                if len(parts) == 3 and parts[0] == "resources" and parts[2] in ("check", "data"):
-                    if parts[2] == "check" and self.command in ("GET", "POST"):
-                        return self._json(200, host.check_resource(parts[1]))
-                    if parts[2] == "data" and self.command == "DELETE":
-                        return self._json(200, host.purge_resource(parts[1]))
-                    return self._json(405, {"error": "POST .../check or DELETE .../data"})
+                if len(parts) == 3 and parts[0] == "resources" and parts[2] in ("check", "data", "object", "message"):
+                    return self._resource_admin(parts[1], parts[2], query)
+                if parts and parts[0] == "queues" and len(parts) == 3 and parts[2] == "peek":
+                    page = host.broker.peek_queue(
+                        parts[1], _int_arg(query, "offset", 0), min(500, _int_arg(query, "limit", 50)), time.time()
+                    )
+                    return self._json(200, page)
                 if parts and parts[0] == "queues" and len(parts) == 2:
                     return self._queue(parts[1], raw)
                 if parts and parts[0] == "queues" and len(parts) == 3 and parts[2] in ("lease", "ack", "nack"):
@@ -1442,6 +1513,28 @@ class Host:
                 payload = json.loads(raw.decode("utf-8") or "null")
                 ids = [host.broker.submit_queue(name, message, attrs) for message, attrs in _messages_of(payload)]
                 return self._json(202, {"queued": ids})
+
+            def _resource_admin(self, key: str, action: str, query: Dict[str, str]) -> None:
+                if action == "check" and self.command in ("GET", "POST"):
+                    return self._json(200, host.check_resource(key))
+                if action == "data" and self.command == "GET":
+                    page = host.browse_resource(
+                        key, _int_arg(query, "offset", 0), _int_arg(query, "limit", 50), query.get("prefix") or ""
+                    )
+                    return self._json(200, page)
+                if action == "data" and self.command == "DELETE":
+                    return self._json(200, host.purge_resource(key))
+                if action == "object" and self.command == "GET":
+                    return self._json(200, host.read_object(key, query.get("key") or ""))
+                if action == "object" and self.command == "DELETE":
+                    res = host._resource(key)
+                    removed = host.broker.delete_object(str(res.get("name") or key), query.get("key") or "")
+                    host.pump_storage(time.time())
+                    return self._json(200, {"deleted": removed})
+                if action == "message" and self.command == "DELETE":
+                    res = host._resource(key)
+                    return self._json(200, {"deleted": host.broker.delete_message(str(res.get("name") or key), query.get("id") or "")})
+                return self._json(405, {"error": f"method not allowed on .../{action}"})
 
             def _lease(self, name: str, action: str, raw: bytes) -> None:
                 if self.command != "POST":
@@ -1640,6 +1733,37 @@ class Host:
             ok, detail = False, f"{type(exc).__name__}: {exc}"
         ms = round((time.monotonic() - started) * 1000, 1)
         return {"key": key, "type": kind, "name": name, "ok": ok, "detail": detail, "ms": ms, "checked_from": "host"}
+
+    def browse_resource(self, key: str, offset: int = 0, limit: int = 50, prefix: str = "") -> Dict[str, Any]:
+        """A page of what the resource holds: messages (queue / topic) or objects (storage)."""
+        res = self._resource(key)
+        kind = str(res.get("type") or "")
+        name = str(res.get("name") or key)
+        offset, limit = max(0, int(offset)), max(1, min(int(limit), 500))
+        base = {"key": key, "type": kind, "name": name, "offset": offset, "limit": limit}
+        if kind == "queue":
+            page = self.broker.peek_queue(name, offset, limit, time.time())
+        elif kind == "topic":
+            page = self.broker.peek_topic(name, offset, limit)
+        elif kind == "storage":
+            page = self.broker.list_bucket(name, offset, limit, prefix)
+        else:
+            page = {"supported": False, "total": None, "items": [],
+                    "note": f"pskit does not browse {kind} resources; connect with the client shown in How to use"}
+        return {**base, **page}
+
+    def read_object(self, key: str, object_key: str, max_bytes: int = 256 * 1024) -> Dict[str, Any]:
+        res = self._resource(key)
+        if res.get("type") != "storage":
+            raise ValueError(f"{key} is not a storage resource")
+        data = self.broker.get_object(str(res.get("name") or key), object_key)
+        head = data[:max_bytes]
+        try:
+            content, encoding = head.decode("utf-8"), "text"
+        except UnicodeDecodeError:
+            content, encoding = base64.b64encode(head).decode("ascii"), "base64"
+        return {"key": object_key, "size": len(data), "encoding": encoding, "content": content,
+                "truncated": len(data) > max_bytes}
 
     def purge_resource(self, key: str) -> Dict[str, Any]:
         """Delete the data of a built-in / directory queue, bucket or topic (the folder stays)."""

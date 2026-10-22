@@ -312,7 +312,32 @@ export interface OnPremCatalogItem {
   roles: string[];
   backup?: boolean;
   persistent?: boolean;
+  auth?: boolean;
+  default_user?: string;
   notes: string;
+}
+
+export interface ResourcePage {
+  key: string;
+  type: string;
+  name: string;
+  offset: number;
+  limit: number;
+  supported: boolean;
+  total: number | null;
+  note?: string;
+  items: {
+    id?: string;
+    key?: string;
+    size?: number;
+    body?: string;
+    truncated?: boolean;
+    attributes?: Record<string, unknown>;
+    receives?: number | null;
+    enqueued_at?: number | null;
+    leased?: boolean;
+    delivered_to?: string[];
+  }[];
 }
 
 export interface OnPremTarget {

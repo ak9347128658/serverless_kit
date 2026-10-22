@@ -91,6 +91,9 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   resource, `provider.options.env_file` and triggers on the functions you ticked are added to the draft. Each service
   has **Details** (state, health, credentials, container log), **Backup** and **Remove**. See
   [resource-guides/onprem/services.md](resource-guides/onprem/services.md).
+- **On-prem services**: the create form has a *Security* box (user, password with *Generate*, listen on 127.0.0.1 or
+  the network); each service has **How to use** (connect from any program: Python / Node.js clients, terminal,
+  security). **Resources → Data** pages through what an on-prem queue, topic or bucket holds, with previews.
 - **Resources → How to use** on every resource opens its end-to-end guide: the library to install for Python and
   Node.js and how pskit packages it, the `pskit.yml` and trigger, handler code with copy buttons, local tests
   (`pskit invoke`, `pskit dev`), deployed tests and provider notes ([resource-usage.md](resource-usage.md)).

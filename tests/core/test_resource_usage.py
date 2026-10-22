@@ -45,7 +45,7 @@ def test_every_resource_gets_a_complete_guide(make_project, provider):
         out = usage(project, None, key)
         md = out["markdown"]
         for heading in ("## 1. Install the libraries", "## 2. Declare it in pskit.yml", "## 3. Use it in your code",
-                        "## 4. Test it locally", "## 5. Deploy and test for real", "## 7. Troubleshooting"):
+                        "## 4. Test it locally", "## 5. Deploy and test for real", "## 8. Troubleshooting"):
             assert heading in md, (provider, key, heading)
         assert f'resource("{key}")' in md
         for block in _blocks(md, "python"):

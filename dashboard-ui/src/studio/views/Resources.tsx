@@ -5,6 +5,7 @@ import { Drawer } from "../../components/Drawer";
 import { CloudResources } from "../components/CloudResources";
 import { Markdown } from "../components/Markdown";
 import { OnPremServices } from "../components/OnPremServices";
+import { ResourceData } from "../components/ResourceData";
 import { ResourceGuides, type GuideRef } from "../components/ResourceGuides";
 import { ResourceTester } from "../components/ResourceTester";
 import { useConfirm, useToast } from "../components/Feedback";
@@ -48,7 +49,9 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const [testing, setTesting] = useState<string | null>(null);
   const [guide, setGuide] = useState<GuideRef | null>(null);
   const [usage, setUsage] = useState<string | null>(null);
+  const [browse, setBrowse] = useState<string | null>(null);
   const { providerName } = useStudio();
+  const onpremTarget = (state.target?.provider || providerName) === "onprem";
   const test = (key: string) => {
     setTesting(key);
     window.setTimeout(() => document.getElementById("resource-test")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
@@ -157,6 +160,11 @@ export function ResourcesView({ rest }: { rest: string[] }) {
           <button type="button" className="btn btn-sm btn-primary" onClick={() => setUsage(r.name)} title="Libraries, pskit.yml, Python / Node.js code and tests">
             How to use
           </button>
+          {onpremTarget && ["queue", "storage", "topic"].includes(str(r.res.type)) && (
+            <button type="button" className="btn btn-sm" onClick={() => setBrowse(r.name)} title="See the messages / objects it holds">
+              Data
+            </button>
+          )}
           <button type="button" className="btn btn-sm" onClick={() => test(r.name)} title="Send a test message / object">
             Test
           </button>
@@ -203,6 +211,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
         <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} onGuide={setGuide} />
       )}
       <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
+      {browse && <ResourceData resourceKey={browse} onClose={() => setBrowse(null)} />}
       {usage && <UsageDrawer resourceKey={usage} onClose={() => setUsage(null)} onTest={() => { setUsage(null); test(usage); }} />}
     </div>
   );

@@ -30,6 +30,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 STATE_FILE = Path(".pskit") / "onprem-services.json"
 BACKUP_DIR = Path(".pskit") / "backups"
@@ -89,6 +90,20 @@ def _svc(
 # and `backup` run inside the container with `sh -c`; backup writes to stdout.
 # A role is the resource type the service is used as; `stream` is a queue on a Redis stream.
 ROLE_TYPE = {"stream": "queue"}
+def _redis_start(binary: str, var: str) -> str:
+    return (
+        f'if [ "${var}_USER" = default ]; then exec {binary}-server --appendonly yes --requirepass "${var}_PASSWORD"; '
+        f'else exec {binary}-server --appendonly yes --user default off --user "${var}_USER" on ">${var}_PASSWORD" '
+        '"~*" "&*" "+@all"; fi'
+    )
+
+
+# Services that run without authentication in this setup (keep them on 127.0.0.1 or a private network).
+NO_AUTH = ("elasticmq", "kafka", "memcached", "mailpit")
+DEFAULT_USER = {"redis": "default", "valkey": "default"}
+_PASSWORD_OK = re.compile(r"^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$")
+_LOGIN_OK = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,63}$")
+
 SERVICES: Dict[str, Dict[str, Any]] = {
     "redis": _svc(
         "Redis",
@@ -96,10 +111,12 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         6379,
         ("queue", "stream", "cache"),
         data="/data",
-        env={"REDIS_PASSWORD": "{password}"},
-        command=("sh", "-c", 'exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"'),
-        health='redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG',
-        backup='redis-cli -a "$REDIS_PASSWORD" --no-auth-warning SAVE >/dev/null && cat /data/dump.rdb',
+        env={"REDIS_USER": "{user}", "REDIS_PASSWORD": "{password}"},
+        # `default` keeps requirepass; another user gets an ACL and the default user is disabled.
+        command=("sh", "-c", _redis_start("redis", "REDIS")),
+        health='redis-cli --user "$REDIS_USER" -a "$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG',
+        backup='redis-cli --user "$REDIS_USER" -a "$REDIS_PASSWORD" --no-auth-warning SAVE >/dev/null '
+        "&& cat /data/dump.rdb",
         backup_ext="rdb",
         notes="Queue (redis driver: leased lists), stream (redis_stream driver: consumer group, several hosts) "
         "or a cache for handlers.",
@@ -110,10 +127,12 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         6379,
         ("queue", "stream", "cache"),
         data="/data",
-        env={"VALKEY_PASSWORD": "{password}"},
-        command=("sh", "-c", 'exec valkey-server --appendonly yes --requirepass "$VALKEY_PASSWORD"'),
-        health='valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning ping | grep -q PONG',
-        backup='valkey-cli -a "$VALKEY_PASSWORD" --no-auth-warning SAVE >/dev/null && cat /data/dump.rdb',
+        env={"VALKEY_USER": "{user}", "VALKEY_PASSWORD": "{password}"},
+        # `default` keeps requirepass; another user gets an ACL and the default user is disabled.
+        command=("sh", "-c", _redis_start("valkey", "VALKEY")),
+        health='valkey-cli --user "$VALKEY_USER" -a "$VALKEY_PASSWORD" --no-auth-warning ping | grep -q PONG',
+        backup='valkey-cli --user "$VALKEY_USER" -a "$VALKEY_PASSWORD" --no-auth-warning SAVE >/dev/null '
+        "&& cat /data/dump.rdb",
         backup_ext="rdb",
         notes="Open-source Redis fork; same redis and redis_stream drivers.",
     ),
@@ -321,6 +340,8 @@ def catalog() -> List[Dict[str, Any]]:
                 "roles": svc["roles"],
                 "backup": bool(svc["backup"]),
                 "persistent": bool(svc["data"]),
+                "auth": name not in NO_AUTH,
+                "default_user": DEFAULT_USER.get(name, "pskit"),
                 "notes": svc["notes"],
             }
         )
@@ -588,8 +609,23 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
         attach = [attach]
     if not isinstance(attach, list) or not all(isinstance(a, str) and _NAME.match(a) for a in attach):
         raise ServiceError("attach must be a list of function names")
+    user = str(body.get("user") or "").strip()
+    password = str(body.get("password") or "")
+    if service in NO_AUTH and (user or password):
+        raise ServiceError(
+            f"{spec['label']} runs without authentication here; leave user and password empty and keep it on "
+            "bind 127.0.0.1 or a private network"
+        )
+    if user and not _LOGIN_OK.match(user):
+        raise ServiceError("user must be 3-64 characters: a letter, then letters, digits, _ . or -")
+    if password and not _PASSWORD_OK.match(password):
+        raise ServiceError("password must be 8-128 characters of letters, digits and !#%*+,.:=?@^_~-")
+    if service == "mongodb" and user == "admin":
+        raise ServiceError("pick another user than admin for MongoDB")
     project = str((raw or {}).get("service") or "")
     return {
+        "user": user or DEFAULT_USER.get(service, "pskit"),
+        "password": password,
         "project": project,
         "key": key,
         "service": service,
@@ -611,13 +647,15 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
     key, service, role = req["key"], req["service"], req["role"]
     addr, port = req["address"], req["port"]
     prefix = _var_prefix(key)
-    user = "pskit"
+    user = str(req.get("user") or "pskit")
+    safe_user, safe_pw = quote(user, safe=""), quote(password, safe="")
     database = re.sub(r"[^A-Za-z0-9_]", "_", key)
     env: Dict[str, str] = {}
     notes: List[str] = []
     res: Dict[str, Any] = {"type": ROLE_TYPE.get(role, role), "external": True}
     if service in ("redis", "valkey"):
-        env[f"{prefix}_URL"] = f"redis://:{password}@{addr}:{port}/0"
+        login = "" if user == "default" else safe_user
+        env[f"{prefix}_URL"] = f"redis://{login}:{safe_pw}@{addr}:{port}/0"
         env[f"{prefix}_PASSWORD"] = password
         if role in ("queue", "stream"):
             driver = "redis" if role == "queue" else "redis_stream"
@@ -630,7 +668,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
                 "password_env": f"{prefix}_PASSWORD",
             }
     elif service == "rabbitmq":
-        env[f"{prefix}_URL"] = f"amqp://{user}:{password}@{addr}:{port}/%2F"
+        env[f"{prefix}_URL"] = f"amqp://{safe_user}:{safe_pw}@{addr}:{port}/%2F"
         env[f"{prefix}_PASSWORD"] = password
         res["options"] = {
             "driver": "custom",
@@ -651,7 +689,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
         }
         notes.append("added pskit_drivers/kafka_queue.py to your code and kafka-python to requirements.txt")
     elif service == "nats":
-        env[f"{prefix}_URL"] = f"nats://{user}:{password}@{addr}:{port}"
+        env[f"{prefix}_URL"] = f"nats://{safe_user}:{safe_pw}@{addr}:{port}"
         env[f"{prefix}_PASSWORD"] = password
         res["options"] = {
             "driver": "custom",
@@ -678,7 +716,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
         res["connection"] = {"ui_url": f"http://{addr}:9325"}
     elif service in ("postgres", "mysql", "mariadb"):
         scheme = "postgresql" if service == "postgres" else "mysql"
-        env[f"{prefix}_URL"] = f"{scheme}://{user}:{password}@{addr}:{port}/{database}"
+        env[f"{prefix}_URL"] = f"{scheme}://{safe_user}:{safe_pw}@{addr}:{port}/{database}"
         env[f"{prefix}_PASSWORD"] = password
         res["connection"] = {
             "host": addr,
@@ -689,7 +727,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
             "url_env": f"{prefix}_URL",
         }
     elif service == "mongodb":
-        env[f"{prefix}_URL"] = f"mongodb://{user}:{password}@{addr}:{port}/?authSource=admin"
+        env[f"{prefix}_URL"] = f"mongodb://{safe_user}:{safe_pw}@{addr}:{port}/?authSource=admin"
         env[f"{prefix}_PASSWORD"] = password
         res["connection"] = {
             "host": addr,
@@ -728,7 +766,7 @@ def _fill(text: str, values: Dict[str, str]) -> str:
 def _values(req: Dict[str, Any], password: str = "") -> Dict[str, str]:
     return {
         "password": password,
-        "user": "pskit",
+        "user": str(req.get("user") or "pskit"),
         "database": re.sub(r"[^A-Za-z0-9_]", "_", req["key"]),
         "bucket": _bucket_name(req["key"]),
         "name": req["key"],
@@ -786,7 +824,7 @@ def create(
         return entry
     spec = SERVICES[req["service"]]
     _ensure_docker(target, sh, install=bool(body.get("install_docker", True)))
-    password = secrets.token_urlsafe(18).replace("-", "x").replace("_", "y")
+    password = req["password"] or secrets.token_urlsafe(18).replace("-", "x").replace("_", "y")
     sh(docker_argv(target, ["rm", "-f", req["container"]]), check=False, show=False)
     sh(docker_argv(target, ["pull", req["image"]]))
     if req["volume"]:
@@ -817,6 +855,7 @@ def create(
         "port": req["port"],
         "address": req["address"],
         "bind": req["bind"],
+        "user": req["user"] if req["service"] not in NO_AUTH else "",
         "attach": req["attach"],
         "env_file": env_file,
         "env": env_values,
@@ -1170,3 +1209,98 @@ def snippet(entry: Dict[str, Any]) -> str:
 
 if __name__ == "__main__":  # pragma: no cover - manual check of the catalog
     json.dump(catalog(), sys.stdout, indent=2)
+
+
+# ----------------------------------------------------------------------------- how to use (any program)
+
+
+def client_values(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Names, endpoints and variable names a client needs, from a service's state entry."""
+    res = entry.get("resource") or {}
+    values: Dict[str, Any] = {"env_file": entry.get("env_file") or DEFAULT_ENV_FILE, "host": entry.get("address"),
+                              "container": entry.get("container"),
+                              "port": entry.get("port"), "user": entry.get("user") or ""}
+    values.update({k: v for k, v in (res.get("connection") or {}).items()})
+    values.update({k: v for k, v in (res.get("options") or {}).items() if k not in ("driver", "class")})
+    if "bucket" not in values and res.get("type") == "storage":
+        values["bucket"] = res.get("name") or entry.get("key")
+    values.setdefault("key", entry.get("key"))
+    values.setdefault("url_env", _var_prefix(str(entry.get("key"))) + "_URL")
+    return values
+
+
+def service_usage(root: Path, key: str, *, reveal: bool = False) -> Dict[str, Any]:
+    """Markdown: connection details, credentials, client code (Python / Node.js), terminal and security."""
+    from .onprem_clients import direct, flavor_for, markdown
+
+    entry = _entry(root, key)
+    if entry.get("kind") == "runtime":
+        check = RUNTIMES[entry["service"]]["check"]
+        text = (f"# {entry['service']} on {describe_target(entry['target'])}\n\nInstalled by pskit. Check it with:\n\n"
+                f"```bash\nssh {entry['target'].get('user')}@{entry['target'].get('host')} '{check}'\n```\n")
+        return {"key": key, "markdown": text}
+    spec = SERVICES[entry["service"]]
+    res = entry.get("resource") or {}
+    shown = public_entry(entry, reveal)
+    values = client_values(entry)
+    role = entry.get("role") or res.get("type")
+    md: List[str] = [f"# How to use {spec['label']} `{key}`\n", spec["notes"] + "\n" if spec["notes"] else ""]
+    rows = [
+        ("Where", describe_target(entry["target"])),
+        ("Address", f"`{entry.get('address')}:{entry.get('port')}`"),
+        ("Used as", f"`{role}` (resource type `{res.get('type')}`)"),
+        ("Container", f"`{entry.get('container')}` (image `{entry.get('image')}`)"),
+    ]
+    if entry.get("volume"):
+        rows.append(("Data volume", f"`{entry['volume']}`"))
+    if entry["service"] in NO_AUTH:
+        rows.append(("Authentication", "none: keep it on `127.0.0.1` or a private network"))
+    else:
+        rows.append(("User", f"`{entry.get('user') or 'pskit'}`"))
+    for name, value in sorted((shown.get("env") or {}).items()):
+        rows.append((f"`{name}`", f"`{value}`"))
+    for extra in spec["extra_ports"]:
+        rows.append((f"Port {extra}", f"http://{entry.get('address')}:{extra}"))
+    md.append("| | |\n|---|---|\n" + "".join(f"| {a} | {b} |\n" for a, b in rows))
+    env_file = entry.get("env_file") or DEFAULT_ENV_FILE
+    exports = [f"export {n}='<value from {env_file}>'" for n in sorted(entry.get("env") or {})]
+    if exports:
+        md.append(
+            f"The credentials live in `{env_file}` in your project (shipped to the pskit host as `host.env`). "
+            "For a script on another machine, export the same variables there"
+            + ("" if reveal else " (open *Details > Show values* or `pskit resources onprem status " + key + " --reveal`)")
+            + ":\n"
+        )
+        md.append("```bash\n" + "\n".join(exports) + "\n```\n")
+    flavor = flavor_for(str(res.get("type")), res.get("options") or {}, res.get("connection") or {}, entry["service"])
+    snip = direct(flavor, values) if flavor else None
+    md.append(markdown(
+        "Use it from any program",
+        "Any script, web app, cron job or service (not only pskit functions) can add, read and consume data "
+        "with the service's own client library:",
+        None,
+        snip,
+        "With the client library",
+    ))
+    md.append(
+        "## Use it from pskit functions\n\n"
+        f"Add it to `pskit.yml` (*Add to pskit.yml*, or it was added on create), then open **Resources → How to use** "
+        f"on `{key}`, or run `pskit resources usage {key}`: handler code, triggers and tests. Through the deployed "
+        "host, scripts can also publish and browse with plain HTTP (shown there).\n"
+    )
+    md.append(
+        "## Security\n\n"
+        + (f"- Listens on `{entry.get('bind')}`. " + ("Only this machine can connect. " if entry.get("bind") == "127.0.0.1"
+           else "Allow the port only from the servers that need it (cloud security group / firewall). ") + "\n")
+        + ("- No authentication in this setup: never publish the port to the internet.\n" if entry["service"] in NO_AUTH else
+           "- Change the password: remove the service with *keep data*, create it again with the same key and a new "
+           "password (`--password-env`), then redeploy so the host gets the new env file.\n")
+        + f"- Keep `{env_file}` and `.pskit/` out of version control.\n"
+    )
+    md.append(
+        "## Test it\n\n```bash\n"
+        f"pskit resources onprem status {key}\n"
+        f"pskit resources check {key}           # once it is in pskit.yml (from the host when deployed)\n"
+        f"pskit resources onprem logs {key}\n```\n"
+    )
+    return {"key": key, "markdown": "\n".join(md)}

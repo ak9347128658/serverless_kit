@@ -311,3 +311,83 @@ def test_check_purge_and_node_publish_helpers(make_project, tmp_path):
         httpd.server_close()
         host.executor.shutdown()
         host.logs.close()
+
+
+def test_browse_paginates_and_generated_host_scripts_run(make_project, tmp_path):
+    import os
+    import re
+    import subprocess
+    import sys
+
+    from py_serverless_kit.core.onprem_clients import via_host
+
+    project = make_project(
+        f"""
+        service: browse
+        provider:
+          name: onprem
+          options: {{data_dir: "{(tmp_path / 'd').as_posix()}"}}
+        resources:
+          jobs: {{type: queue}}
+          files: {{type: storage}}
+          news: {{type: topic}}
+        functions:
+          noop: {{handler: app.handlers.hello}}
+        """
+    )
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    root = project.work_dir / "onprem_app"
+    activate_layout(root)
+    host = Host(root)
+    host.open()
+    httpd, base = _serve(host)
+    try:
+        for i in range(7):
+            host.broker.submit_queue("jobs", {"n": i})
+        page = host.browse_resource("jobs", offset=5, limit=5)
+        assert page["total"] == 7 and [json.loads(m["body"])["n"] for m in page["items"]] == [5, 6]
+        host.broker.claim_queue({"name": "jobs", "batch_size": 1, "visibility_timeout": 60}, time.time())
+        first = host.browse_resource("jobs", 0, 1)["items"][0]
+        assert first["leased"] is True
+        assert host.broker.delete_message("jobs", first["id"]) is True
+        assert host.browse_resource("jobs")["total"] == 6
+
+        host.broker.put_object("files", "in/a.txt", b"hello")
+        host.broker.put_object("files", "in/b.bin", b"\xff\x00")
+        host.broker.put_object("files", "out/c.txt", b"x" * 10)
+        listed = host.browse_resource("files", 0, 10, prefix="in/")
+        assert [i["key"] for i in listed["items"]] == ["in/a.txt", "in/b.bin"] and listed["total"] == 2
+        assert host.read_object("files", "in/a.txt")["content"] == "hello"
+        assert host.read_object("files", "in/b.bin")["encoding"] == "base64"
+        host.broker.submit_topic("news", {"title": "hi"})
+        assert host.browse_resource("news")["total"] == 1
+
+        # The "use it from any program" scripts, run for real against this host.
+        for kind, name in (("queue", "jobs"), ("storage", "files"), ("topic", "news")):
+            snip = via_host(kind, name, name, base)
+            env = dict(os.environ, PSKIT_HOST=base)
+            proc = subprocess.run([sys.executable, "-c", snip["python"]], capture_output=True, text=True, env=env, timeout=60)
+            assert proc.returncode == 0, (kind, proc.stderr)
+            if shutil.which("node"):
+                proc = subprocess.run(["node", "-e", snip["node"]], capture_output=True, text=True, env=env, timeout=60)
+                assert proc.returncode == 0, (kind, proc.stderr)
+        assert "processing" in subprocess.run(
+            [sys.executable, "-c", via_host("queue", "jobs", "jobs", base)["python"]],
+            capture_output=True, text=True, env=dict(os.environ, PSKIT_HOST=base), timeout=60,
+        ).stdout
+        assert re.search(r"\d+ waiting", subprocess.run(
+            [sys.executable, "-c", via_host("queue", "jobs", "jobs", base)["python"]],
+            capture_output=True, text=True, env=dict(os.environ, PSKIT_HOST=base), timeout=60,
+        ).stdout)
+
+        # The remote-host driver browses through the other host's peek endpoint.
+        for i in range(3):
+            host.broker.submit_queue("jobs", {"again": i})
+        remote = PskitHostQueue(base, "jobs")
+        items, total = remote.peek(0, 2)
+        assert total == host.broker.queue_depth("jobs") and len(items) == 2
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        host.executor.shutdown()
+        host.logs.close()

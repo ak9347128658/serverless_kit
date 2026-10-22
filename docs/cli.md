@@ -174,6 +174,7 @@ pskit resources delete --all-kept -s dev --yes
 | `send KEY [-d DATA]` | test a resource: a message to a queue, an object to a bucket, a message to a topic |
 | `send --list` | how to test every resource: payload, pskit and cloud CLI commands, console steps; for database, cache and custom resources the `PSKIT_RESOURCE_*` variables and a Python / Node.js snippet |
 | `usage KEY` | end-to-end guide for the resource as Markdown: libraries to install (Python / Node.js), the `pskit.yml`, handler code, local and deployed tests, provider notes, troubleshooting |
+| `data KEY [--offset N] [-n LIMIT] [--prefix P] [--json]` | on premises: page through what a queue, topic or bucket holds (messages are not consumed) |
 | `check KEY [--json]` | is it reachable? From the on-prem host once deployed there (queue depth, bucket object count, database / cache / custom connection, Redis `PING`), else a connection check from this machine; exits 1 when it fails |
 | `clear KEY [--yes]` | on premises: delete every message / object of a built-in queue, bucket or topic on the host (the resource stays) |
 | `-y, --yes` | don't ask for confirmation |
@@ -207,9 +208,11 @@ pskit resources onprem remove jobs --delete-data --save
 | `create KEY --service S` | start it (or install the runtime) and record it in `.pskit/onprem-services.json` |
 | `--role` | what the resource is used as: `queue`, `stream` (Redis / Valkey stream), `cache`, `database`, `storage`, `custom` |
 | `--ssh user@host[:port] --pem FILE --sudo` | create it on that server (default: `provider.options.deploy` when it targets one, else this machine); `--local` forces this machine |
+| `--user`, `--password`, `--password-env VAR` | credentials to create (default user `pskit`, Redis `default`; default password generated) |
 | `--port`, `--address`, `--bind`, `--image` | published port, address functions use, interface to listen on, Docker image |
 | `-a, --attach FN` | add a `queue` / `storage` trigger on resource KEY to FN (repeatable) |
 | `--save` | write the resource, `provider.options.env_file` and triggers into `pskit.yml` (comments are not kept) |
+| `usage KEY [--reveal]` | connect from any program: address, credentials, Python / Node.js client code, terminal tools, security |
 | `list`, `status KEY [--reveal]`, `logs KEY` | what exists, its state / health / credentials, the container log |
 | `backup KEY [-o FILE]` | dump the data to `.pskit/backups/` |
 | `remove KEY [--delete-data] [--save]` | delete the container (and volume), and with `--save` the resource and its triggers |

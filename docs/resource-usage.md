@@ -117,6 +117,18 @@ exports.orders = async () => {
 };
 ```
 
+## On premises: from any other program
+
+On premises a resource is also reachable from scripts and services that are not pskit functions. The resource's
+*How to use* guide (section 7) shows both ways with Python and Node.js code:
+
+- **Through the pskit host** (standard library / `fetch`, any driver): `POST /__pskit/queues/<name>` and
+  `/__pskit/topics/<name>` add data, `GET /__pskit/resources/<key>/data?offset=&limit=` pages through it,
+  `POST /__pskit/queues/<name>/lease` + `/ack` consume with leases, `PUT` / `GET` / `DELETE` objects in buckets.
+  Send `x-pskit-token` when the host sets `admin_token`.
+- **Directly** to the service with its client library (Redis, Kafka, NATS, RabbitMQ, SQS, S3, databases); see
+  [one-click services](resource-guides/onprem/services.md#use-it-from-any-program).
+
 ## Secrets
 
 | Provider | Where the value lives | How the function reads it |

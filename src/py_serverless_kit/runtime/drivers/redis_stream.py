@@ -21,7 +21,7 @@ import json
 import os
 import socket
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .redis import RedisClient, RedisError, _text
 
@@ -160,6 +160,11 @@ class RedisStreamQueue:
         if done:
             self.client.execute("XACK", self.key, self.group, *done)
             self.client.execute("XDEL", self.key, *done)
+
+    def peek(self, offset: int, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+        """Entries still in the stream, oldest first (delivered ones are deleted on settle)."""
+        reply = _list(self.client.execute("XRANGE", self.key, "-", "+", "COUNT", offset + limit))
+        return [self._message(e, 0) for e in reply[offset:] if isinstance(e, list) and len(e) == 2], self.depth()
 
     def depth(self) -> int:
         reply = self.client.execute("XLEN", self.key)

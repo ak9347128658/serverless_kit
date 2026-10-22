@@ -337,8 +337,12 @@ def usage(project: Any, record: Optional[Dict[str, Any]], key: str) -> Dict[str,
     if notes:
         md.append(f"## 6. {provider} notes\n\n" + "".join(f"- {n}\n" for n in notes))
 
+    # ------------------------------------------------------------------ any program (on premises)
+    if provider == "onprem":
+        md.append(_any_program(project, record, key, res, service))
+
     # ------------------------------------------------------------------ troubleshooting
-    md.append("## 7. Troubleshooting\n")
+    md.append("## 8. Troubleshooting\n")
     md.append("| Symptom | Fix |\n|---|---|\n" + "".join(f"| {a} | {b} |\n" for a, b in _troubles(provider, kind, driver_name)))
     md.append(
         f"\nStep by step for creating this kind of service: `docs/resource-guides/{provider}/{kind}.md` "
@@ -403,3 +407,34 @@ def _troubles(provider: str, kind: str, driver: Optional[str]) -> List[tuple]:
         if driver == "sqs":
             rows.append(("`QueueDoesNotExist`", "redeploy (the sqs driver creates missing ElasticMQ queues); check `queue_url`"))
     return rows
+
+
+def _any_program(project: Any, record: Optional[Dict[str, Any]], key: str, res: Any, service: Optional[str]) -> str:
+    """Section 7 on premises: scripts and other services using the resource without a pskit function."""
+    from .onprem_clients import direct, flavor_for, markdown, via_host
+    from .onprem_services import load_state
+    from .testing import _onprem_endpoint
+
+    options = project.config.provider.options
+    endpoint = _onprem_endpoint(record, project.root) if record else None
+    if not endpoint:
+        bind = str(options.get("host") or "127.0.0.1")
+        endpoint = str(options.get("advertise") or f"http://{'127.0.0.1' if bind == '0.0.0.0' else bind}:{options.get('port') or 8080}")  # noqa: S104
+    native = res.native_name(key)
+    host_snip = via_host(res.type, native, key, endpoint) if res.type in ("queue", "storage", "topic") else None
+    values: Dict[str, Any] = {"key": native, "bucket": native, "queue": native, "topic": native}
+    values.update({k: v for k, v in res.connection.items()})
+    values.update({k: v for k, v in res.options.items() if k not in ("driver", "class")})
+    entry = load_state(project.root)["services"].get(key) or {}
+    if entry.get("env_file"):
+        values["env_file"] = entry["env_file"]
+    flavor = flavor_for(res.type, dict(res.options), dict(res.connection), service)
+    snip = direct(flavor, values) if flavor else None
+    intro = (
+        "Not only functions: any script, web app, cron job or other service can add data to it, read it and consume "
+        "it. Secrets are the variables named by `*_env` (in the on-prem env file); export them where the program runs."
+    )
+    if host_snip and not snip:
+        intro += (" pskit has no direct client example for this driver; the host API works for every driver, or use the "
+                  "service's own SDK with the connection values above.")
+    return markdown("7. Use it from any other program", intro, host_snip, snip, "Directly, with the client library")

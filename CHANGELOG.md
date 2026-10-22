@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-10-22
+
+### Added
+- **Credentials for on-prem services**: choose the user and password when creating a service (studio *Security* box with *Generate*; `--user`, `--password`, `--password-env`), and whether it listens on `127.0.0.1` or the network. Redis / Valkey with a custom user get an ACL user with the `default` user disabled. Passwords are percent-encoded in URLs and validated; services that run without authentication (Kafka, ElasticMQ, Memcached, Mailpit) refuse a password and say how to keep them private.
+- **Use a service from any program**: *How to use* on each on-prem service and `pskit resources onprem usage KEY [--reveal]`: address, credentials, Python and Node.js code that connects directly (Redis lists and streams, Kafka, NATS JetStream, RabbitMQ, ElasticMQ, MinIO, PostgreSQL, MySQL, MongoDB, Redis cache, Memcached, SMTP) with the library to install, terminal commands and security notes. Resource guides on premises gain section 7, *Use it from any other program*, with the host HTTP API (any driver) and the direct client.
+- **Browse data**: studio *Resources → Data* and `pskit resources data KEY` page through waiting queue messages (peeked, not consumed), pending topic messages and bucket objects (prefix filter, preview, delete); built-in queue messages can be deleted one by one. New host endpoints `GET /__pskit/resources/<key>/data`, `GET|DELETE /__pskit/resources/<key>/object`, `DELETE /__pskit/resources/<key>/message`, `GET /__pskit/queues/<name>/peek`. The redis, redis_stream and pskit_host drivers (and custom classes with `peek`) are browsable; services that count a delivery when showing a message show their depth.
+
 ## [1.3.2] - 2026-10-22
 
 ### Added

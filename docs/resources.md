@@ -363,6 +363,11 @@ A connection drop between `claim` and `settle` makes the stored delivery tags in
 
 An endpoint that can't be reached shows up as a host note (`/__pskit/health`, `pskit logs --source host`). The host keeps serving other triggers and retries on the next poll.
 
+**Browsing.** `GET /__pskit/resources/<key>/data?offset=&limit=&prefix=` returns a page of messages (peeked) or
+objects, `GET /__pskit/resources/<key>/object?key=` previews an object, `DELETE .../object?key=` and
+`DELETE .../message?id=` (built-in queues) delete one, `GET /__pskit/queues/<name>/peek` serves the `pskit_host`
+driver. A custom queue class can add `peek(offset, limit) -> (items, total)` to be browsable.
+
 `pskit validate` rejects a driver that isn't allowed for the type, missing required parameters, one of a key pair without the other, a non-http(s) `endpoint`, and a malformed `class`.
 
 ## Secrets

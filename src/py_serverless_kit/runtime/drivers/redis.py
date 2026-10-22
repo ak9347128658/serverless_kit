@@ -209,6 +209,15 @@ class RedisQueue:
         value = self.client.execute("LLEN", self.key)
         return int(value or 0) if isinstance(value, int) else 0
 
+    def peek(self, offset: int, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+        """Waiting messages, oldest first (the list's tail), without claiming them."""
+        total = self.depth()
+        stop = -(offset + 1)
+        start = -(offset + limit)
+        raw = self.client.execute("LRANGE", self.key, start, stop)
+        items = [self._decode(_text(r)) for r in (raw if isinstance(raw, list) else [])]
+        return list(reversed(items)), total
+
     def recover(self, now: float, visibility: float) -> None:
         raw_claims = self.client.execute("HGETALL", self.claims) or []
         assert isinstance(raw_claims, list)

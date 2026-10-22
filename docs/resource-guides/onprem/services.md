@@ -37,6 +37,53 @@ Each row then offers **Details** (container state, health, endpoint, credentials
 log), **Backup**, **Add to pskit.yml** (if you removed it from the file) and **Remove** (keep or delete the data volume;
 the resource and its triggers are taken out of the draft).
 
+## Credentials and network
+
+The create form has a **Security** box (CLI flags in brackets):
+
+| Setting | Default | Notes |
+|---|---|---|
+| User (`--user`) | `pskit`; `default` for Redis / Valkey | Redis / Valkey with another user get an ACL user and the `default` user is disabled |
+| Password (`--password`, `--password-env VAR`) | 24 random characters | 8-128 characters of letters, digits and `!#%*+,.:=?@^_~-`; URLs are percent-encoded for you |
+| Listen on (`--bind`) | `127.0.0.1` here, `0.0.0.0` on an SSH server | `127.0.0.1` lets only programs on that machine connect |
+
+Kafka (Redpanda), ElasticMQ, Memcached and Mailpit run **without authentication** in this setup; the form says so and
+the CLI refuses a password for them. Keep them on `127.0.0.1` or a private network.
+
+```bash
+export ORDERS_DB_PASSWORD='Str0ng.pass#1'
+pskit resources onprem create orders-db --service postgres --user orders_app --password-env ORDERS_DB_PASSWORD --save
+pskit resources onprem create cache --service redis --role cache --user app --password-env CACHE_PASSWORD --bind 127.0.0.1
+```
+
+To change a password later: *Remove → Stop service, keep data*, create it again with the same key and the new
+password, then redeploy.
+
+## Use it from any program
+
+Each service row has **How to use**. It shows the address, user, the variable names (values with *Show passwords*),
+and Python and Node.js code that connects **directly** to the service from any script, web app or cron job, with the
+library to install and terminal commands:
+
+| Service | Python | Node.js | Terminal |
+|---|---|---|---|
+| Redis list (queue) | `redis`: `LPUSH` the pskit envelope, `LRANGE` to look, `BRPOP` to take | `ioredis` | `redis-cli` |
+| Redis / Valkey stream | `redis`: `XADD`, `XRANGE`, your own consumer group with `XREADGROUP` / `XACK` | `ioredis` | `redis-cli XADD / XRANGE` |
+| Kafka | `kafka-python` producer / consumer (your own `group_id`) | `kafkajs` | `rpk` in the container |
+| NATS JetStream | `nats-py`: `js.publish`, your own durable pull consumer | `nats` | `nats` CLI |
+| RabbitMQ | `pika` | `amqplib` | management UI |
+| ElasticMQ | `boto3` SQS with `endpoint_url` | `@aws-sdk/client-sqs` | `aws sqs --endpoint-url` |
+| MinIO | `boto3` S3 with `endpoint_url` | `@aws-sdk/client-s3` | `aws s3 --endpoint-url`, `mc` |
+| PostgreSQL / MySQL / MongoDB | `psycopg` / `pymysql` / `pymongo` | `pg` / `mysql2` / `mongodb` | `psql` / `mysql` / `mongosh` |
+| Redis cache / Memcached | `redis` / `pymemcache` | `ioredis` / `memjs` | `redis-cli` |
+| Mailpit | `smtplib` | `nodemailer` | web UI |
+
+These scripts were run against real containers. Data written directly uses the format the pskit driver reads, so the
+functions' triggers receive it. Reading directly next to a pskit trigger competes with it; the code uses separate
+consumer groups where the service has them.
+
+From the terminal: `pskit resources onprem usage <key> [--reveal]`.
+
 ## From the command line
 
 ```bash
@@ -116,6 +163,27 @@ resources:
 
 Messages are leased through that host's admin API (`/__pskit/queues/<name>/lease|ack|nack`), so a crash on either
 side loses nothing.
+
+## See what is inside
+
+On a deployed on-prem host, **Resources → Data** on a queue, topic or bucket lists what it holds, page by page:
+waiting messages (looked at, not consumed; *being processed* marks leased ones, with failure counts), pending topic
+messages, or bucket objects with a prefix filter, preview (text, or base64 for binary, first 256 KiB) and delete. A
+single message of a built-in queue can be deleted too.
+
+| Backend | Browse |
+|---|---|
+| built-in / directory queue, topic, bucket | yes |
+| Redis list, Redis / Valkey stream, another pskit host | yes (oldest first) |
+| any storage driver (MinIO, S3, Azure Blob, GCS, ...) | yes (listing + preview) |
+| SQS / ElasticMQ, Azure queue, Pub/Sub, MNS, Cloudflare | depth only: they cannot show a message without counting a delivery |
+| custom class | yes if it implements `peek(offset, limit) -> (items, total)` |
+
+```bash
+pskit resources data jobs                    # first 20 messages
+pskit resources data jobs --offset 20 -n 20  # next page
+pskit resources data uploads --prefix in/
+```
 
 ## Use it from code and test it
 

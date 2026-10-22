@@ -304,13 +304,14 @@ def make_handler(app: Studio) -> type:
                 provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
                 stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
                 return 200, system.resource_test_guide(root, provider, stage)
-            if parts in (["resource-check"], ["resource-clear"], ["resource-usage"]) and method == "POST":
+            if parts and parts[0] in ("resource-check", "resource-clear", "resource-usage", "resource-data",
+                                      "resource-object", "resource-message-delete") and len(parts) == 1 and method == "POST":
                 body = _obj(self._body())
                 raw_provider = (app.raw_config().get("provider") or {})
                 provider = str(body.get("provider") or raw_provider.get("name") or "")
                 stage = str(body.get("stage") or raw_provider.get("stage") or "dev")
                 action = parts[0].split("-", 1)[1]
-                return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action)
+                return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action, body)
             if parts == ["test-events"]:
                 if method == "GET":
                     return 200, system.test_events(root)
@@ -456,6 +457,8 @@ def make_handler(app: Studio) -> type:
                 if len(rest) == 1 and method == "GET":
                     reveal = _param(params, "reveal") in ("1", "true")
                     return 200, svc.status(root, rest[0], reveal=reveal)
+                if len(rest) == 2 and rest[1] == "usage" and method == "GET":
+                    return 200, svc.service_usage(root, rest[0], reveal=_param(params, "reveal") in ("1", "true"))
                 if len(rest) == 2 and rest[1] == "logs" and method == "GET":
                     return 200, {"text": svc.logs(root, rest[0], tail=max(10, min(2000, _int(params, "tail", 200))))}
                 if len(rest) == 2 and rest[1] in ("backup", "remove") and method == "POST":

@@ -15,7 +15,7 @@ out of the files).
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
 from ._http import DriverError, check_url, request
@@ -103,6 +103,10 @@ class PskitHostQueue:
             self._call("POST", "/ack", {"receipts": acks})
         if nacks:
             self._call("POST", "/nack", {"receipts": nacks})
+
+    def peek(self, offset: int, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+        reply = self._call("GET", f"/peek?offset={int(offset)}&limit={int(limit)}")
+        return list(reply.get("items") or []), int(reply.get("total") or 0)
 
     def depth(self) -> int:
         reply = self._call("GET", "")

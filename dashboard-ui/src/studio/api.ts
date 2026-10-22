@@ -19,6 +19,7 @@ import type {
   OnPremService,
   OnPremServicesState,
   ResourceCheck,
+  ResourcePage,
   ValidateResult,
   VsCodeState,
 } from "./types";
@@ -206,6 +207,17 @@ export const api = {
     request<{ key: string; deleted: number; path: string }>("POST", "/api/resource-clear", { provider, stage, key }),
   resourceUsage: (provider: string, stage: string, key: string) =>
     request<{ key: string; title: string; markdown: string }>("POST", "/api/resource-usage", { provider, stage, key }),
+  resourceData: (provider: string, stage: string, key: string, offset: number, limit: number, prefix?: string) =>
+    request<ResourcePage>("POST", "/api/resource-data", { provider, stage, key, offset, limit, prefix }),
+  resourceObject: (provider: string, stage: string, key: string, object: string, del = false) =>
+    request<{ key?: string; size?: number; encoding?: string; content?: string; truncated?: boolean; deleted?: boolean }>(
+      "POST", "/api/resource-object", { provider, stage, key, object, delete: del }),
+  resourceMessageDelete: (provider: string, stage: string, key: string, id: string) =>
+    request<{ deleted: boolean }>("POST", "/api/resource-message-delete", { provider, stage, key, id }),
+  onpremUsage: (key: string, reveal = false) =>
+    request<{ key: string; markdown: string }>("GET", `/api/onprem-services/${encodeURIComponent(key)}/usage`, undefined, {
+      query: { reveal: reveal ? "1" : undefined },
+    }),
   guides: () => request<GuideIndex>("GET", "/api/resource-guides"),
   guide: (cloud: string, page: string) =>
     request<GuidePage>("GET", `/api/resource-guides/${encodeURIComponent(cloud)}/${encodeURIComponent(page)}`),
