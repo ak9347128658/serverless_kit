@@ -230,6 +230,15 @@ export declare function resources(env?: NodeJS.ProcessEnv): { [name: string]: Re
 /** The binding of resource `name`. */
 export declare function resource(name: string, env?: NodeJS.ProcessEnv): Resource;
 
+/** On premises: send a message to queue `name` through the host (honours the resource's driver). */
+export declare function submitQueue(name: string, message: unknown, attributes?: { [key: string]: unknown }, env?: NodeJS.ProcessEnv): Promise<string>;
+/** On premises: publish to topic `name` through the host. */
+export declare function submitTopic(name: string, message: unknown, attributes?: { [key: string]: unknown }, env?: NodeJS.ProcessEnv): Promise<string>;
+/** On premises: write an object to bucket `bucket` through the host. */
+export declare function putObject(bucket: string, key: string, data: string | Uint8Array, env?: NodeJS.ProcessEnv): Promise<void>;
+/** On premises: delete an object; true when it existed. */
+export declare function deleteObject(bucket: string, key: string, env?: NodeJS.ProcessEnv): Promise<boolean>;
+
 /** Call another function of this service; resolves to its result. `timeout` in seconds. */
 export declare function invoke<T = any>(
   fn: string,

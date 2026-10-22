@@ -535,3 +535,6 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .md-table th, .md-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
 .md-table th { background: var(--panel-2); }
 .console-log { max-height: 320px; overflow: auto; }
+.code-block { position: relative; }
+.code-block .code-copy { position: absolute; top: 14px; right: 8px; }
+.code-block .md-code { max-height: 420px; overflow: auto; padding-right: 64px; }

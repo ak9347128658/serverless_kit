@@ -230,3 +230,84 @@ def test_lease_api_rejects_bad_receipts_and_needs_the_token(make_project, tmp_pa
         httpd.server_close()
         host.executor.shutdown()
         host.logs.close()
+
+
+def test_check_purge_and_node_publish_helpers(make_project, tmp_path):
+    import socket
+    import subprocess
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    db_port = listener.getsockname()[1]
+    project = make_project(
+        f"""
+        service: chk
+        provider:
+          name: onprem
+          options: {{data_dir: "{(tmp_path / 'd').as_posix()}"}}
+        resources:
+          jobs: {{type: queue}}
+          files: {{type: storage}}
+          db:
+            type: database
+            external: true
+            connection: {{host: 127.0.0.1, port: {db_port}}}
+          gone:
+            type: cache
+            external: true
+            connection: {{host: 127.0.0.1, port: 9}}
+        functions:
+          noop: {{handler: app.handlers.hello}}
+        """
+    )
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    root = project.work_dir / "onprem_app"
+    activate_layout(root)
+    host = Host(root)
+    host.open()
+    httpd, base = _serve(host)
+    try:
+        host.broker.submit_queue("jobs", "a")
+        host.broker.put_object("files", "x/y.txt", b"1")
+        assert "1 message(s)" in host.check_resource("jobs")["detail"]
+        assert "1 object(s)" in host.check_resource("files")["detail"]
+        assert host.check_resource("db")["ok"] is True
+        assert host.check_resource("gone")["ok"] is False
+        with pytest.raises(Exception, match="404"):
+            _post(f"{base}/__pskit/resources/nope/check", {})
+        out = _post(f"{base}/__pskit/resources/db/check", {})
+        assert out["ok"] and out["checked_from"] == "host"
+
+        req = Request(f"{base}/__pskit/resources/jobs/data", method="DELETE")
+        with urlopen(req, timeout=5) as resp:
+            assert json.loads(resp.read())["deleted"] == 1
+        assert host.broker.queue_depth("jobs") == 0
+        with pytest.raises(Exception, match="400"):
+            urlopen(Request(f"{base}/__pskit/resources/db/data", method="DELETE"), timeout=5)
+
+        if shutil.which("node") is None:
+            pytest.skip("node is not installed")
+        runtime_js = Path(__file__).resolve().parents[2] / "src" / "py_serverless_kit" / "runtime_js"
+        script = (
+            f"const p = require({json.dumps(str(runtime_js / 'index.js'))});\n"
+            "(async () => {\n"
+            "  const id = await p.submitQueue('jobs', {n: 1}, {k: 'v'});\n"
+            "  await p.putObject('files', 'from/node.txt', 'hi');\n"
+            "  const gone = await p.deleteObject('files', 'x/y.txt');\n"
+            "  console.log(JSON.stringify({id, gone}));\n"
+            "})().catch((e) => { console.error(e.message); process.exit(1); });\n"
+        )
+        env = dict(__import__("os").environ, PSKIT_HOST_URL=base)
+        proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, env=env, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        result = json.loads(proc.stdout)
+        assert result["id"] and result["gone"] is True
+        assert host.broker.queue_depth("jobs") == 1
+        assert host.broker.get_object("files", "from/node.txt") == b"hi"
+    finally:
+        listener.close()
+        httpd.shutdown()
+        httpd.server_close()
+        host.executor.shutdown()
+        host.logs.close()

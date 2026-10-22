@@ -948,7 +948,10 @@ def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> 
         pair("access_key", "secret_key")
         number("wait_seconds", 0, 20)
         binding = {"use": "sqs", **pick("queue_url", "account_id", "region", "endpoint", *_AWS_KEYS)}
-        binding.update(pick("wait_seconds", "message_group_id"))
+        binding.update(pick("wait_seconds", "message_group_id", "create_queue"))
+        if "create_queue" not in binding and endpoint is not None and "amazonaws.com" not in str(endpoint).lower():
+            # ElasticMQ / LocalStack forget their queues on restart; real SQS never needs this.
+            binding["create_queue"] = True
         if not has("queue_url"):
             binding["name"] = str(value("name") or native)
         return binding

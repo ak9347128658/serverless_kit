@@ -990,7 +990,11 @@ class Host:
             "PSKIT_ONPREM_ROOT": str(self.root),
             "PSKIT_MANIFEST": str(self.app_dir / "pskit_manifest.json"),
             "PSKIT_ENDPOINT": str(self.spec.get("endpoint") or ""),
+            # This host on loopback: Node.js handlers publish through it (pskit submitQueue & co).
+            "PSKIT_HOST_URL": health_url(self.spec).rsplit("/__pskit/", 1)[0],
         }
+        if self.language == "node" and self.spec.get("admin_token"):
+            forced["PSKIT_ADMIN_TOKEN"] = str(self.spec["admin_token"])
         env = {str(k): str(v) for k, v in (spec.get("environment") or {}).items()}
         env.update(forced)
         return env
@@ -1341,6 +1345,8 @@ class Host:
                     self._user(url)
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)})
+                except KeyError as exc:
+                    self._json(404, {"error": str(exc.args[0] if exc.args else exc)})
                 except Exception as exc:  # noqa: BLE001 - last-resort response
                     self._json(500, {"errorType": type(exc).__name__, "cause": str(exc)})
 
@@ -1362,6 +1368,12 @@ class Host:
                     if self.command != "GET":
                         return self._json(405, {"error": "GET the resource list"})
                     return self._json(200, host.resources())
+                if len(parts) == 3 and parts[0] == "resources" and parts[2] in ("check", "data"):
+                    if parts[2] == "check" and self.command in ("GET", "POST"):
+                        return self._json(200, host.check_resource(parts[1]))
+                    if parts[2] == "data" and self.command == "DELETE":
+                        return self._json(200, host.purge_resource(parts[1]))
+                    return self._json(405, {"error": "POST .../check or DELETE .../data"})
                 if parts and parts[0] == "queues" and len(parts) == 2:
                     return self._queue(parts[1], raw)
                 if parts and parts[0] == "queues" and len(parts) == 3 and parts[2] in ("lease", "ack", "nack"):
@@ -1580,6 +1592,85 @@ class Host:
                 item["path"] = str(self.broker.bucket_dir(name))
             items.append(item)
         return {"items": items}
+
+    def _resource(self, key: str) -> Dict[str, Any]:
+        res = (self.spec.get("resources") or {}).get(key)
+        if not isinstance(res, dict):
+            known = ", ".join(sorted(self.spec.get("resources") or {})) or "<none>"
+            raise KeyError(f"unknown resource {key!r}; known: {known}")
+        return res
+
+    def connection_values(self, key: str) -> Dict[str, str]:
+        """Connection values of resource ``key`` as handlers see them, ``<name>_env`` resolved."""
+        prefix = "PSKIT_RESOURCE_" + "".join(c if c.isalnum() else "_" for c in key).upper() + "_"
+        res = self._resource(key)
+        names = list(res.get("functions") or []) + list(self.spec.get("functions") or {})
+        values: Dict[str, str] = {}
+        for fname in names:
+            env = (self.spec.get("functions") or {}).get(fname, {}).get("environment") or {}
+            found = {k[len(prefix) :].lower(): str(v) for k, v in env.items() if k.startswith(prefix)}
+            if found:
+                values = found
+                break
+        for name in list(values):
+            if name.endswith("_env") and values[name] in os.environ and not values.get(name[:-4]):
+                values[name[:-4]] = os.environ[values[name]]
+        return values
+
+    def check_resource(self, key: str) -> Dict[str, Any]:
+        """Is the resource reachable from this host? Queues report depth, buckets their object count."""
+        from .drivers.probe import probe
+
+        res = self._resource(key)
+        kind = str(res.get("type") or "")
+        name = str(res.get("name") or key)
+        started = time.monotonic()
+        try:
+            if kind == "queue":
+                depth = self.broker.queue_depth(name)
+                detail = f"queue {name} is reachable" + (f"; {depth} message(s) waiting" if depth >= 0 else "")
+            elif kind == "storage":
+                detail = f"bucket {name} is reachable; {len(self.broker.scan_bucket(name))} object(s)"
+            elif kind == "topic":
+                detail = f"topic {name} uses the folder {self.broker.topic_dir(name)}"
+            else:
+                detail = probe(self.connection_values(key))
+            ok = True
+        except Exception as exc:  # noqa: BLE001 - the answer is the error
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        ms = round((time.monotonic() - started) * 1000, 1)
+        return {"key": key, "type": kind, "name": name, "ok": ok, "detail": detail, "ms": ms, "checked_from": "host"}
+
+    def purge_resource(self, key: str) -> Dict[str, Any]:
+        """Delete the data of a built-in / directory queue, bucket or topic (the folder stays)."""
+        res = self._resource(key)
+        kind = str(res.get("type") or "")
+        name = str(res.get("name") or key)
+        driver = res.get("driver") if isinstance(res.get("driver"), dict) else {}
+        use = str((driver or {}).get("use") or "builtin")
+        if kind not in ("queue", "storage", "topic"):
+            raise ValueError(f"{kind} resources keep no data on the host")
+        if use not in ("builtin", "directory"):
+            raise ValueError(f"{key} keeps its data in {use}; delete it there (or remove the on-prem service)")
+        if kind == "queue":
+            folder = self.broker.queue_dir(name) / "messages"
+        elif kind == "topic":
+            folder = self.broker.topic_dir(name) / "pending"
+        else:
+            folder = self.broker.bucket_dir(name)
+        removed = 0
+        with self.broker._lock:
+            if folder.is_dir():
+                for path in sorted(folder.rglob("*"), reverse=True):
+                    if path.is_file():
+                        path.unlink()
+                        removed += 1
+                    elif path.is_dir():
+                        path.rmdir()
+        if kind == "storage":
+            self._snapshot[name] = {}
+            self._save_snapshot()
+        return {"key": key, "deleted": removed, "path": str(folder)}
 
     def health(self) -> Dict[str, Any]:
         manifest = getattr(self, "manifest", None)

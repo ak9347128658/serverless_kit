@@ -173,9 +173,13 @@ pskit resources delete --all-kept -s dev --yes
 | `delete --all-kept` | delete every kept resource |
 | `send KEY [-d DATA]` | test a resource: a message to a queue, an object to a bucket, a message to a topic |
 | `send --list` | how to test every resource: payload, pskit and cloud CLI commands, console steps; for database, cache and custom resources the `PSKIT_RESOURCE_*` variables and a Python / Node.js snippet |
+| `check KEY [--json]` | is it reachable? From the on-prem host once deployed there (queue depth, bucket object count, database / cache / custom connection, Redis `PING`), else a connection check from this machine; exits 1 when it fails |
+| `clear KEY [--yes]` | on premises: delete every message / object of a built-in queue, bucket or topic on the host (the resource stays) |
 | `-y, --yes` | don't ask for confirmation |
 
 ```bash
+pskit resources check orders-db
+pskit resources clear jobs --yes
 pskit resources send --list
 pskit resources send jobs -d '{"order_id": 1}'                       # queue message
 pskit resources send uploads -d '{"key": "in/a.csv", "content": "a,b"}'   # object upload

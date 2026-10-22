@@ -18,6 +18,7 @@ import type {
   GuidePage,
   OnPremService,
   OnPremServicesState,
+  ResourceCheck,
   ValidateResult,
   VsCodeState,
 } from "./types";
@@ -199,6 +200,10 @@ export const api = {
   onpremApply: (raw: JsonObject, key: string, attach?: string[]) =>
     request<{ raw: JsonObject }>("POST", "/api/onprem-services/apply", { raw, key, attach }),
   onpremUnapply: (raw: JsonObject, key: string) => request<{ raw: JsonObject }>("POST", "/api/onprem-services/unapply", { raw, key }),
+  resourceCheck: (provider: string, stage: string, key: string) =>
+    request<ResourceCheck>("POST", "/api/resource-check", { provider, stage, key }),
+  resourceClear: (provider: string, stage: string, key: string) =>
+    request<{ key: string; deleted: number; path: string }>("POST", "/api/resource-clear", { provider, stage, key }),
   guides: () => request<GuideIndex>("GET", "/api/resource-guides"),
   guide: (cloud: string, page: string) =>
     request<GuidePage>("GET", `/api/resource-guides/${encodeURIComponent(cloud)}/${encodeURIComponent(page)}`),

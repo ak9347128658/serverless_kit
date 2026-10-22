@@ -10,6 +10,7 @@ import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FieldForm, FormRow, KeyValueEditor, Segmented, TextInput, Toggle } from "../components/Forms";
 import { DiscoverModal, InlineIssues, PageHeader } from "../components/Misc";
 import { href, navigate } from "../route";
+import { api, errorMessage } from "../api";
 import { useStudio } from "../store";
 import type { Driver, Json, JsonObject } from "../types";
 import { asArray, asObject, CLASS_RE, getIn, NAME_RE, setIn, str, uniqueName, type Path } from "../util";
@@ -37,7 +38,7 @@ const CLOUD_LABEL: Record<string, string> = {
 };
 
 export function ResourcesView({ rest }: { rest: string[] }) {
-  const { draft, replace, issuesAt } = useStudio();
+  const { draft, replace, issuesAt, state } = useStudio();
   const confirm = useConfirm();
   const toast = useToast();
   const resources = asObject(draft.resources);
@@ -58,19 +59,51 @@ export function ResourcesView({ rest }: { rest: string[] }) {
 
   const remove = async (name: string) => {
     const users = usedBy(name);
-    const ok = await confirm({
-      title: `Delete resource ${name}?`,
-      body: users.length ? `Triggers in ${users.join(", ")} use it and will stop validating until you change them.` : asObject(resources[name]).external
+    const res = asObject(resources[name]);
+    const target = state.target || { provider: providerName, stage: "dev" };
+    // A one-click on-prem service behind it, or built-in data on the on-prem host?
+    const service = await api.onpremServices().then((s) => s.services.find((x) => x.key === name && x.kind === "service"), () => undefined);
+    const builtinOnHost =
+      !service && target.provider === "onprem" && !res.external && ["queue", "storage", "topic"].includes(str(res.type)) && !str(asObject(res.options).driver);
+    const warn = users.length ? ` Triggers in ${users.join(", ")} use it and will stop validating until you change them.` : "";
+    let body: string;
+    let extra: { label: string; value: string; danger?: boolean }[] | undefined;
+    let confirmLabel = "Delete";
+    if (service) {
+      body = `${name} is backed by the ${service.service} container on ${service.target_label}. Remove only the pskit.yml entry, or also stop the service: keeping its data volume (create it again later with the same key to reuse it) or deleting the data.${warn}`;
+      confirmLabel = "pskit.yml only";
+      extra = [
+        { label: "Stop service, keep data", value: "svc-keep" },
+        { label: "Delete service and data", value: "svc-delete", danger: true },
+      ];
+    } else if (builtinOnHost) {
+      body = `The messages / objects of ${name} stay in the host's data folder unless you delete them too.${warn}`;
+      confirmLabel = "Delete, keep data";
+      extra = [{ label: "Delete with its data", value: "purge", danger: true }];
+    } else {
+      body =
+        (res.external
           ? "Bound functions lose its PSKIT_RESOURCE_* variables. Nothing is deleted in the cloud (it is external)."
-          : "Bound functions lose its PSKIT_RESOURCE_* variables. It is managed by pskit, so the next deploy deletes it from the cloud with its data (or delete it now under In the cloud).",
-      confirmLabel: "Delete",
-      danger: true,
-    });
-    if (ok !== "confirm") return;
+          : "Bound functions lose its PSKIT_RESOURCE_* variables. It is managed by pskit, so the next deploy deletes it from the cloud with its data (or delete it now under In the cloud).") + warn;
+    }
+    const answer = await confirm({ title: `Delete resource ${name}?`, body, confirmLabel, extra, danger: true });
+    if (!answer) return;
+    try {
+      if (answer === "purge") {
+        const out = await api.resourceClear(target.provider, target.stage, name);
+        toast(`Deleted ${out.deleted} item(s) of ${name} on the host`, "ok");
+      } else if (answer === "svc-keep" || answer === "svc-delete") {
+        await api.onpremRemove(name, answer === "svc-delete");
+        toast(`Removing the ${name} service${answer === "svc-delete" ? " and its data" : " (data kept)"}; progress under On-prem services`, "info");
+      }
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+      if (answer === "purge") return;
+    }
     let raw: Json = setIn(draft, ["resources", name], undefined);
     if (getIn(raw, ["providers", "onprem", "resources", name]) !== undefined) raw = setIn(raw, ["providers", "onprem", "resources", name], undefined);
     replace(raw as JsonObject);
-    toast(`Deleted ${name} (not saved yet)`, "info");
+    toast(`Deleted ${name} from pskit.yml (not saved yet)`, "info");
   };
 
   const columns: Column<Row>[] = [

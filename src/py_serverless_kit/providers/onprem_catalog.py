@@ -161,6 +161,7 @@ QUEUE_DRIVERS: List[Dict[str, Any]] = [
             *_AWS_CREDS,
             field("wait_seconds", "Long-poll seconds", "int", default=0, min=0, max=20),
             field("message_group_id", "Message group (FIFO)", default="pskit"),
+            field("create_queue", "Create the queue if missing", "bool", help="For ElasticMQ and other emulators."),
             _ENDPOINT,
         ],
     ),

@@ -17,6 +17,7 @@ const { BatchResult, BatchFailure } = require("./batch");
 const { getLogger, Logger } = require("./log");
 const { Resource, resources, resource } = require("./resources");
 const { invoke, InvokeError } = require("./invoke");
+const { submitQueue, submitTopic, putObject, deleteObject } = require("./onprem");
 const { registerModules } = require("./dispatch");
 const { registerManifest } = require("./manifest");
 
@@ -36,6 +37,10 @@ module.exports = {
   InvokeError,
   resources,
   resource,
+  submitQueue,
+  submitTopic,
+  putObject,
+  deleteObject,
   getLogger,
   toResponse,
   eventFromWire,

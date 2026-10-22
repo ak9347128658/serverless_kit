@@ -304,6 +304,13 @@ def make_handler(app: Studio) -> type:
                 provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
                 stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
                 return 200, system.resource_test_guide(root, provider, stage)
+            if parts in (["resource-check"], ["resource-clear"]) and method == "POST":
+                body = _obj(self._body())
+                raw_provider = (app.raw_config().get("provider") or {})
+                provider = str(body.get("provider") or raw_provider.get("name") or "")
+                stage = str(body.get("stage") or raw_provider.get("stage") or "dev")
+                action = "check" if parts == ["resource-check"] else "clear"
+                return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action)
             if parts == ["test-events"]:
                 if method == "GET":
                     return 200, system.test_events(root)

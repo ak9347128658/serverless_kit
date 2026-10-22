@@ -192,3 +192,32 @@ def test_apply_under_providers_onprem_when_another_cloud_is_main(tmp_path):
     assert out["functions"]["worker"]["events"] == [{"http": "GET /"}]  # aws untouched
     back = svc.remove_from_raw(out, "jobs")
     assert back["providers"]["onprem"]["functions"]["worker"]["events"] == [{"http": "GET /"}]
+
+
+def test_resource_code_is_valid_for_every_provider_and_flavor():
+    import shutil
+    import subprocess
+    import types
+
+    from py_serverless_kit.core.resource_code import code_for, flavor_of
+
+    cases = [(p, k, None, {}) for p in ("onprem", "aws", "gcp", "azure", "ibm") for k in ("queue", "storage", "topic")]
+    cases += [("onprem", "database", s, {"host": "h"}) for s in ("postgres", "mysql", "mongodb", "redis", "memcached", "mailpit", None)]
+    scripts = []
+    for provider, kind, service, conn in cases:
+        out = code_for(provider, "order-jobs", types.SimpleNamespace(type=kind, connection=conn), service)
+        compile(out["python"], f"{provider}-{kind}-{service}.py", "exec")
+        scripts.append(out["node"])
+    assert "submit_queue" in code_for("onprem", "j", types.SimpleNamespace(type="queue", connection={}))["python"]
+    assert flavor_of(types.SimpleNamespace(connection={"port": 5432})) == "postgres"
+    assert flavor_of(types.SimpleNamespace(connection={"smtp_host": "m"})) == "smtp"
+    if shutil.which("node"):
+        for text in scripts:
+            proc = subprocess.run(["node", "--check", "-"], input=text, capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr + text
+
+
+def test_elasticmq_resource_recreates_its_queue(tmp_path):
+    req = svc.check_request({"key": "sq", "service": "elasticmq"}, tmp_path, RAW)
+    resource, env, _notes = svc._connection(req, "pw")
+    assert resource["options"]["create_queue"] is True and env == {}

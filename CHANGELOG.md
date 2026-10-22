@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-22
+
+### Added
+- **Code for every resource**: the studio's *Test a resource* panel shows Python and Node.js handler code (publish + consume for queues, buckets and topics on each cloud; PostgreSQL, MySQL, MongoDB, Redis, Memcached and SMTP connection examples) with the client library to add.
+- **`pskit resources check KEY`** and studio *Test connection*: queue depth, bucket object count, or a connection check (Redis `PING`), run from the on-prem host once deployed (`POST /__pskit/resources/<key>/check`), else from this machine.
+- **`pskit resources clear KEY`** empties a built-in on-prem queue, bucket or topic (`DELETE /__pskit/resources/<key>/data`). Studio *Delete* asks whether to keep or delete a resource's data (one-click services: stop or delete the container).
+- Node.js on premises: `submitQueue`, `submitTopic`, `putObject` and `deleteObject` in `pskit`, like the Python helpers (through `PSKIT_HOST_URL`).
+
+### Fixed
+- On premises: an ElasticMQ queue created on an SSH server failed with `QueueDoesNotExist`: the queue was created from this machine (often firewalled) and ElasticMQ forgets queues on restart. It is now created from the server over SSH when needed, and the `sqs` driver recreates a missing queue (`create_queue`, on by default for non-AWS endpoints).
+
 ## [1.3.0] - 2026-10-22
 
 ### Added

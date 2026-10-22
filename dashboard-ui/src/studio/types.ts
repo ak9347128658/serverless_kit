@@ -279,6 +279,19 @@ export interface ResourceTestItem {
   sample?: Json | null;
   payload_help: string;
   remote: { supported: boolean; reason: string; pskit: string[]; cli: string[]; console: string[] };
+  code?: { flavor: string; python: string; node: string; requirements: { python: string[]; node: string[] }; note: string };
+  service?: string | null;
+  check?: { supported: boolean; where: string; command: string };
+}
+
+export interface ResourceCheck {
+  key: string;
+  type: string;
+  name: string;
+  ok: boolean;
+  detail: string;
+  ms: number;
+  checked_from: string;
 }
 
 export interface ResourceTestGuide {

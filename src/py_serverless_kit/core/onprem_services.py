@@ -672,6 +672,8 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
             # ElasticMQ accepts any credentials; these are not secrets.
             "access_key": "pskit",
             "secret_key": "pskit",
+            # ElasticMQ forgets queues on restart; the driver recreates this one when it is missing.
+            "create_queue": True,
         }
         res["connection"] = {"ui_url": f"http://{addr}:9325"}
     elif service in ("postgres", "mysql", "mariadb"):
@@ -794,7 +796,7 @@ def create(
     if spec["init"]:
         sh(docker_argv(target, ["exec", req["container"], "sh", "-c", _fill(spec["init"], _values(req))]))
     if req["service"] == "elasticmq":
-        _elasticmq_queue(req, emit)
+        _elasticmq_queue(req, emit, sh)
     resource, env_values, notes = _connection(req, password)
     if req["service"] in DRIVER_TEMPLATES:
         _add_driver(root, raw, req["service"])
@@ -918,23 +920,33 @@ def _tcp_open(host: str, port: int) -> bool:
         return False
 
 
-def _elasticmq_queue(req: Dict[str, Any], emit: Emit) -> None:
-    """Create the queue through the SQS query API (ElasticMQ needs no signature)."""
+def _elasticmq_queue(req: Dict[str, Any], emit: Emit, sh: Optional[_Runner] = None) -> None:
+    """Create the queue through the SQS query API (ElasticMQ needs no signature).
+
+    From this machine first; a server's firewall often hides the port from here, so then
+    from the server itself over SSH. The driver also recreates it (``create_queue``).
+    """
     from urllib.parse import urlencode
     from urllib.request import urlopen
 
-    url = f"http://{req['address']}:{req['port']}/?" + urlencode(
-        {"Action": "CreateQueue", "QueueName": req["key"], "Version": "2012-11-05"}
-    )
-    for _ in range(15):
+    query = urlencode({"Action": "CreateQueue", "QueueName": req["key"], "Version": "2012-11-05"})
+    attempts = 3 if req["target"].get("method") == "ssh" else 15
+    for _ in range(attempts):
         try:
-            with urlopen(url, timeout=5) as resp:  # noqa: S310 - the service just created
+            with urlopen(f"http://{req['address']}:{req['port']}/?{query}", timeout=5) as resp:  # noqa: S310
                 resp.read()
             emit(f"created queue {req['key']}")
             return
         except OSError:
             time.sleep(2)
-    emit(f"note: could not create queue {req['key']} from this machine; create it in the ElasticMQ UI (port 9325)")
+    if sh is not None and req["target"].get("method") == "ssh":
+        local = f"http://127.0.0.1:{req['port']}/?{query}"
+        command = f"curl -fsS {_shq(local)} >/dev/null || wget -qO- {_shq(local)} >/dev/null"
+        code, _out = sh.run_fn(_ssh_argv(req["target"], command), None)
+        if code == 0:
+            emit(f"created queue {req['key']} (from the server; port {req['port']} is not reachable from here)")
+            return
+    emit(f"note: could not create queue {req['key']} now; the sqs driver creates it on first use (create_queue)")
 
 
 # service -> (module written to <source>/pskit_drivers/, requirement added to requirements.txt)

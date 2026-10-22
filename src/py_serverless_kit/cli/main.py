@@ -117,10 +117,12 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  resources   list | send | delete | onprem
+  resources   list | send | check | clear | delete | onprem
               pskit resources list -s dev
               pskit resources delete aws_s3_bucket.b_uploads -s dev
               pskit resources send jobs -d '{"order_id": 1}'
+              pskit resources check orders-db
+              pskit resources clear jobs --yes
               pskit resources onprem create jobs --service redis --attach worker --save
   workflow    run | show | start | executions | status | cancel
               pskit workflow run order -i '{"id": 1}' --history
@@ -539,6 +541,52 @@ def resources_send(project, key: Optional[str], data: Optional[str], show: bool,
     click.echo(json.dumps(result, indent=2, default=str))
     if result.get("functions"):
         info("Bound functions: " + ", ".join(result["functions"]) + ". Watch them: pskit logs -f")
+
+
+@resources.command("check", short_help="Check that a resource is reachable (connection, depth).")
+@project_options
+@click.argument("key")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def resources_check(project, key: str, as_json: bool) -> None:  # noqa: ANN001
+    """Check resource KEY: from the on-prem host once deployed there, else from this machine.
+
+    \b
+    Queues report how many messages wait, buckets how many objects they hold; databases,
+    caches and custom services get a connection check (Redis answers PING).
+    """
+    from ..core.deployer import Deployer
+    from ..core.testing import TriggerError, check_resource
+
+    try:
+        result = check_resource(project, Deployer(project, echo=echo).load_record(), key)
+    except TriggerError as exc:
+        raise click.ClickException(str(exc)) from None
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    elif result.get("ok"):
+        ok(f"{key}: {result['detail']} ({result['ms']} ms, from {result['checked_from']})")
+    else:
+        fail(f"{key}: {result['detail']} (from {result['checked_from']})")
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+
+@resources.command("clear", short_help="Delete the data of a built-in on-prem queue, bucket or topic.")
+@project_options
+@click.argument("key")
+@click.option("-y", "--yes", is_flag=True, help="Do not ask for confirmation.")
+def resources_clear(project, key: str, yes: bool) -> None:  # noqa: ANN001
+    """Delete every message / object of built-in resource KEY on the on-prem host (the resource stays)."""
+    from ..core.deployer import Deployer
+    from ..core.testing import TriggerError, purge_resource
+
+    if not yes:
+        click.confirm(f"Delete all data of {key} on the on-prem host?", abort=True)
+    try:
+        result = purge_resource(project, Deployer(project, echo=echo).load_record(), key)
+    except TriggerError as exc:
+        raise click.ClickException(str(exc)) from None
+    ok(f"Deleted {result['deleted']} item(s) from {result['path']}")
 
 
 @resources.command("delete", short_help="Delete buckets, queues or topics by address.")

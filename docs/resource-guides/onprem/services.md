@@ -117,6 +117,24 @@ resources:
 Messages are leased through that host's admin API (`/__pskit/queues/<name>/lease|ack|nack`), so a crash on either
 side loses nothing.
 
+## Use it from code and test it
+
+*Resources → Test a resource* shows, for the selected resource, Python and Node.js code to paste into a handler
+(publish + consume for queues, streams and buckets; a connection example for databases, caches and SMTP) with the
+library to add, and **Test connection**, which runs from the on-prem host once it is deployed. In a terminal:
+
+```bash
+pskit resources check orders-db        # e.g. "127.0.0.1:5432 accepts connections (3.1 ms, from host)"
+pskit resources send jobs -d '{"order_id": 1}'
+```
+
+## Removing
+
+*Resources → Delete* on a resource backed by a one-click service asks what to do with the service: **pskit.yml
+only**, **Stop service, keep data** (the volume stays; creating the service again with the same key reuses it) or
+**Delete service and data**. For a built-in on-prem queue, bucket or topic it offers **Delete, keep data** or
+**Delete with its data** (`pskit resources clear`).
+
 ## Backups
 
 `Backup` streams a dump out of the container into `.pskit/backups/` on this machine, also from an SSH server:
@@ -142,4 +160,5 @@ Data directories are copied while the service runs. For Kafka and NATS, stop pro
 | `port is already allocated` | pick another *Port* (`--port`) |
 | `did not become ready within 90 s` | `pskit resources onprem logs <key>`; on small servers Kafka needs about 1 GB of RAM |
 | `is not reachable from this machine; check the firewall` | the service runs; open the port from the functions' server |
+| `sqs: ... QueueDoesNotExist` (ElasticMQ) | ElasticMQ forgets queues on restart; redeploy so the sqs driver gets `create_queue` (the default for non-AWS endpoints since 1.3.1) |
 | `environment variable PSKIT_..._URL ... is not set on the host` | `provider.options.env_file` is missing or the file was deleted; recreate the service or add the line |

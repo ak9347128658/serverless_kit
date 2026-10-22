@@ -81,6 +81,11 @@ and read it with `ctx.env[res["password_env"]]`. `${env:...}`, by contrast, is r
 
 ## Publishing from a handler
 
+The studio shows ready-to-paste Python and Node.js code for every resource (*Resources → Test a resource → Use it in
+a handler*): publish and consume for queues, buckets and topics, and a connection example (PostgreSQL, MySQL,
+MongoDB, Redis, Memcached, SMTP) for the others, with the client library to add. *Test connection* checks it from the
+host (`pskit resources check <key>`).
+
 Handlers in the host process can publish through the host, which honours drivers:
 
 ```python
@@ -93,6 +98,18 @@ put_object(resource("uploads").native_name, "in/a.csv", b"a,b\n")
 delete_object(resource("uploads").native_name, "in/a.csv")
 ```
 
+Node.js handlers have the same calls (they go through the host's loopback address, `PSKIT_HOST_URL`):
+
+```js
+const { resource, submitQueue, submitTopic, putObject, deleteObject } = require("pskit");
+
+exports.api = async (event, ctx) => {
+  const id = await submitQueue(resource("jobs").nativeName, { orderId: 1 }, { kind: "new" });
+  await putObject(resource("uploads").nativeName, "in/a.csv", "a,b\n");
+  return { id };
+};
+```
+
 Names are the resource's **native name** (`name`, else the key).
 
 ## Testing
@@ -102,6 +119,8 @@ pskit validate
 pskit deploy
 pskit resources send --list                    # how to test each resource
 pskit resources send jobs -d '{"order_id": 1}'
+pskit resources check orders-db                # connection check from the host
+pskit resources clear jobs --yes               # empty a built-in queue / bucket on the host
 pskit logs -f                                  # host notes show unreachable endpoints
 curl http://127.0.0.1:8080/__pskit/health
 ```

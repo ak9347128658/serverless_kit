@@ -36,7 +36,10 @@ class SqsQueue:
         wait_seconds: int = 0,
         message_group_id: str = "pskit",
         timeout: float = 10.0,
+        create_queue: bool = False,
     ) -> None:
+        # ElasticMQ keeps queues in memory: create the queue when the service says it is missing.
+        self.create_queue = create_queue
         self.queue_url = check_url(queue_url, "sqs queue_url")
         self.endpoint = check_url(endpoint, "sqs endpoint") if endpoint else self._service_url(self.queue_url)
         host = urlsplit(self.endpoint).netloc
@@ -80,11 +83,23 @@ class SqsQueue:
             wait_seconds=int(b.get("wait_seconds") or 0),
             message_group_id=str(b.get("message_group_id") or "pskit"),
             timeout=float(b.get("timeout") or 10),
+            create_queue=str(b.get("create_queue") or "").strip().lower() in ("1", "true", "yes", "on"),
         )
 
     # ------------------------------------------------------------------ transport
     def call(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        body = json.dumps(dict(payload, QueueUrl=self.queue_url)).encode("utf-8")
+        try:
+            return self._call(action, dict(payload, QueueUrl=self.queue_url))
+        except DriverError as exc:
+            missing = "QueueDoesNotExist" in str(exc) or "NonExistentQueue" in str(exc)
+            if not (self.create_queue and missing):
+                raise
+        attributes = {"FifoQueue": "true"} if self.fifo else {}
+        self._call("CreateQueue", {"QueueName": self.name, "Attributes": attributes})
+        return self._call(action, dict(payload, QueueUrl=self.queue_url))
+
+    def _call(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        body = json.dumps(data).encode("utf-8")
         headers = {"content-type": "application/x-amz-json-1.0", "x-amz-target": _TARGET + action}
         if self.session_token:
             headers["x-amz-security-token"] = self.session_token

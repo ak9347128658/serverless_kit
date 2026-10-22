@@ -638,6 +638,10 @@ def resource_guide(project: Any, record: Optional[Dict[str, Any]]) -> Dict[str, 
     }
     common = f" -p {provider} -s {cfg.provider.stage}"
     items = []
+    from .onprem_services import load_state
+    from .resource_code import code_for
+
+    services = load_state(project.root)["services"] if provider == "onprem" else {}
     for key, res in sorted(cfg.resources.items()):
         native = res.native_name(key)
         kind = res.type
@@ -655,6 +659,13 @@ def resource_guide(project: Any, record: Optional[Dict[str, Any]]) -> Dict[str, 
             "snippets": {
                 "python": f'from py_serverless_kit import resource\n\nr = resource("{key}")\nprint(r.native_name, r.get("{first}"))',
                 "node": f'const {{ resource }} = require("pskit");\n\nconst r = resource("{key}");\nconsole.log(r.nativeName, r.get("{first}"));',
+            },
+            "code": code_for(provider, key, res, (services.get(key) or {}).get("service")),
+            "service": (services.get(key) or {}).get("service"),
+            "check": {
+                "supported": kind not in _RESOURCE_SAMPLES or (provider == "onprem" and deployed),
+                "where": "the on-prem host" if provider == "onprem" and deployed else "this machine",
+                "command": f"pskit resources check {key}{common}",
             },
             "sendable": kind in _RESOURCE_SAMPLES,
             "action": _RESOURCE_ACTION.get(kind),
@@ -705,11 +716,91 @@ def send_resource(project: Any, record: Optional[Dict[str, Any]], key: str, payl
     return {"resource": key, "kind": res.type, "name": native, "functions": project.config.resource_functions(key), **out}
 
 
+def _local_values(project: Any, res: Any) -> Dict[str, str]:
+    """Connection values with ``<name>_env`` resolved from this machine and the on-prem env file."""
+    import os
+
+    from ..runtime.onprem_host import parse_env_text
+    from .onprem_services import DEFAULT_ENV_FILE
+
+    env = dict(os.environ)
+    env_file = project.config.provider.options.get("env_file") if project.config.provider.name == "onprem" else None
+    path = project.root / str(env_file or DEFAULT_ENV_FILE)
+    if path.is_file():
+        for name, value in parse_env_text(path.read_text("utf-8")).items():
+            env.setdefault(name, value)
+    values = {str(k).lower(): str(v) for k, v in res.connection.items()}
+    for name in list(values):
+        if name.endswith("_env") and not values.get(name[:-4]) and values[name] in env:
+            values[name[:-4]] = env[values[name]]
+    return values
+
+
+def check_resource(project: Any, record: Optional[Dict[str, Any]], key: str) -> Dict[str, Any]:
+    """Is resource ``key`` reachable? From the on-prem host when deployed there, else from this machine.
+
+    Queues report their depth and buckets their object count (on-prem host); databases,
+    caches and custom services get a connection check (Redis answers ``PING``).
+    """
+    import time
+
+    from ..runtime.drivers.probe import probe
+
+    res = project.config.resources.get(key)
+    if res is None:
+        known = ", ".join(sorted(project.config.resources)) or "<none>"
+        raise TriggerError(f"unknown resource {key!r}; known: {known}")
+    provider = project.config.provider.name
+    deployed = record is not None and record.get("status") not in ("local", "not deployed", "removed")
+    if provider == "onprem" and deployed:
+        from .onprem_control import control_for
+
+        control = control_for(record or {}, project.root)
+        if control is None:
+            raise TriggerError("the on-prem host address is unknown; run `pskit deploy`")
+        try:
+            return dict(control.request("POST", f"/__pskit/resources/{key}/check", {}))
+        except KeyError:
+            raise TriggerError(f"the deployed host does not know {key!r} yet; run `pskit deploy`") from None
+        except (OSError, ValueError, PermissionError) as exc:
+            raise TriggerError(f"{type(exc).__name__}: {exc}") from None
+    if res.type in _RESOURCE_SAMPLES:
+        raise TriggerError(
+            f"{res.type} resources are checked by sending to them: pskit resources send {key}"
+            + (" (deploy the on-prem host first)" if provider == "onprem" else "")
+        )
+    started = time.monotonic()
+    try:
+        detail, ok = probe(_local_values(project, res)), True
+    except Exception as exc:  # noqa: BLE001 - the answer is the error
+        detail, ok = f"{type(exc).__name__}: {exc}", False
+    ms = round((time.monotonic() - started) * 1000, 1)
+    return {"key": key, "type": res.type, "name": res.native_name(key), "ok": ok, "detail": detail, "ms": ms,
+            "checked_from": "this machine"}
+
+
+def purge_resource(project: Any, record: Optional[Dict[str, Any]], key: str) -> Dict[str, Any]:
+    """Delete the messages / objects of a built-in on-prem queue, bucket or topic on the host."""
+    from .onprem_control import control_for
+
+    if project.config.provider.name != "onprem":
+        raise TriggerError("only on-prem built-in resources keep their data on the host")
+    control = control_for(record or {}, project.root) if record else None
+    if control is None:
+        raise TriggerError("the on-prem host is not deployed; there is no data to delete")
+    try:
+        return dict(control.request("DELETE", f"/__pskit/resources/{key}/data"))
+    except (KeyError, ValueError, OSError, PermissionError) as exc:
+        raise TriggerError(str(exc)) from None
+
+
 __all__ = [
     "SAMPLES",
     "TriggerError",
     "can_send",
     "can_send_resource",
+    "check_resource",
+    "purge_resource",
     "guide",
     "resource_guide",
     "send",

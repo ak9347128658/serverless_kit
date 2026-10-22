@@ -3,7 +3,7 @@ import { api, errorMessage } from "../api";
 import { useJob } from "../jobs";
 import { href } from "../route";
 import { useStudio } from "../store";
-import type { Json, ResourceTestGuide } from "../types";
+import type { Json, ResourceCheck, ResourceTestGuide, ResourceTestItem } from "../types";
 import { JobConsole } from "./Console";
 import { useConfirm, useToast } from "./Feedback";
 import { FormRow, JsonInput, Section, Segmented } from "./Forms";
@@ -27,6 +27,89 @@ function Commands({ lines, toast }: { lines: string[]; toast: ReturnType<typeof 
         </div>
       ))}
     </div>
+  );
+}
+
+/** Handler code to publish to / consume / connect to a resource, in Python and Node.js. */
+function ResourceCode({ item, toast }: { item: ResourceTestItem; toast: ReturnType<typeof useToast> }) {
+  const [lang, setLang] = useState<"python" | "node">("python");
+  const code = item.code;
+  if (!code) return null;
+  const reqs = code.requirements[lang];
+  const reqText = lang === "python" ? reqs.join(String.fromCharCode(10)) : `npm install ${reqs.join(" ")}`;
+  const text = code[lang];
+  return (
+    <FormRow
+      label="Use it in a handler"
+      help={`${code.note} Paste into your handler module and reference the function in pskit.yml${
+        ["queue", "storage", "topic"].includes(item.type) ? ` (the consumer needs a trigger: ${item.type}: {resource: ${item.key}})` : ""
+      }.`}
+    >
+      <div className="stack-xs">
+        <Segmented
+          label="Language"
+          value={lang}
+          onChange={setLang}
+          options={[
+            { value: "python", label: "Python" },
+            { value: "node", label: "Node.js" },
+          ]}
+        />
+        {reqs.length > 0 && (
+          <div className="cmd-row">
+            <span className="muted small">{lang === "python" ? "requirements.txt:" : "install:"}</span>
+            <code className="mono pre-inline">{reqText}</code>
+            <button type="button" className="btn btn-sm" onClick={() => copy(reqText, toast)}>
+              Copy
+            </button>
+          </div>
+        )}
+        <div className="code-block">
+          <button type="button" className="btn btn-sm code-copy" onClick={() => copy(text, toast)}>
+            Copy
+          </button>
+          <pre className="md-code">{text}</pre>
+        </div>
+      </div>
+    </FormRow>
+  );
+}
+
+/** Connection / reachability check, from the on-prem host or this machine. */
+function CheckButton({ item, provider, stage }: { item: ResourceTestItem; provider: string; stage: string }) {
+  const [result, setResult] = useState<ResourceCheck | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (!item.check) return null;
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await api.resourceCheck(provider, stage, item.key));
+    } catch (exc) {
+      setError(errorMessage(exc));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <FormRow label="Test connection" help={`Checked from ${item.check.where}. Terminal: ${item.check.command}`}>
+      <div className="stack-xs">
+        <div className="row-gap wrap">
+          <button type="button" className="btn" disabled={busy || !item.check.supported} onClick={() => void run()}>
+            {busy ? "Checking…" : "Test connection"}
+          </button>
+          {!item.check.supported && <span className="muted small">Deploy the on-prem host first, or use Send below.</span>}
+        </div>
+        {result && (
+          <div className={result.ok ? "hint-box" : "form-error"}>
+            <b>{result.ok ? "OK" : "Failed"}</b>: {result.detail} <span className="muted small">({result.ms} ms, from {result.checked_from})</span>
+          </div>
+        )}
+        {error && <div className="form-error">{error}</div>}
+      </div>
+    </FormRow>
   );
 }
 
@@ -108,6 +191,7 @@ export function ResourceTester({ selected, onSelect }: { selected: string | null
               {item.functions.length ? item.functions.map((f) => <span key={f} className="chip">{f}</span>) : <span className="muted">no functions</span>}
             </span>
           </FormRow>
+          <CheckButton key={`check-${item.key}`} item={item} provider={target.provider} stage={target.stage} />
           {item.sendable ? (
             <>
               <FormRow label={item.type === "storage" ? "Object" : "Message"} help={item.payload_help}>
@@ -172,6 +256,7 @@ export function ResourceTester({ selected, onSelect }: { selected: string | null
                   ))}
                 </ol>
               )}
+              <ResourceCode key={`code-${item.key}`} item={item} toast={toast} />
             </>
           ) : (
             <div className="stack">
@@ -182,12 +267,18 @@ export function ResourceTester({ selected, onSelect }: { selected: string | null
               <FormRow label="Environment variables">
                 <Commands lines={item.env} toast={toast} />
               </FormRow>
-              <FormRow label="Python handler">
-                <Commands lines={[item.snippets.python]} toast={toast} />
-              </FormRow>
-              <FormRow label="Node.js handler">
-                <Commands lines={[item.snippets.node]} toast={toast} />
-              </FormRow>
+              {item.code ? (
+                <ResourceCode key={`code-${item.key}`} item={item} toast={toast} />
+              ) : (
+                <>
+                  <FormRow label="Python handler">
+                    <Commands lines={[item.snippets.python]} toast={toast} />
+                  </FormRow>
+                  <FormRow label="Node.js handler">
+                    <Commands lines={[item.snippets.node]} toast={toast} />
+                  </FormRow>
+                </>
+              )}
               <p className="muted small">
                 Then call that function from the <a href={href("test")}>Test</a> page (Direct invoke) to check the connection.
               </p>
