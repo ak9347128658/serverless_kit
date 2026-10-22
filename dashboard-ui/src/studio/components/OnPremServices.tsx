@@ -3,20 +3,24 @@ import { Drawer } from "../../components/Drawer";
 import { api, errorMessage } from "../api";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
-import type { JsonObject, OnPremCatalogItem, OnPremService, OnPremServicesState, OnPremTarget } from "../types";
+import type { JsonObject, OnPremCatalogItem, OnPremServer, OnPremService, OnPremServicesState, OnPremTarget } from "../types";
 import { asObject, NAME_RE, uniqueName } from "../util";
 import { JobConsole } from "./Console";
 import { Markdown } from "./Markdown";
 import { useConfirm, useToast } from "./Feedback";
-import { FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
+import { EnumSelect, FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
+import { ServersPanel, ServiceConsole, TerminalDrawer } from "./OnPremMachines";
 import type { GuideRef } from "./ResourceGuides";
 
 const GROUPS: { title: string; match: (c: OnPremCatalogItem) => boolean }[] = [
   { title: "Queues & streams", match: (c) => c.roles.includes("queue") || c.roles.includes("stream") },
   { title: "Storage", match: (c) => c.roles.includes("storage") },
   { title: "Databases", match: (c) => c.roles.includes("database") },
+  { title: "Secret managers", match: (c) => c.roles.includes("secrets") },
   { title: "Caches & other", match: (c) => c.kind === "service" && (c.roles.includes("cache") || c.roles.includes("custom")) },
-  { title: "Server runtimes (SSH)", match: (c) => c.kind === "runtime" },
+  { title: "Install on a server: languages & Docker", match: (c) => c.kind === "runtime" && (c.group || "").startsWith("Languages") },
+  { title: "Install on a server: web servers", match: (c) => c.kind === "runtime" && c.group === "Web servers" },
+  { title: "Install on a server: process managers & tools", match: (c) => c.kind === "runtime" && ["Process managers", "Tools"].includes(c.group || "") },
 ];
 const ROLE_LABEL: Record<string, string> = {
   queue: "Queue",
@@ -25,6 +29,7 @@ const ROLE_LABEL: Record<string, string> = {
   database: "Database",
   storage: "Bucket",
   custom: "Service",
+  secrets: "Secret manager",
 };
 // Roles a function can be triggered by (others are only bound as connection values).
 const TRIGGER_ROLES = ["queue", "stream", "storage"];
@@ -35,6 +40,9 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
   const [creating, setCreating] = useState<OnPremCatalogItem | null | "pick">(null);
   const [details, setDetails] = useState<string | null>(null);
   const [usage, setUsage] = useState<string | null>(null);
+  const [consoleKey, setConsoleKey] = useState<string | null>(null);
+  const [terminalKey, setTerminalKey] = useState<string | null>(null);
+  const [createServer, setCreateServer] = useState<string | undefined>(undefined);
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useJob(jobId);
   const { draft, replace } = useStudio();
@@ -147,6 +155,16 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
                     <button type="button" className="btn btn-sm" onClick={() => setDetails(svc.key)}>
                       Details
                     </button>
+                    {svc.kind === "service" && (
+                      <button type="button" className="btn btn-sm" onClick={() => setConsoleKey(svc.key)} title="Run commands: redis-cli, psql, mongosh, rpk, bao, ... or sh in the container">
+                        Console
+                      </button>
+                    )}
+                    {svc.kind === "service" && (
+                      <button type="button" className="btn btn-sm" onClick={() => setTerminalKey(svc.key)} title="Interactive client in a browser terminal (Docker)">
+                        Terminal
+                      </button>
+                    )}
                     {svc.kind === "service" && !inProject(svc.key) && (
                       <button type="button" className="btn btn-sm" onClick={() => void addToProject(svc)} title="Add the resource (and its triggers) to pskit.yml">
                         Add to pskit.yml
@@ -172,7 +190,11 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
         <CreateDrawer
           state={state}
           initial={creating === "pick" ? null : creating}
-          onClose={() => setCreating(null)}
+          server={createServer}
+          onClose={() => {
+            setCreating(null);
+            setCreateServer(undefined);
+          }}
           onCreated={(svc, attach) => {
             load();
             void addToProject(svc, attach);
@@ -181,6 +203,14 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
       )}
       {details && <DetailsDrawer serviceKey={details} onClose={() => setDetails(null)} />}
       {usage && <ServiceUsageDrawer serviceKey={usage} onClose={() => setUsage(null)} />}
+      {consoleKey && <ServiceConsole serviceKey={consoleKey} onClose={() => setConsoleKey(null)} />}
+      {terminalKey && <TerminalDrawer request={{ key: terminalKey }} onClose={() => setTerminalKey(null)} />}
+      <ServersPanel
+        onInstall={(name) => {
+          setCreateServer(name);
+          setCreating("pick");
+        }}
+      />
     </div>
   );
 }
@@ -188,11 +218,13 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
 function CreateDrawer({
   state,
   initial,
+  server,
   onClose,
   onCreated,
 }: {
   state: OnPremServicesState;
   initial: OnPremCatalogItem | null;
+  server?: string;
   onClose: () => void;
   onCreated: (svc: OnPremService, attach: string[]) => void;
 }) {
@@ -205,7 +237,13 @@ function CreateDrawer({
   );
   const [key, setKey] = useState("");
   const [role, setRole] = useState("");
-  const [target, setTarget] = useState<OnPremTarget>(state.default_target.method === "ssh" ? state.default_target : { method: "local" });
+  const [target, setTarget] = useState<OnPremTarget>(server || state.default_target.method === "ssh" ? { method: "ssh" } : { method: "local" });
+  const [servers, setServers] = useState<OnPremServer[]>([]);
+  const [savedServer, setSavedServer] = useState<string>(server || state.default_target.server || "");
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    api.onpremServers().then((r) => setServers(r.servers), () => undefined);
+  }, []);
   const [ssh, setSsh] = useState<OnPremTarget>({ method: "ssh", user: "root", port: 22, ...(state.default_target.method === "ssh" ? state.default_target : {}) });
   const [port, setPort] = useState<number | undefined>(undefined);
   const [address, setAddress] = useState("");
@@ -232,7 +270,13 @@ function CreateDrawer({
     setRole(c.roles[0] || "");
     setPort(undefined);
     setImage("");
-    setKey(uniqueName(c.kind === "runtime" ? c.id : c.roles[0] === "database" ? `${c.id}-db` : c.roles[0] === "storage" ? "files" : c.id === "kafka" ? "events" : "jobs", taken));
+    setKey(
+      uniqueName(
+        c.kind === "runtime" ? c.id : c.roles[0] === "database" ? `${c.id}-db` : c.roles[0] === "storage" ? "files" : c.roles[0] === "secrets" ? "secrets" : c.id === "kafka" ? "events" : "jobs",
+        taken,
+      ),
+    );
+    setVersion("");
     if (c.kind === "runtime") setTarget(ssh);
   };
   useEffect(() => {
@@ -256,7 +300,9 @@ function CreateDrawer({
   const loginError = login && !/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(login) ? "3-64 characters, starting with a letter" : null;
   const keyError = !NAME_RE.test(key) ? "letters, digits, - and _; start with a letter" : taken.includes(key) ? "already used" : null;
   const sshError =
-    target.method === "ssh" && !(ssh.host || "").trim()
+    target.method === "ssh" && savedServer
+      ? null
+      : target.method === "ssh" && !(ssh.host || "").trim()
       ? "the server's host name or IP"
       : target.method === "ssh" && sshAuth === "key" && !(ssh.identity_file || "").trim()
         ? "the path of the private key, or pick SSH agent / default key"
@@ -273,7 +319,9 @@ function CreateDrawer({
     if (sshAuth !== "key") delete sshTarget.identity_file;
     if (sshAuth === "password" && sshPassword) sshTarget.password = sshPassword;
     if (sshAuth !== "password") delete sshTarget.password_file;
-    const body: JsonObject = { key, service: item.id, target: (target.method === "ssh" ? sshTarget : { method: "local" }) as unknown as JsonObject };
+    const chosen: OnPremTarget = target.method !== "ssh" ? { method: "local" } : savedServer ? { method: "ssh", server: savedServer } : sshTarget;
+    const body: JsonObject = { key, service: item.id, target: chosen as unknown as JsonObject };
+    if (item.kind === "runtime" && version) body.version = version;
     if (role) body.role = role;
     if (port) body.port = port;
     if (address.trim()) body.address = address.trim();
@@ -376,6 +424,28 @@ function CreateDrawer({
             />
           </FormRow>
           {target.method === "ssh" && (
+            <FormRow label="Server" help="A saved server (Servers below), or a new connection typed here.">
+              <EnumSelect
+                value={savedServer}
+                onChange={setSavedServer}
+                options={[{ value: "", label: "New connection…" }, ...servers.map((s) => ({ value: s.name, label: `${s.name} (${s.label})` }))]}
+              />
+            </FormRow>
+          )}
+          {item.kind === "runtime" && (item.versions || []).length > 0 && (
+            <FormRow label="Version" help={`Default ${(item.versions || [])[0]}. Any version number works (e.g. 1.23.4 for Go).`}>
+              <div className="row-gap">
+                <Segmented
+                  label="Version"
+                  value={(item.versions || []).includes(version) ? version : version ? "other" : (item.versions || [])[0]}
+                  onChange={(v) => setVersion(v === "other" ? "" : v)}
+                  options={(item.versions || []).map((v) => ({ value: v, label: v }))}
+                />
+                <TextInput mono value={version} placeholder="other version" onChange={setVersion} />
+              </div>
+            </FormRow>
+          )}
+          {target.method === "ssh" && !savedServer && (
             <div className="driver-box card card-pad">
               <FormRow label="Host" required error={sshError}>
                 <TextInput mono value={ssh.host || ""} placeholder="10.0.0.5" onChange={(v) => setSsh((s) => ({ ...s, host: v }))} />

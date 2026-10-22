@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
+from .onprem_runtimes import RUNTIME_SPECS, check_version, install_script
+
 STATE_FILE = Path(".pskit") / "onprem-services.json"
 BACKUP_DIR = Path(".pskit") / "backups"
 DEFAULT_ENV_FILE = ".env.onprem"
@@ -93,7 +95,7 @@ def _svc(
 # `{port}` are filled in when the service is created. `health`, `init` (once, after it is ready)
 # and `backup` run inside the container with `sh -c`; backup writes to stdout.
 # A role is the resource type the service is used as; `stream` is a queue on a Redis stream.
-ROLE_TYPE = {"stream": "queue"}
+ROLE_TYPE = {"stream": "queue", "secrets": "custom"}
 def _redis_start(binary: str, var: str) -> str:
     return (
         f'if [ "${var}_USER" = default ]; then exec {binary}-server --appendonly yes --requirepass "${var}_PASSWORD"; '
@@ -107,6 +109,30 @@ NO_AUTH = ("elasticmq", "kafka", "apache-kafka", "memcached", "mailpit", "locals
 DEFAULT_USER = {"redis": "default", "valkey": "default", "keydb": "default", "dragonfly": "default"}
 _PASSWORD_OK = re.compile(r"^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$")
 _LOGIN_OK = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,63}$")
+
+# OpenBao (the open-source Vault fork): file storage in the volume, initialised on first start with one unseal
+# key, unsealed on every start, KV v2 at secret/, and a token whose id is the service password.
+_BAO_START = (
+    "mkdir -p /openbao/file && cat > /tmp/pskit-bao.hcl <<'EOF'\n"
+    'storage "file" { path = "/openbao/file" }\n'
+    'listener "tcp" { address = "0.0.0.0:8200"\n  tls_disable = true }\n'
+    "disable_mlock = true\nui = true\napi_addr = \"http://127.0.0.1:8200\"\nEOF\n"
+    "bao server -config=/tmp/pskit-bao.hcl & pid=$!\n"
+    "export BAO_ADDR=http://127.0.0.1:8200\n"
+    "while :; do bao status >/dev/null 2>&1; c=$?; [ $c -ne 1 ] && break; sleep 1; done\n"
+    "init=/openbao/file/pskit-init.json\n"
+    "[ -s $init ] || bao operator init -key-shares=1 -key-threshold=1 -format=json > $init\n"
+    "flat=$(tr -d ' \\n' < $init)\n"
+    "key=$(echo \"$flat\" | sed 's/.*\"unseal_keys_b64\":\\[\"\\([^\"]*\\)\".*/\\1/')\n"
+    "root=$(echo \"$flat\" | sed 's/.*\"root_token\":\"\\([^\"]*\\)\".*/\\1/')\n"
+    "bao operator unseal \"$key\" >/dev/null\n"
+    "if [ ! -f /openbao/file/pskit-ready ]; then\n"
+    "  BAO_TOKEN=$root bao secrets enable -path=secret kv-v2 >/dev/null\n"
+    "  BAO_TOKEN=$root bao token create -id=\"$PSKIT_TOKEN\" -policy=root -orphan -display-name=pskit >/dev/null\n"
+    "  touch /openbao/file/pskit-ready\n"
+    "fi\n"
+    "wait $pid\n"
+)
 
 SERVICES: Dict[str, Dict[str, Any]] = {
     "redis": _svc(
@@ -368,18 +394,35 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         "azure_blob / azure_queue drivers and the Azure SDKs work unchanged. Browse it with Azure Storage Explorer.",
     ),
     "localstack": _svc(
-        "LocalStack (SQS + S3 emulator)",
+        "LocalStack (SQS, S3, Secrets Manager)",
         "localstack/localstack:3.8",
         4566,
-        ("queue", "storage"),
+        ("queue", "storage", "secrets"),
         data="/var/lib/localstack",
-        env={"SERVICES": "sqs,s3", "PERSISTENCE": "1"},
+        env={"SERVICES": "sqs,s3,secretsmanager,ssm", "PERSISTENCE": "1"},
         health="curl -fs localhost:4566/_localstack/health | grep -q '\"sqs\": \"\\(available\\|running\\)\"'",
         backup="tar czf - -C /var/lib/localstack .",
         backup_ext="tar.gz",
-        notes="Amazon SQS and S3 on one port: the sqs / s3 drivers, boto3 and the AWS CLI work with endpoint_url. "
-        "Credentials are not checked (test / test). For development and tests.",
+        notes="Amazon SQS, S3, Secrets Manager and SSM Parameter Store on one port: the sqs / s3 drivers, "
+        "get_secret(), boto3 and the AWS CLI work with endpoint_url. Credentials are not checked (test / test). "
+        "For development and tests.",
         gui=({"port": 4566, "path": "/_localstack/health", "label": "Status (JSON)", "login": "none"},),
+    ),
+    "openbao": _svc(
+        "OpenBao (Vault-compatible secrets)",
+        "openbao/openbao:2.1.0",
+        8200,
+        ("secrets",),
+        data="/openbao/file",
+        env={"PSKIT_TOKEN": "{password}", "SKIP_SETCAP": "1"},
+        command=("sh", "-c", _BAO_START),
+        health="BAO_ADDR=http://127.0.0.1:8200 bao status >/dev/null",
+        backup="tar czf - -C /openbao/file .",
+        backup_ext="tar.gz",
+        notes="A secret manager with the HashiCorp Vault API (KV v2 at secret/): get_secret() / put_secret(), "
+        "hvac, node-vault and the vault / bao CLI. The password is the access token. Web UI at /ui. "
+        "Backups hold the data and the unseal key: keep them safe.",
+        gui=({"port": 8200, "path": "/ui/", "label": "OpenBao UI", "login": "token"},),
     ),
     "fake-gcs": _svc(
         "fake-gcs-server (Cloud Storage emulator)",
@@ -521,6 +564,11 @@ RUNTIMES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+RUNTIMES["python"]["group"] = RUNTIMES["docker"]["group"] = "Languages and Docker"
+for _name, _rt in RUNTIME_SPECS.items():
+    RUNTIMES[_name] = {"label": _rt["label"], "kind": "runtime", "roles": [], "notes": _rt["notes"],
+                       "check": _rt["check"], "group": _rt["group"]}
+
 _RUNTIME_INSTALL = {
     "python": (
         "if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then\n"
@@ -568,7 +616,8 @@ def catalog() -> List[Dict[str, Any]]:
             }
         )
     for name, rt in RUNTIMES.items():
-        out.append({"id": name, "label": rt["label"], "kind": "runtime", "roles": [], "notes": rt["notes"]})
+        out.append({"id": name, "label": rt["label"], "kind": "runtime", "roles": [], "notes": rt["notes"],
+                    "group": rt.get("group", ""), "versions": list((RUNTIME_SPECS.get(name) or {}).get("versions") or [])})
     return out
 
 
@@ -582,6 +631,8 @@ def default_target(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if options is None:
         options = ((((raw or {}).get("providers") or {}).get("onprem") or {}).get("provider") or {}).get("options")
     deploy = (options or {}).get("deploy") if isinstance(options, dict) else None
+    if isinstance(deploy, dict) and deploy.get("server") and not deploy.get("host"):
+        return {"method": "ssh", "server": str(deploy["server"])}      # a saved server, resolved with the root
     if isinstance(deploy, dict) and deploy.get("host"):
         target: Dict[str, Any] = {
             "method": "ssh",
@@ -604,6 +655,16 @@ def default_target(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def normalize_target(raw: Any, root: Path) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {"method": "local"}
+    if raw.get("server"):
+        from .onprem_servers import ServerError, server_target
+
+        try:
+            saved = server_target(root, str(raw["server"]))
+        except ServerError as exc:
+            raise ServiceError(str(exc)) from None
+        if "sudo" in raw and raw.get("sudo") is not None:
+            saved["sudo"] = bool(raw["sudo"])
+        return saved
     method = str(raw.get("method") or "local")
     if method == "local":
         return {"method": "local"}
@@ -745,7 +806,8 @@ def install_ssh_key(
 
 def describe_target(target: Dict[str, Any]) -> str:
     if target.get("method") == "ssh":
-        return f"{target.get('user')}@{target.get('host')}:{target.get('port', 22)}"
+        where = f"{target.get('user')}@{target.get('host')}:{target.get('port', 22)}"
+        return f"{target['server']} ({where})" if target.get("server") else where
     return "this machine"
 
 
@@ -811,10 +873,10 @@ class _Runner:
 def _mask(arg: str) -> str:
     # `-e NAME=secret` and URLs with passwords stay out of logs.
     text = str(arg)
-    if re.match(r"^[A-Z0-9_]*(PASSWORD|PASS|SECRET)[A-Z0-9_]*=", text):
+    if re.match(r"^[A-Z0-9_]*(PASSWORD|PASS|SECRET|TOKEN)[A-Z0-9_]*=", text):
         return text.split("=", 1)[0] + "=***"
     text = re.sub(r"(://[^:/@\s]*:)[^@\s]+@", r"\1***@", text)
-    return re.sub(r"((?:PASSWORD|PASS|SECRET)[A-Z0-9_]*=)[^ ']+", r"\1***", text)
+    return re.sub(r"((?:PASSWORD|PASS|SECRET|TOKEN)[A-Z0-9_]*=)[^ ']+", r"\1***", text)
 
 
 # ----------------------------------------------------------------------------- state and env file
@@ -909,7 +971,11 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
     if service in RUNTIMES:
         if target["method"] != "ssh":
             raise ServiceError(f"{RUNTIMES[service]['label']} is installed on an SSH server; set target.method: ssh")
-        return {"key": key, "service": service, "kind": "runtime", "target": target}
+        try:
+            version = check_version(service, body.get("version")) if service in RUNTIME_SPECS else ""
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from None
+        return {"key": key, "service": service, "kind": "runtime", "target": target, "version": version}
     spec = SERVICES[service]
     if key in load_state(root)["services"] and not body.get("replace"):
         raise ServiceError(f"{key!r} already exists; remove it first or pick another key")
@@ -1202,6 +1268,23 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
         res["connection"] = {"host": addr, "port": port}
     elif service == "mailpit":
         res["connection"] = {"smtp_host": addr, "smtp_port": port, "web_url": f"http://{addr}:{host_port(req, 8025)}"}
+    if role == "secrets":
+        # get_secret(name, store=key) reads PSKIT_<KEY>_DRIVER / _URL / _TOKEN ...; key "secrets" is the default store.
+        url = f"http://{addr}:{port}"
+        if service == "openbao":
+            env.update({f"{prefix}_DRIVER": "vault", f"{prefix}_URL": url, f"{prefix}_TOKEN": password,
+                        f"{prefix}_MOUNT": "secret"})
+            res["connection"] = {"driver": "vault", "url": url, "mount": "secret", "token_env": f"{prefix}_TOKEN",
+                                 "ui": f"{url}/ui/"}
+        else:
+            env.update({f"{prefix}_DRIVER": "aws", f"{prefix}_URL": url, f"{prefix}_REGION": "us-east-1",
+                        f"{prefix}_ACCESS_KEY": "test", f"{prefix}_SECRET_KEY": "test"})
+            res["connection"] = {"driver": "aws", "url": url, "region": "us-east-1"}
+        res.pop("options", None)
+        res.pop("name", None)
+        py_store, js_store = ("", "") if key == "secrets" else (f', store="{key}"', f', {{ store: "{key}" }}')
+        notes.append(f'read secrets in handlers with get_secret("name"{py_store}) (Python) / '
+                     f'getSecret("name"{js_store}) (Node.js)')
     return res, env, notes
 
 
@@ -1262,12 +1345,13 @@ def create(
         check_ssh_login(target)
     emit(f"Creating {req['service']} as {req['key']!r} on {describe_target(target)}")
     if req["kind"] == "runtime":
-        _install_runtime(req["service"], target, sh)
+        _install_runtime(req["service"], target, sh, version=req.get("version") or "")
         entry = {
             "key": req["key"],
             "service": req["service"],
             "kind": "runtime",
             "target": target,
+            **({"version": req["version"]} if req.get("version") else {}),
             "created_at": _now(),
         }
         state = load_state(root)
@@ -1349,12 +1433,14 @@ def _ensure_docker(target: Dict[str, Any], sh: _Runner, *, install: bool) -> Non
     _install_runtime("docker", target, sh)
 
 
-def _install_runtime(name: str, target: Dict[str, Any], sh: _Runner) -> None:
+def _install_runtime(name: str, target: Dict[str, Any], sh: _Runner, *, version: str = "") -> None:
     from ..providers.onprem_remote import _docker_install_block, _docker_ready_block, _docker_shell_header
 
     header = _docker_shell_header()
     if name == "docker":
         script = header + _docker_install_block() + _docker_ready_block() + "dk --version\n"
+    elif name in RUNTIME_SPECS:
+        script = header + install_script(name, version)
     else:
         script = header + _RUNTIME_INSTALL[name]
     # A script file: multi-line SSH commands are re-quoted by Windows OpenSSH.
@@ -1845,7 +1931,9 @@ def gui_links(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     user = entry.get("user") or ""
     out: List[Dict[str, Any]] = []
     for gui in spec.get("gui") or []:
-        login = f"user `{user}`, password in the env file" if gui.get("login") == "user" else "no login"
+        login = {"user": f"user `{user}`, password in the env file",
+                 "token": f"Token method: the token in {_var_prefix(str(entry.get('key')))}_TOKEN (env file)"}.get(
+            str(gui.get("login")), "no login")
         port = host_port(entry, int(gui["port"]))
         out.append({"label": gui["label"], "url": f"http://{address}:{port}{gui.get('path', '/')}",
                     "port": port, "login": login, "kind": "built-in"})

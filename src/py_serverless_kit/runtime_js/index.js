@@ -19,6 +19,7 @@ const { Resource, resources, resource } = require("./resources");
 const { invoke, InvokeError } = require("./invoke");
 const { submitQueue, submitTopic, putObject, deleteObject } = require("./onprem");
 const { PskitClient, PskitClientError } = require("./client");
+const { getSecret, getSecrets, putSecret, SecretError, SecretNotFound } = require("./secrets");
 const { registerModules } = require("./dispatch");
 const { registerManifest } = require("./manifest");
 
@@ -44,6 +45,11 @@ module.exports = {
   deleteObject,
   PskitClient,
   PskitClientError,
+  getSecret,
+  getSecrets,
+  putSecret,
+  SecretError,
+  SecretNotFound,
   getLogger,
   toResponse,
   eventFromWire,

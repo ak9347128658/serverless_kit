@@ -181,6 +181,23 @@ How the target is resolved:
 
 Example: [`examples/09-function-invoke`](../examples/09-function-invoke).
 
+## `get_secret()`: secrets on every provider
+
+```python
+from py_serverless_kit import get_secret, get_secrets, put_secret, SecretNotFound
+
+password = get_secret("db-password")                 # plain secret
+webhook = get_secret("stripe", "webhook")            # one field of a JSON secret
+token = get_secret("optional-token", default="")     # no SecretNotFound
+put_secret("last-run", "2026-10-22")                 # Vault / OpenBao and Secrets Manager
+```
+
+The store comes from environment variables, so the code does not change: `PSKIT_SECRETS_DRIVER` = `vault`
+(HashiCorp Vault / OpenBao, with `PSKIT_SECRETS_URL` and `_TOKEN`), `aws` (AWS Secrets Manager; Lambda's credentials)
+or `env` (default: `PSKIT_SECRET_<NAME>`, then `<NAME>`). `store="other"` reads `PSKIT_OTHER_*`. Values are cached for
+60 s. On premises a one-click OpenBao or LocalStack writes these variables for you:
+[resource-guides/onprem/secrets.md](resource-guides/onprem/secrets.md).
+
 ## Environment variables
 
 pskit injects:

@@ -346,3 +346,21 @@ export declare class PskitClient {
   startWorkflow(workflow: string, data?: unknown, options?: { wait?: boolean }): Promise<Record<string, unknown>>;
   execution(id: string): Promise<Record<string, unknown>>;
 }
+
+// ------------------------------------------------------------------ secrets (every provider)
+export interface SecretOptions {
+  /** Store name: reads PSKIT_<STORE>_DRIVER / _URL / _TOKEN ... (default "secrets"). */
+  store?: string;
+  /** Returned instead of throwing SecretNotFound. */
+  default?: string;
+  /** Skip the 60 s cache. */
+  refresh?: boolean;
+}
+export declare class SecretError extends Error {}
+export declare class SecretNotFound extends SecretError {}
+/** One value: `field` of the secret, or its only / `value` field (Vault / OpenBao, AWS Secrets Manager, or env). */
+export declare function getSecret(name: string, field?: string | SecretOptions, options?: SecretOptions): Promise<string>;
+/** Every field of a secret ({ value } for a plain one). */
+export declare function getSecrets(name: string, options?: SecretOptions): Promise<Record<string, string>>;
+/** Create or update a secret: a string or an object of fields (vault and aws drivers). */
+export declare function putSecret(name: string, value: string | Record<string, unknown>, options?: { store?: string }): Promise<void>;

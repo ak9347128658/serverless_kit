@@ -229,6 +229,11 @@ pskit resources onprem remove jobs --delete-data --save
 | `--save` | write the resource, `provider.options.env_file` and triggers into `pskit.yml` (comments are not kept) |
 | `gui KEY [--port N] [--login password\|none] [--password-env VAR] [--remove]` | start (or recreate / remove) the companion web UI, and list every web UI of the service with its login |
 | `gui KEY --check` | why a web UI does not open: container, published port, answer on the server and from here, cloud firewall / NSG (Azure, AWS, GCP), ufw / firewalld; exits 1 when one is unreachable |
+| `servers list\|add NAME --ssh user@host [--pem\|--ssh-password-env] [--sudo]\|test NAME\|remove NAME` | saved SSH servers; `create --server NAME` and `pskit deploy --server NAME` use them |
+| `create KEY --service nodejs\|nginx\|java\|go\|caddy\|certbot\|pm2\|git\|tools [--version V] --server NAME` | install software on a server (Node.js 22 / 20 / 18, Java 21 / 17, Go 1.x.y, ...) |
+| `console KEY [COMMAND] [--shell]` | the service's client (redis-cli, psql, mongosh, rpk, bao, ...) here, or one command and its output |
+| `shell SERVER [COMMAND]` | ssh to a saved server with its login, or run one command there |
+| `terminal [KEY] [--server NAME] [--shell] [--list] [--stop NAME\|all]` | a full terminal in the browser (ttyd in Docker, 127.0.0.1 + secret URL) |
 | `ssh-key user@host[:port] [--key FILE]` | log in with the password once and install `~/.ssh/pskit_ed25519` on the server (works on Windows), then use it as `--pem` |
 | `tunnel KEY [--local-port N] [--remote-port N]` | forward the service's port to `127.0.0.1` over SSH (firewalled ports) and print the variables to use |
 | `usage KEY [--reveal]` | connect from any program: address, credentials, Python / Node.js client code, terminal tools, security |

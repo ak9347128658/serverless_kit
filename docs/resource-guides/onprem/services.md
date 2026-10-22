@@ -206,6 +206,114 @@ Then open the printed links, for example:
 Local services listen on `127.0.0.1`, so only your machine can open them. `docker ps` lists them (named
 `pskit-<project>-<key>` and `...-ui`). Clean up with *Remove* (or `pskit resources onprem remove <key> --delete-data`).
 
+## Servers: several machines
+
+Save each machine once under **On-prem services → Servers → + Add server** (name, host, user, port, *Log in with*,
+sudo), or with the CLI. Every place that asks *where* then offers it: the create form's **Server** list, **Deploy →
+Machine**, the shell and the terminal.
+
+```bash
+pskit resources onprem servers add edge1 --ssh ubuntu@10.0.0.5 --pem ~/.ssh/edge1.pem
+pskit resources onprem servers add db-box --ssh azureuser@13.72.87.80              # SSH agent / default key
+pskit resources onprem servers add lab --ssh root@192.168.1.20 --ssh-password-env LAB_PW --sudo
+pskit resources onprem servers list
+pskit resources onprem servers test edge1        # OS, CPU, memory, disk, Docker access, sudo, Python / Node / nginx
+pskit resources onprem create cache --service redis --server edge1 --save
+pskit resources onprem servers remove lab        # services there keep running
+```
+
+They live in `.pskit/onprem-servers.json` (connection details only; a typed password goes to `.pskit/ssh/`,
+owner-only). Services created on a server keep a copy of its connection, so editing the server later does not move them.
+
+### Deploy the functions to a chosen machine
+
+```bash
+pskit deploy --server edge1          # also package, plan, remove, info
+```
+
+or permanently, per stage:
+
+```yaml
+provider:
+  name: onprem
+  options:
+    deploy: {server: edge1, path: /opt/shop}          # method defaults to ssh; docker works too
+stages:
+  edge2:
+    provider: {options: {deploy: {server: edge2, path: /opt/shop}}}
+```
+
+The saved server's host, user, port and login replace those in `options.deploy`; `method`, `path`, `python`,
+`install` and the rest stay. In the studio, **Deploy → Machine** picks one for that run. Use one stage per machine:
+each stage has its own Terraform state, so two machines never overwrite each other's deployment.
+
+## Install software on a server
+
+The catalog's *Install on a server* groups install with the server's package manager (apt, dnf, yum or apk), over SSH:
+
+| Software | Versions | Notes |
+|---|---|---|
+| Python 3, Docker | distribution | Python with venv and pip; Docker installed and started |
+| **Node.js** | 22 (default), 20, 18 | NodeSource packages with npm (Alpine: its own version) |
+| Java (OpenJDK) | 21, 17 | headless runtime |
+| Go | 1.23.4 (any `1.x.y`) | official toolchain in `/usr/local/go` |
+| **nginx** | distribution | enabled and started; put a reverse proxy to the pskit host in `/etc/nginx/conf.d/` |
+| Caddy | 2.8.4 | the `caddy` binary (automatic HTTPS) |
+| Certbot | distribution | with the nginx plugin where available |
+| PM2 | npm | needs Node.js first |
+| Git, basic tools | distribution | curl, wget, unzip, jq, htop, tmux, netcat |
+
+```bash
+pskit resources onprem create node --service nodejs --version 20 --server edge1
+pskit resources onprem create web --service nginx --server edge1
+```
+
+Studio: *Servers → Install / create* opens the catalog with that server chosen. Each install is listed with the
+services; *Details* runs its version check. pskit never uninstalls software (*Remove* only forgets it).
+
+## Console and terminal
+
+Services without a web UI (and those with one) have a **Console**: type a command, see the output.
+
+| Service | Console runs | Try |
+|---|---|---|
+| Redis, Valkey, KeyDB, Dragonfly | `redis-cli` with the service's login | `INFO server`, `LLEN jobs`, `XINFO STREAM jobs` |
+| PostgreSQL / MySQL / MariaDB | `psql` / `mysql` / `mariadb` on the service's database | `\dt`, `SELECT now();` |
+| MongoDB | `mongosh` | `db.getCollectionNames()` |
+| Kafka (Redpanda) / Apache Kafka | `rpk` / `kafka-*.sh` | `topic list`, `kafka-topics.sh --list` |
+| RabbitMQ / LavinMQ | `rabbitmqctl` / `lavinmqctl` | `list_queues name messages` |
+| NATS | `nats` (nats-box helper) | `stream ls` |
+| MinIO / RustFS | `mc` / `aws s3` | `ls local`, `s3 ls` |
+| ElasticMQ / LocalStack | `aws sqs` / `awslocal` | `sqs list-queues`, `secretsmanager list-secrets` |
+| OpenBao | `bao` | `kv list secret`, `kv put secret/api-key value=abc` |
+| Memcached, Mailpit, fake-gcs-server | text protocol / HTTP API | `stats`, `/api/v1/messages` |
+
+*Shell in the container* runs any line with `sh -c` inside the service's container. Each line runs on its own (no
+state between lines), on this machine or over SSH; credentials are hidden in the output. When the image has no client
+(Dragonfly, NATS, ElasticMQ, RustFS, Memcached), a small helper container joins the service's private network for that
+command. Servers have the same **Shell** under *Servers*.
+
+For interactive work (`redis-cli MONITOR`, `psql` sessions, `vim`, `htop`) open a **Terminal**: a full terminal in the
+browser, embedded in the studio. It is ttyd in Docker on this machine, listening on `127.0.0.1` only behind a random
+secret URL; the first start builds a small image (`pskit-terminal:1`, ttyd + OpenSSH + sshpass + docker CLI). Servers
+get an SSH session with their saved login; services get their client (or `sh`) through `docker exec`.
+
+```bash
+pskit resources onprem console cache                      # interactive redis-cli in this terminal
+pskit resources onprem console orders-db "SELECT count(*) FROM orders;"
+pskit resources onprem shell edge1                        # ssh with the saved login
+pskit resources onprem shell edge1 "docker ps"
+pskit resources onprem terminal --server edge1            # browser terminal
+pskit resources onprem terminal cache                     # redis-cli in the browser
+pskit resources onprem terminal --list
+pskit resources onprem terminal --stop all
+```
+
+## Secret managers
+
+**OpenBao** (Vault API) and **LocalStack** (*Use as: Secret manager*: AWS Secrets Manager and SSM) are one click away,
+and handlers read them with `get_secret("name")` on every provider. See [secrets.md](secrets.md).
+
 ## SSH login: key, agent or password
 
 The *SSH server* target (and `provider.options.deploy` for the functions) logs in one of three ways:

@@ -66,6 +66,11 @@ def build_argv(
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,15}", str(stage)):
             raise StudioError(400, "invalid stage")
         common += ["--stage", str(stage)]
+    server = args.get("server")
+    if server and command in ("package", "plan", "deploy", "remove", "info"):
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,62}", str(server)):
+            raise StudioError(400, "invalid server name")
+        common += ["--server", str(server)]
     if command == "validate":
         return ["validate", *common]
     if command == "info":

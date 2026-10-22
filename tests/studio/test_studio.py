@@ -561,3 +561,38 @@ def test_onprem_services_api(studio):
     assert status == 200 and "jobs" not in json.dumps(back["raw"]["providers"]["onprem"].get("resources", {}))
     status, listed = call(base, "GET", "/api/onprem-services")
     assert listed["services"][0]["env"]["PSKIT_JOBS_URL"] == "***"
+
+
+def test_onprem_servers_console_and_terminal_api(studio, monkeypatch):
+    from py_serverless_kit.core import onprem_console as con
+    from py_serverless_kit.core import onprem_services as svc
+    from py_serverless_kit.core import onprem_terminal as term
+
+    base, root, _httpd = studio
+    status, out = call(base, "POST", "/api/onprem-servers",
+                       {"name": "edge1", "target": {"host": "10.0.0.5", "user": "ubuntu", "auth": "agent"}})
+    assert status == 200 and out["name"] == "edge1"
+    assert call(base, "POST", "/api/onprem-servers", {"name": "9x", "target": {"host": "h"}})[0] == 400
+    status, listed = call(base, "GET", "/api/onprem-servers")
+    assert [s["name"] for s in listed["servers"]] == ["edge1"]
+
+    monkeypatch.setattr(con, "_run", lambda argv, timeout: (0, "Linux edge1"))
+    status, shell = call(base, "POST", "/api/onprem-servers/edge1/shell", {"line": "uname -a"})
+    assert status == 200 and shell["output"] == "Linux edge1"
+
+    svc.save_state(root, {"services": {"cache": {"key": "cache", "service": "redis", "kind": "service",
+                                                 "container": "pskit-x-cache", "target": {"method": "local"}, "env": {}}}})
+    status, info = call(base, "GET", "/api/onprem-services/cache/console")
+    assert status == 200 and info["label"] == "redis-cli"
+    status, ran = call(base, "POST", "/api/onprem-services/cache/console", {"line": "PING"})
+    assert status == 200 and ran["exit_code"] == 0
+    assert call(base, "POST", "/api/onprem-services/cache/console", {"line": ""})[0] == 400
+
+    monkeypatch.setattr(term, "start_terminal", lambda root, emit, **kw: {"name": "pskit-term-7681", "port": 7681,
+                                                                          "url": "http://127.0.0.1:7681/t/", "title": "edge1"})
+    monkeypatch.setattr(term, "list_terminals", lambda **kw: [{"name": "pskit-term-7681", "port": 7681, "title": "edge1"}])
+    status, started = call(base, "POST", "/api/onprem-terminals", {"server": "edge1"})
+    assert status == 200 and started["url"].startswith("http://127.0.0.1:7681/")
+    assert call(base, "GET", "/api/onprem-terminals")[1]["terminals"][0]["url"] == "http://127.0.0.1:7681/t/"
+    assert call(base, "POST", "/api/onprem-terminals/nope/stop", {})[0] == 400
+    assert call(base, "POST", "/api/onprem-servers/edge1/remove", {})[0] == 200

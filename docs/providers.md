@@ -487,6 +487,12 @@ pskit logs --delete worker --yes    # clear one function's entries
 When the server has **no Python**, use `python: bundle` (a portable CPython from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) is fetched at apply and copied with the app) or `method: docker` (the image is `FROM python:<minor>-slim`). From Windows, a Linux bundle is copied out of the downloaded archive and is not unpacked into the project (those trees contain test paths longer than `MAX_PATH`). Air-gapped: `python_home` (copy a tree you already have) or `python_url` + `python_sha256` (internal mirror of an `install_only` tarball).
 
 ```yaml
+# A saved server (pskit resources onprem servers add edge1 ...): host, user, port and login come from it.
+# `pskit deploy --server edge1` (or studio Deploy -> Machine) picks one for a single run.
+deploy:
+  server: edge1
+  path: /opt/pskit/orders
+
 # SSH + portable CPython + systemd (server does not need Python)
 deploy:
   method: ssh

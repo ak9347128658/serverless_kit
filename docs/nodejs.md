@@ -73,6 +73,12 @@ The API mirrors the [Python handler API](handlers.md) in camelCase: `event.http.
 `resource("orders")`. Workflow `retry` / `catch` rules match the error's class name
 (`class ValidationError extends Error {}` → `ValidationError`).
 
+### Secrets
+
+`getSecret(name, field?, { store, default })`, `getSecrets(name)` and `putSecret(name, value)` work like the Python
+calls (Vault / OpenBao, AWS Secrets Manager, or environment variables); see
+[handlers.md](handlers.md#get_secret-secrets-on-every-provider).
+
 ## TypeScript
 
 * pskit compiles `.ts` files with `tsc` when it packages or runs the service. It uses the project's

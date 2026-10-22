@@ -6,7 +6,21 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-## [1.3.6] - 2026-10-22
+## [1.3.7] - 2026-10-22
+
+### Added
+- **Saved SSH servers**: `pskit resources onprem servers add|list|test|remove` and studio *On-prem services → Servers*. Name each machine once (key file, SSH agent / default key, or password through sshpass); the test reports OS, CPU, memory, disk, Docker access, sudo and installed runtimes. Services are created on one with `create --server NAME` or the create form's **Server** list. Stored in `.pskit/onprem-servers.json`; passwords only in `.pskit/ssh/`.
+- **Deploy to a chosen machine**: `pskit deploy --server NAME` (also package / plan / remove / info), `provider.options.deploy.server` in `pskit.yml` (per stage), and studio **Deploy → Machine**. The saved server's host, user, port and login replace those in `options.deploy`.
+- **Install software on a server**: Node.js (22 / 20 / 18 from NodeSource), Java (OpenJDK 21 / 17), Go (any 1.x.y), nginx (enabled and started), Caddy, Certbot, PM2, Git and basic tools, next to Python and Docker; apt, dnf, yum and apk. `create KEY --service nodejs --version 20 --server edge1`; the studio offers a version picker.
+- **Console for every service**: `pskit resources onprem console KEY [COMMAND]` and studio *Console*: redis-cli, psql, mysql / mariadb, mongosh, rpk, kafka scripts, rabbitmqctl, lavinmqctl, nats (nats-box), mc, aws (s3 / sqs), awslocal, bao, the memcached text protocol and HTTP APIs, or `sh` in the container. Lines run on this machine or over SSH with the service's credentials (hidden in the output); images without a client get a helper container on the service's private network. Servers get `pskit resources onprem shell SERVER [COMMAND]` and the studio *Shell*.
+- **Browser terminal**: `pskit resources onprem terminal (KEY | --server NAME)` and studio *Terminal*: ttyd in Docker on `127.0.0.1` behind a random secret path, embedded in the studio; SSH sessions with the saved login, or a service's interactive client / `sh`. `--list`, `--stop NAME|all`.
+- **Secret managers**: one-click **OpenBao** (Vault API, KV v2 at `secret/`, file storage, unsealed automatically, web UI, the password is the token) and **LocalStack** as a secret manager (AWS Secrets Manager + SSM). `get_secret(name, field=None, store=None, default=None)`, `get_secrets(name)` and `put_secret(name, value)` in the Python runtime and `getSecret` / `getSecrets` / `putSecret` in Node.js, with `vault`, `aws` (SigV4, Lambda credentials) and `env` drivers chosen by `PSKIT_<STORE>_*` variables, so the same handler reads secrets on every provider. New guide *On premises → secrets*.
+
+### Changed
+- Command logs also mask `*TOKEN*=` values.
+- `describe_target` names the saved server (`edge1 (ubuntu@10.0.0.5:22)`).
+
+## [1.3.6] - 2026-10-22## [1.3.6] - 2026-10-22
 
 ### Added
 - **Web UI check**: `pskit resources onprem gui KEY --check` and studio *Details > Check web UI* test every web UI of a service: the container, the published port, the HTTP answer on the server itself (over SSH) and from this machine. Each UI gets a verdict and the fix: not running, port not published, bound to `127.0.0.1`, app not answering, firewall dropping (timeout) or rejecting (refused). On Azure / AWS / GCP the cloud is read from the instance metadata, with the exact `az vm open-port` command (resource group and VM name filled in), the subnet + NIC NSG note, the security group / firewall-rule steps, ufw / firewalld status, and the tunnel that works without opening anything. Nothing is changed.

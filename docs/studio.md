@@ -113,6 +113,12 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   Azure NSG / AWS security group / GCP firewall, ufw) and prints the fix. *SSH server* targets log in with a key
   file, the SSH agent / default key, or a password (sshpass; on Windows install a key once with
   `pskit resources onprem ssh-key user@host`).
+- **On-prem services → Servers**: save several SSH machines (key file, agent or password), test them (OS, CPU,
+  memory, disk, Docker, sudo), open a **Shell** or a full browser **Terminal**, and *Install / create* Node.js (22 /
+  20 / 18), nginx, Java, Go, Caddy, Certbot, PM2, Git and tools. The create form's **Server** list and **Deploy →
+  Machine** pick one. Every service has a **Console** (redis-cli, psql, mongosh, rpk, bao, ... or a shell in its
+  container) and a **Terminal**. **Secret managers**: one-click OpenBao (Vault API) and LocalStack Secrets Manager,
+  read from handlers with `get_secret()` ([guide](resource-guides/onprem/secrets.md)).
 - **Resources → Guides → General → Existing cloud code**: what works when you bring Lambda ARNs, boto3 Lambda / SQS
   code or S3 / Azure / GCS SDK code, on every provider ([compatibility](resource-guides/compatibility.md)). On-prem
   queue guides show the boto3 SQS code against the host.

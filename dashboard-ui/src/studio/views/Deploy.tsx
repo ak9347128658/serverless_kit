@@ -7,7 +7,7 @@ import { PageHeader } from "../components/Misc";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
 import { compatProblems, overridesOn, restoreTriggersOn, setEnabledOn, skipTriggersOn, type CompatProblem } from "../compat";
-import type { Job, Json, JsonObject } from "../types";
+import type { Job, Json, JsonObject, OnPremServer } from "../types";
 import { asObject, normalizeEvent, asArray } from "../util";
 import { relative } from "../../format";
 
@@ -27,10 +27,16 @@ export function DeployView() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [history, setHistory] = useState<Job[]>([]);
   const [deleteData, setDeleteData] = useState(true);
+  const [servers, setServers] = useState<OnPremServer[]>([]);
+  const [machine, setMachine] = useState("");
   const job = useJob(jobId);
   const target = state.target || { provider: "aws", stage: "dev" };
   const targetMeta = meta.providers.find((p) => p.name === target.provider);
   const problems = targetMeta ? compatProblems(draft, targetMeta) : [];
+  const onprem = target.provider === "onprem";
+  useEffect(() => {
+    if (onprem) api.onpremServers().then((r) => setServers(r.servers), () => setServers([]));
+  }, [onprem]);
 
   /** Switch every problem off on the target provider only. Returns the new draft. */
   const disableAll = (): JsonObject => {
@@ -125,7 +131,7 @@ export function DeployView() {
     if (command === "remove" || (command === "deploy" && prod)) {
       const typed = `${target.provider}/${target.stage}`;
       const ok = await confirm({
-        title: command === "remove" ? `Remove ${typed}?` : `Deploy to ${typed}?`,
+        title: command === "remove" ? `Remove ${typed}${onprem && machine ? ` on ${machine}` : ""}?` : `Deploy to ${typed}${onprem && machine ? ` on ${machine}` : ""}?`,
         body:
           command === "remove"
             ? deleteData
@@ -138,11 +144,12 @@ export function DeployView() {
       });
       if (ok !== "confirm") return;
     } else if (command === "deploy") {
-      const ok = await confirm({ title: `Deploy to ${target.provider}/${target.stage}?`, confirmLabel: "Deploy" });
+      const ok = await confirm({ title: `Deploy to ${target.provider}/${target.stage}${onprem && machine ? ` on ${machine}` : ""}?`, confirmLabel: "Deploy" });
       if (ok !== "confirm") return;
     }
     try {
-      const r = await api.startJob(command, target.provider, target.stage, args);
+      const withMachine = onprem && machine && ["package", "plan", "deploy", "remove", "info"].includes(command) ? { ...(args || {}), server: machine } : args;
+      const r = await api.startJob(command, target.provider, target.stage, withMachine);
       setJobId(r.job_id);
     } catch (exc) {
       if (exc instanceof ApiError && exc.status === 409) toast("Another deploy-type job is running. Wait for it or cancel it.", "warn");
@@ -167,6 +174,23 @@ export function DeployView() {
       />
       {dirty && <div className="hint-box warn">You have unsaved changes. Commands use pskit.yml on disk; you'll be asked to save first.</div>}
       <CompatPanel provider={target.provider} problems={problems} onDisableAll={() => replace(disableAll())} />
+      {onprem && (
+        <div className="card card-pad row-gap wrap deploy-machine">
+          <b>Machine</b>
+          <select className="select" value={machine} onChange={(e) => setMachine(e.target.value)} aria-label="Machine">
+            <option value="">From pskit.yml (provider.options.deploy)</option>
+            {servers.map((s) => (
+              <option key={s.name} value={s.name}>
+                {s.name} ({s.label})
+              </option>
+            ))}
+          </select>
+          <span className="muted small">
+            Saved servers come from <b>Resources → On-prem services → Servers</b>. The same as <code className="mono">pskit deploy --server NAME</code>; to make it permanent per stage set{" "}
+            <code className="mono">provider.options.deploy.server</code>. Use one stage per machine to keep their deployments apart.
+          </span>
+        </div>
+      )}
       <div className="action-grid">
         {ACTIONS.map((a) => (
           <button key={a.command} type="button" className={`action-card btn ${a.tone}`} disabled={running} onClick={() => void run(a.command, a.command === "remove" && !deleteData ? { keep_resources: true } : undefined)} title={a.hint}>

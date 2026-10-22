@@ -58,6 +58,8 @@ def project_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     )
     @click.option("-s", "--stage", default=None, help="Stage, e.g. dev / staging / prod.")
     @click.option("-r", "--region", default=None, help="Override provider.region.")
+    @click.option("--server", "server", default=None,
+                  help="On premises: deploy to this saved SSH server (pskit resources onprem servers list).")
     @click.option("-v", "--verbose", is_flag=True, help="Show tracebacks on errors.")
     @functools.wraps(fn)
     def wrapper(
@@ -66,11 +68,16 @@ def project_options(fn: Callable[..., Any]) -> Callable[..., Any]:
         provider: Optional[str],
         stage: Optional[str],
         region: Optional[str],
+        server: Optional[str],
         verbose: bool,
         **kwargs: Any,
     ) -> Any:
         from ..core.project import Project
 
+        if server:
+            from ..core.onprem_servers import SERVER_ENV
+
+            os.environ[SERVER_ENV] = server
         try:
             project = Project.load(config_path, provider=provider, stage=stage, region=region)
             return fn(project, *args, **kwargs)
@@ -693,6 +700,10 @@ def resources_onprem() -> None:
       pskit resources onprem create jobs --service redis --attach worker --save
       pskit resources onprem create orders-db --service postgres --ssh ubuntu@10.0.0.5 --pem key.pem --save
       pskit resources onprem create py --service python --ssh ubuntu@10.0.0.5 --pem key.pem
+      pskit resources onprem servers add edge1 --ssh ubuntu@10.0.0.5 --pem key.pem
+      pskit resources onprem create node --service nodejs --version 22 --server edge1
+      pskit resources onprem console cache "INFO server"
+      pskit resources onprem terminal --server edge1
       pskit resources onprem status jobs
       pskit resources onprem backup orders-db
       pskit resources onprem remove jobs --delete-data --save
@@ -770,6 +781,8 @@ def resources_onprem_catalog(as_json: bool) -> None:
               help="SSH with a password from this environment variable (uses sshpass; never stored).")
 @click.option("--sudo", is_flag=True, help="Run docker / installs with sudo -n on the server.")
 @click.option("--local", "local", is_flag=True, help="Create it on this machine even if the functions deploy over SSH.")
+@click.option("--server", "server", default=None, help="A saved SSH server (pskit resources onprem servers list).")
+@click.option("--version", "version", default=None, help="Software version to install (nodejs 22 / 20 / 18, java 21, go ...).")
 @click.option("--user", "login", default=None, help="User to create (default: pskit; Redis / Valkey: default).")
 @click.option("--password", default=None, help="Password to set (default: a generated one). Prefer --password-env.")
 @click.option("--password-env", default=None, help="Read the password from this environment variable.")
@@ -802,6 +815,8 @@ def resources_onprem_create(  # noqa: PLR0913
     gui: bool,
     gui_login: Optional[str],
     gui_password_env: Optional[str],
+    server: Optional[str],
+    version: Optional[str],
     save: bool,
     config_path: Optional[str],
     as_json: bool,
@@ -813,6 +828,8 @@ def resources_onprem_create(  # noqa: PLR0913
     target: Optional[dict] = None
     if local:
         target = {"method": "local"}
+    elif server:
+        target = {"server": server, **({"sudo": True} if sudo else {})}
     elif ssh:
         user, _, rest = ssh.rpartition("@")
         host, _, ssh_port = rest.partition(":")
@@ -843,6 +860,7 @@ def resources_onprem_create(  # noqa: PLR0913
         "gui": gui or None,
         "gui_login": gui_login if gui else None,
         "gui_password": gui_password if gui else None,
+        "version": version,
     }
     entry = _service_call(svc.create, root, {k: v for k, v in body.items() if v is not None}, raw, echo)
     if as_json:
@@ -857,6 +875,9 @@ def resources_onprem_create(  # noqa: PLR0913
         click.echo(svc.snippet(entry))
     if entry["resource"]["type"] in ("queue", "storage", "topic"):
         info(f"Test it: pskit deploy, then pskit resources send {key}")
+    elif entry.get("role") == "secrets":
+        store = "" if key == "secrets" else f", store=\"{key}\""
+        info(f'Read secrets in a handler: get_secret("name"{store}); add some with put_secret or the console')
     else:
         info(f'Read it in a handler: resource("{key}"); the password is in ctx.env[res["password_env"]]')
 
@@ -1001,6 +1022,227 @@ def resources_onprem_gui(  # noqa: PLR0913
     if entry.get("target", {}).get("method") == "ssh":
         info(f"Does not open? pskit resources onprem gui {key} --check  "
              f"(or skip the firewall: pskit resources onprem tunnel {key} --remote-port {links[0]['port']})")
+
+
+# ----------------------------------------------------------------------------- saved SSH servers
+
+
+@resources_onprem.group("servers")
+def resources_onprem_servers() -> None:
+    """Saved SSH servers: name a machine once, then create services, install software, open shells and deploy to it.
+
+    \b
+    pskit resources onprem servers add edge1 --ssh ubuntu@10.0.0.5 --pem ~/.ssh/edge1.pem
+    pskit resources onprem servers add lab --ssh root@192.168.1.20 --ssh-password-env LAB_PW
+    pskit resources onprem servers test edge1
+    pskit resources onprem create cache --service redis --server edge1
+    pskit deploy --server edge1                 # or provider.options.deploy: {server: edge1}
+    """
+
+
+@resources_onprem_servers.command("list")
+@click.option("--json", "as_json", is_flag=True)
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_servers_list(as_json: bool, config_path: Optional[str]) -> None:
+    from ..core.onprem_servers import list_servers
+
+    root, _path, _raw = _raw_project(config_path)
+    servers = list_servers(root)
+    if as_json:
+        click.echo(json.dumps(servers, indent=2))
+        return
+    if not servers:
+        info("No saved servers. Add one: pskit resources onprem servers add NAME --ssh user@host [--pem FILE]")
+        return
+    for item in servers:
+        login = "password" if item.get("password_file") else ("key " + item["identity_file"]) if item.get(
+            "identity_file") else "agent / default key"
+        echo(f"  {item['name']:<16} {item['label']:<36} {login}{'  sudo' if item.get('sudo') else ''}")
+
+
+@resources_onprem_servers.command("add")
+@click.argument("name")
+@click.option("--ssh", "ssh", required=True, help="user@host[:port]")
+@click.option("--pem", default=None, help="Private key (empty: the SSH agent or your default key).")
+@click.option("--ssh-password-env", default=None, help="Log in with the password in this variable (sshpass).")
+@click.option("--ssh-password-file", default=None, help="Log in with the password in this file (sshpass).")
+@click.option("--sudo", is_flag=True, help="Run docker / installs with sudo -n.")
+@click.option("--description", default="", help="A note shown in the studio.")
+@click.option("--test/--no-test", "run_test", default=True, help="Log in once after saving (default: yes).")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_servers_add(  # noqa: PLR0913
+    name: str, ssh: str, pem: Optional[str], ssh_password_env: Optional[str], ssh_password_file: Optional[str],
+    sudo: bool, description: str, run_test: bool, config_path: Optional[str],
+) -> None:
+    """Save (or replace) server NAME."""
+    from ..core import onprem_servers as srv
+
+    root, _path, _raw = _raw_project(config_path)
+    user, _, rest = ssh.rpartition("@")
+    host, _, ssh_port = rest.partition(":")
+    raw: dict = {"host": host, "user": user or "root", "port": int(ssh_port or 22), "sudo": sudo}
+    if ssh_password_env:
+        raw.update({"auth": "password", "password": _env_value(ssh_password_env)})
+    elif ssh_password_file:
+        raw.update({"auth": "password", "password_file": ssh_password_file})
+    elif pem:
+        raw.update({"auth": "key", "identity_file": pem})
+    else:
+        raw["auth"] = "agent"
+    try:
+        srv.save_server(root, name, raw, description=description)
+    except srv.ServerError as exc:
+        raise click.ClickException(str(exc)) from None
+    ok(f"Saved server {name}")
+    if run_test:
+        _print_server_test(srv.test_server(root, name))
+
+
+def _print_server_test(result: dict) -> None:
+    if not result.get("ok"):
+        raise click.ClickException(f"cannot use {result.get('name')}: {result.get('error')}")
+    for key, value in result["facts"].items():
+        echo(f"  {key:<14} {value or '-'}")
+    ok(f"{result['name']} answers over SSH")
+
+
+@resources_onprem_servers.command("test")
+@click.argument("name")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_servers_test(name: str, config_path: Optional[str]) -> None:
+    """Log in and show the OS, CPU, memory, disk, Docker access, sudo and installed runtimes."""
+    from ..core import onprem_servers as srv
+
+    root, _path, _raw = _raw_project(config_path)
+    try:
+        _print_server_test(srv.test_server(root, name))
+    except srv.ServerError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+@resources_onprem_servers.command("remove")
+@click.argument("name")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_servers_remove(name: str, config_path: Optional[str]) -> None:
+    """Forget server NAME (services already created there keep running)."""
+    from ..core import onprem_servers as srv
+
+    root, _path, _raw = _raw_project(config_path)
+    try:
+        srv.remove_server(root, name)
+    except srv.ServerError as exc:
+        raise click.ClickException(str(exc)) from None
+    ok(f"Removed server {name}")
+
+
+# ----------------------------------------------------------------------------- consoles and terminals
+
+
+@resources_onprem.command("console", short_help="Run commands in a service (redis-cli, psql, mongosh, rpk, ...).")
+@click.argument("key")
+@click.argument("command", nargs=-1)
+@click.option("--shell", is_flag=True, help="A shell (sh) in the container instead of the service's client.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_console(key: str, command: tuple, shell: bool, config_path: Optional[str]) -> None:
+    """Open the service's client in this terminal, or run one COMMAND and print the output.
+
+    \b
+    pskit resources onprem console cache                    # interactive redis-cli
+    pskit resources onprem console cache "LLEN jobs"
+    pskit resources onprem console orders-db "SELECT count(*) FROM orders;"
+    pskit resources onprem console secrets "kv get secret/db-password"
+    pskit resources onprem console cache --shell            # sh inside the container
+    """
+    from ..core import onprem_console as con
+
+    root, _path, _raw = _raw_project(config_path)
+    if command:
+        try:
+            result = con.run_line(root, key, " ".join(command), shell=shell)
+        except (con.ConsoleError, Exception) as exc:  # noqa: BLE001 - ServiceError too
+            raise click.ClickException(str(exc)) from None
+        click.echo(result["output"].rstrip())
+        raise SystemExit(result["exit_code"])
+    import subprocess
+
+    argv = _service_call(con.interactive_argv, root, key, shell=shell)
+    raise SystemExit(subprocess.call(argv))  # noqa: S603
+
+
+@resources_onprem.command("shell", short_help="A shell on a saved SSH server (or run one command there).")
+@click.argument("server")
+@click.argument("command", nargs=-1)
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_shell(server: str, command: tuple, config_path: Optional[str]) -> None:
+    """SSH to SERVER with its saved login; with COMMAND, run it and print the output."""
+    from ..core import onprem_console as con
+    from ..core import onprem_servers as srv
+    from ..core.onprem_services import _ssh_argv
+
+    root, _path, _raw = _raw_project(config_path)
+    try:
+        target = srv.server_target(root, server)
+    except srv.ServerError as exc:
+        raise click.ClickException(str(exc)) from None
+    if command:
+        result = con.run_server(target, " ".join(command))
+        click.echo(result["output"].rstrip())
+        raise SystemExit(result["exit_code"])
+    import subprocess
+
+    argv = _ssh_argv(target, "")[:-1]
+    if "BatchMode=yes" in argv:                      # an interactive login may ask for a key passphrase
+        i = argv.index("BatchMode=yes")
+        del argv[i - 1:i + 1]
+    argv.insert(argv.index("ssh") + 1, "-t")
+    raise SystemExit(subprocess.call(argv))  # noqa: S603
+
+
+@resources_onprem.command("terminal", short_help="A full terminal in the browser (Docker): a server or a service.")
+@click.argument("key", required=False)
+@click.option("--server", "server", default=None, help="SSH to this saved server.")
+@click.option("--shell", is_flag=True, help="With KEY: sh in the container instead of the service's client.")
+@click.option("--list", "list_them", is_flag=True, help="Show running terminals.")
+@click.option("--stop", "stop", default=None, help="Stop a terminal by name (pskit-term-7681), or 'all'.")
+@click.option("--open/--no-open", "open_browser", default=True, help="Open it in the browser.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_terminal(  # noqa: PLR0913
+    key: Optional[str], server: Optional[str], shell: bool, list_them: bool, stop: Optional[str], open_browser: bool,
+    config_path: Optional[str],
+) -> None:
+    """ttyd in Docker on 127.0.0.1 (secret URL): an SSH session to a server, or the client / sh of a service.
+
+    \b
+    pskit resources onprem terminal --server edge1
+    pskit resources onprem terminal cache            # redis-cli in the browser
+    pskit resources onprem terminal --list
+    pskit resources onprem terminal --stop all
+    """
+    from ..core import onprem_terminal as term
+
+    if list_them or stop:
+        running = term.list_terminals()
+        for item in running:
+            if stop in ("all", item["name"]):
+                term.stop_terminal(item["name"])
+                ok(f"Stopped {item['name']}")
+            elif list_them:
+                echo(f"  {item['name']:<18} {item['title']:<36} {item['status']}")
+        if list_them and not running:
+            info("No terminals running.")
+        return
+    if not key and not server:
+        raise click.ClickException("give a service KEY or --server NAME")
+    root, _path, _raw = _raw_project(config_path)
+    try:
+        result = term.start_terminal(root, echo, server=server, key=key, shell=shell)
+    except (term.TerminalError, Exception) as exc:  # noqa: BLE001 - ServiceError / ServerError too
+        raise click.ClickException(str(exc)) from None
+    ok(f"Open {result['url']}  (stop: pskit resources onprem terminal --stop {result['name']})")
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(result["url"])
 
 
 @resources_onprem.command("ssh-key", short_help="Install an SSH key on a server that takes a password (once).")

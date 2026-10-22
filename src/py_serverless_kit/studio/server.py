@@ -42,6 +42,7 @@ class Studio:
         self.root = Path(root).resolve()
         self.token = token if token is not None else secrets.token_urlsafe(24)
         self.jobs = JobManager(self.root)
+        self.terminal_urls: Dict[str, str] = {}  # browser terminal name -> its secret URL (known only here)
         self.vscode = VSCode(self.root, image=vscode_image)
         self._meta: Optional[Dict[str, Any]] = None
 
@@ -328,6 +329,8 @@ def make_handler(app: Studio) -> type:
                     return 200, guides.page(parts[1], parts[2])
             if parts and parts[0] == "onprem-services":
                 return self._onprem_services(method, parts[1:], params)
+            if parts and parts[0] in ("onprem-servers", "onprem-terminals"):
+                return self._onprem_machines(method, parts, params)
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":
@@ -479,6 +482,17 @@ def make_handler(app: Studio) -> type:
 
                     label = {"gui": "Start", "gui-remove": "Remove", "gui-check": "Check"}[action] + f" web UI of {key}"
                     return 202, {"job_id": app.jobs.run_callable("onprem-service", run_gui, label=label).id}
+                if len(rest) == 2 and rest[1] == "console":
+                    from ..core import onprem_console as con
+
+                    if method == "GET":
+                        return 200, con.console_info(svc._entry(root, rest[0]))
+                    if method == "POST":
+                        body = _obj(self._body())
+                        try:
+                            return 200, con.run_line(root, rest[0], str(body.get("line") or ""), shell=bool(body.get("shell")))
+                        except con.ConsoleError as exc:
+                            raise StudioError(400, str(exc)) from None
                 if len(rest) == 2 and rest[1] in ("backup", "remove") and method == "POST":
                     key, action = rest
                     body = _obj(self._body())
@@ -496,6 +510,53 @@ def make_handler(app: Studio) -> type:
             except svc.ServiceError as exc:
                 raise StudioError(400, str(exc)) from None
             raise StudioError(404 if method == "GET" else 405, "unknown on-prem service endpoint")
+
+        def _onprem_machines(self, method: str, parts: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
+            """Saved SSH servers (add / test / shell / remove) and browser terminals (ttyd in Docker)."""
+            from ..core import onprem_console as con
+            from ..core import onprem_servers as srv
+            from ..core import onprem_terminal as term
+            from ..core.onprem_services import ServiceError
+
+            root = app.root
+            try:
+                if parts == ["onprem-servers"] and method == "GET":
+                    return 200, {"servers": srv.list_servers(root)}
+                if parts == ["onprem-servers"] and method == "POST":
+                    body = _obj(self._body())
+                    name = str(body.get("name") or "")
+                    target = _obj(body.get("target"))
+                    item = srv.save_server(root, name, target, description=str(body.get("description") or ""))
+                    return 200, {"name": name, "server": {k: v for k, v in item.items() if k != "password"}}
+                if len(parts) == 3 and parts[0] == "onprem-servers" and method == "POST":
+                    name, action = parts[1], parts[2]
+                    if action == "test":
+                        return 200, srv.test_server(root, name)
+                    if action == "remove":
+                        srv.remove_server(root, name)
+                        return 200, {"removed": name}
+                    if action == "shell":
+                        body = _obj(self._body())
+                        return 200, con.run_server(srv.server_target(root, name), str(body.get("line") or ""))
+                if parts == ["onprem-terminals"] and method == "GET":
+                    running = term.list_terminals()
+                    for item in running:
+                        item["url"] = app.terminal_urls.get(item["name"], "")
+                    return 200, {"terminals": running}
+                if parts == ["onprem-terminals"] and method == "POST":
+                    body = _obj(self._body())
+                    lines: List[str] = []
+                    result = term.start_terminal(root, lines.append, server=str(body.get("server") or "") or None,
+                                                 key=str(body.get("key") or "") or None, shell=bool(body.get("shell")))
+                    app.terminal_urls[result["name"]] = result["url"]
+                    return 200, {**result, "log": lines}
+                if len(parts) == 3 and parts[0] == "onprem-terminals" and parts[2] == "stop" and method == "POST":
+                    term.stop_terminal(parts[1])
+                    app.terminal_urls.pop(parts[1], None)
+                    return 200, {"stopped": parts[1]}
+            except (srv.ServerError, term.TerminalError, con.ConsoleError, ServiceError) as exc:
+                raise StudioError(400, str(exc)) from None
+            raise StudioError(404 if method == "GET" else 405, "unknown endpoint")
 
     return Handler
 

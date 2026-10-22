@@ -23,6 +23,7 @@ from .runtime.event import Event, EventType, Headers, HttpRequest, Record
 from .runtime.invoke import invoke
 from .runtime.resources import Resource, resource, resources
 from .runtime.response import Response
+from .runtime.secrets import SecretError, SecretNotFound, get_secret, get_secrets, put_secret
 
 __all__ = [
     "__author__",
@@ -42,10 +43,15 @@ __all__ = [
     "Record",
     "Resource",
     "Response",
+    "SecretError",
+    "SecretNotFound",
     "TooManyRequests",
     "Unauthorized",
     "UnprocessableEntity",
+    "get_secret",
+    "get_secrets",
     "invoke",
+    "put_secret",
     "resource",
     "resources",
 ]

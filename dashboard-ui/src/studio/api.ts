@@ -1,6 +1,11 @@
 import type { LogsResponse, LogStream } from "../types";
 import type {
   DiscoverResult,
+  OnPremConsoleInfo,
+  OnPremConsoleResult,
+  OnPremServer,
+  OnPremServerTest,
+  OnPremTerminal,
   FileContent,
   FileEntry,
   FsListing,
@@ -202,6 +207,19 @@ export const api = {
   onpremBackup: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/backup`, {}),
   onpremRemove: (key: string, deleteData: boolean) =>
     request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/remove`, { delete_data: deleteData }),
+  onpremConsoleInfo: (key: string) => request<OnPremConsoleInfo>("GET", `/api/onprem-services/${encodeURIComponent(key)}/console`),
+  onpremConsole: (key: string, line: string, shell = false) =>
+    request<OnPremConsoleResult>("POST", `/api/onprem-services/${encodeURIComponent(key)}/console`, { line, shell }),
+  onpremServers: () => request<{ servers: OnPremServer[] }>("GET", "/api/onprem-servers"),
+  onpremServerSave: (name: string, target: JsonObject, description?: string) =>
+    request<{ name: string }>("POST", "/api/onprem-servers", { name, target, description }),
+  onpremServerTest: (name: string) => request<OnPremServerTest>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/test`, {}),
+  onpremServerRemove: (name: string) => request<{ removed: string }>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/remove`, {}),
+  onpremServerShell: (name: string, line: string) =>
+    request<OnPremConsoleResult>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/shell`, { line }),
+  onpremTerminals: () => request<{ terminals: OnPremTerminal[] }>("GET", "/api/onprem-terminals"),
+  onpremTerminalStart: (body: { server?: string; key?: string; shell?: boolean }) => request<OnPremTerminal>("POST", "/api/onprem-terminals", body),
+  onpremTerminalStop: (name: string) => request<{ stopped: string }>("POST", `/api/onprem-terminals/${encodeURIComponent(name)}/stop`, {}),
   onpremApply: (raw: JsonObject, key: string, attach?: string[]) =>
     request<{ raw: JsonObject }>("POST", "/api/onprem-services/apply", { raw, key, attach }),
   onpremUnapply: (raw: JsonObject, key: string) => request<{ raw: JsonObject }>("POST", "/api/onprem-services/unapply", { raw, key }),

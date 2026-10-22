@@ -318,6 +318,52 @@ export interface OnPremCatalogItem {
   companion?: string | null;
   gui_logins?: string[];
   notes: string;
+  group?: string;
+  versions?: string[];
+}
+
+export interface OnPremConsoleInfo {
+  service: string;
+  available: boolean;
+  label: string;
+  input: string;
+  examples: string[];
+  shell: boolean;
+  note: string;
+}
+
+export interface OnPremConsoleResult {
+  output: string;
+  exit_code: number;
+  command: string;
+}
+
+export interface OnPremServer {
+  name: string;
+  label: string;
+  host: string;
+  user?: string;
+  port?: number;
+  auth?: "key" | "agent" | "password";
+  identity_file?: string;
+  password_file?: string;
+  sudo?: boolean;
+  description?: string;
+}
+
+export interface OnPremServerTest {
+  name: string;
+  ok: boolean;
+  error?: string;
+  facts?: Record<string, string>;
+}
+
+export interface OnPremTerminal {
+  name: string;
+  port: number;
+  title: string;
+  url?: string;
+  status?: string;
 }
 
 export interface ResourcePage {
@@ -354,6 +400,8 @@ export interface OnPremTarget {
   auth?: "key" | "agent" | "password";
   password?: string;
   password_file?: string;
+  /** A saved SSH server (Servers): its connection is used. */
+  server?: string;
 }
 
 export interface OnPremService {
