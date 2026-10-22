@@ -162,11 +162,24 @@ def control_url(spec: Dict[str, Any], record: Optional[Dict[str, Any]] = None) -
     return str(endpoint).rstrip("/")
 
 
-def control_for(record: Dict[str, Any], root: Path) -> Optional[HostControl]:
-    """A client for the deployment's host, or None when it is not an on-prem deployment."""
+def control_for(record: Dict[str, Any], root: Path, server: Optional[str] = None) -> Optional[HostControl]:
+    """A client for the deployment's host, or None when it is not an on-prem deployment.
+
+    ``server`` (or ``PSKIT_DEPLOY_SERVER``, set by ``--server``) talks to the host on that saved SSH server instead of
+    the endpoint of the last deploy: the same project deployed to several machines.
+    """
+    import os
+
     if record.get("provider") != "onprem":
         return None
     spec = host_spec(record, root)
+    from .onprem_servers import SERVER_ENV, get_server
+
+    name = server or os.environ.get(SERVER_ENV)
+    if name:
+        item = get_server(root, name)                         # ServerError (a ValueError) for an unknown name
+        port = int((spec or {}).get("port") or 8080)
+        return HostControl(f"http://{item['host']}:{port}", token=str((spec or {}).get("admin_token") or ""))
     if spec is None:
         endpoint = record.get("endpoint")
         if not endpoint:

@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { LogStreams } from "../../components/LogStreams";
 import { LogViewer } from "../../components/LogViewer";
 import { api } from "../api";
@@ -7,6 +7,7 @@ import { Section } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { href } from "../route";
 import { useStudio } from "../store";
+import type { OnPremServer } from "../types";
 import { asObject } from "../util";
 
 type LogParams = Parameters<typeof api.logs>[2];
@@ -18,6 +19,12 @@ export function LogsView({ rest }: { rest: string[] }) {
   const functions = Object.keys(asObject(draft.functions));
   const only = rest[0] && functions.includes(rest[0]) ? rest[0] : undefined;
   const name = meta.providers.find((p) => p.name === target.provider)?.display_name || target.provider;
+  const onprem = target.provider === "onprem";
+  const [servers, setServers] = useState<OnPremServer[]>([]);
+  const [server, setServer] = useState("");
+  useEffect(() => {
+    if (onprem) api.onpremServers().then((r) => setServers(r.servers), () => setServers([]));
+  }, [onprem]);
   return (
     <div className="page">
       <PageHeader
@@ -29,7 +36,24 @@ export function LogsView({ rest }: { rest: string[] }) {
           </>
         }
       />
-      <DeployedLogs provider={target.provider} stage={target.stage} functions={functions} only={only} streams />
+      {onprem && (
+        <div className="card card-pad row-gap wrap deploy-machine">
+          <b>Server</b>
+          <select className="select" value={server} onChange={(e) => setServer(e.target.value)} aria-label="Server">
+            <option value="">Last deployed (pskit.yml / last deploy)</option>
+            {servers.map((s) => (
+              <option key={s.name} value={s.name}>
+                {s.name} ({s.label})
+              </option>
+            ))}
+          </select>
+          <span className="muted small">
+            Reads the host on that saved server, so its port (default 8080) must be reachable from this machine. CLI:{" "}
+            <code className="mono">pskit logs --server NAME</code>.
+          </span>
+        </div>
+      )}
+      <DeployedLogs provider={target.provider} stage={target.stage} functions={functions} only={only} server={onprem ? server || undefined : undefined} streams />
     </div>
   );
 }
@@ -40,23 +64,25 @@ export function DeployedLogs({
   stage,
   functions,
   only,
+  server,
   streams = false,
 }: {
   provider: string;
   stage: string;
   functions: string[];
   only?: string;
+  server?: string;
   streams?: boolean;
 }) {
   const confirm = useConfirm();
   const fetchLogs = useCallback(
-    (p: LogParams) => api.logs(provider, stage, only ? { ...p, function: only } : p),
-    [provider, stage, only],
+    (p: LogParams) => api.logs(provider, stage, only ? { ...p, function: only } : p, server),
+    [provider, stage, only, server],
   );
-  const fetchStreams = useCallback((fn?: string) => api.logStreams(provider, stage, only || fn), [provider, stage, only]);
+  const fetchStreams = useCallback((fn?: string) => api.logStreams(provider, stage, only || fn, server), [provider, stage, only, server]);
   const deleteStreams = useCallback(
-    (body: { ids?: string[]; all?: boolean; function?: string }) => api.deleteLogs(provider, stage, only ? { ...body, function: only } : body),
-    [provider, stage, only],
+    (body: { ids?: string[]; all?: boolean; function?: string }) => api.deleteLogs(provider, stage, only ? { ...body, function: only } : body, server),
+    [provider, stage, only, server],
   );
   const ask = useCallback(
     async (message: string) =>
@@ -67,11 +93,11 @@ export function DeployedLogs({
   return (
     <div className="stack">
       <div className="card">
-        <LogViewer key={`${provider}-${stage}-${only || ""}`} fetchLogs={fetchLogs} functions={names} />
+        <LogViewer key={`${provider}-${stage}-${only || ""}-${server || ""}`} fetchLogs={fetchLogs} functions={names} />
       </div>
       {streams && (
         <Section title="Stored logs" hint="list, select and delete" defaultOpen={false}>
-          <LogStreams key={`${provider}-${stage}-${only || ""}`} fetchStreams={fetchStreams} deleteStreams={deleteStreams} functions={names} confirm={ask} />
+          <LogStreams key={`${provider}-${stage}-${only || ""}-${server || ""}`} fetchStreams={fetchStreams} deleteStreams={deleteStreams} functions={names} confirm={ask} />
         </Section>
       )}
     </div>

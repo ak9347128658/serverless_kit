@@ -113,6 +113,9 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   Azure NSG / AWS security group / GCP firewall, ufw) and prints the fix. *SSH server* targets log in with a key
   file, the SSH agent / default key, or a password (sshpass; on Windows install a key once with
   `pskit resources onprem ssh-key user@host`).
+- **Resources → + On-prem service** creates a one-click service and adds it straight to the resource list (with
+  triggers); **Add resource** has *Create a <type> on premises*. Services not yet in `pskit.yml` appear above the list
+  with an **Add** button, and rows backed by one are marked `on-prem <service> · <server>`.
 - **On-prem services → Servers**: save several SSH machines (key file, agent or password), test them (OS, CPU,
   memory, disk, Docker, sudo), open a **Shell** or a full browser **Terminal**, and *Install / create* Node.js (22 /
   20 / 18), nginx, Java, Go, Caddy, Certbot, PM2, Git and tools. The create form's **Server** list and **Deploy →

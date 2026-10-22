@@ -182,14 +182,18 @@ export const api = {
     request<Record<string, unknown>>("POST", "/api/setup/aws-profile", body),
   login: (action: string) => request<{ job_id: string }>("POST", "/api/setup/login", { action }),
   sshTest: (deploy: JsonObject) => request<{ job_id: string }>("POST", "/api/setup/ssh-test", { deploy }),
-  logs: (provider: string, stage: string, p: { since?: number; limit?: number; level?: string; function?: string; q?: string; source?: string }) =>
-    request<LogsResponse>("GET", "/api/logs", undefined, { query: { provider, stage, ...p } }),
-  logStreams: (provider: string, stage: string, fn?: string) =>
+  logs: (
+    provider: string,
+    stage: string,
+    p: { since?: number; limit?: number; level?: string; function?: string; q?: string; source?: string },
+    server?: string,
+  ) => request<LogsResponse>("GET", "/api/logs", undefined, { query: { provider, stage, server, ...p } }),
+  logStreams: (provider: string, stage: string, fn?: string, server?: string) =>
     request<{ supported: boolean; reason?: string; can_delete?: boolean; items: LogStream[] }>("GET", "/api/logs/streams", undefined, {
-      query: { provider, stage, function: fn },
+      query: { provider, stage, function: fn, server },
     }),
-  deleteLogs: (provider: string, stage: string, body: { ids?: string[]; all?: boolean; function?: string }) =>
-    request<{ deleted: number; errors?: string[] }>("POST", "/api/logs/delete", body, { query: { provider, stage } }),
+  deleteLogs: (provider: string, stage: string, body: { ids?: string[]; all?: boolean; function?: string }, server?: string) =>
+    request<{ deleted: number; errors?: string[] }>("POST", "/api/logs/delete", body, { query: { provider, stage, server } }),
   vscode: () => request<VsCodeState>("GET", "/api/vscode"),
   vscodeStart: (image?: string, python?: string, node?: string) => request<{ job_id: string }>("POST", "/api/vscode/start", { image, python, node }),
   env: () => request<DevEnvStatus>("GET", "/api/env"),

@@ -31,6 +31,9 @@ const ROLE_LABEL: Record<string, string> = {
   custom: "Service",
   secrets: "Secret manager",
 };
+/** The pskit.yml resource type a service role becomes. */
+export const ROLE_RESOURCE_TYPE: Record<string, string> = { stream: "queue", secrets: "custom" };
+const roleType = (role: string) => ROLE_RESOURCE_TYPE[role] || role;
 // Roles a function can be triggered by (others are only bound as connection values).
 const TRIGGER_ROLES = ["queue", "stream", "storage"];
 
@@ -215,16 +218,19 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
   );
 }
 
-function CreateDrawer({
+export function CreateDrawer({
   state,
   initial,
   server,
+  resourceType,
   onClose,
   onCreated,
 }: {
   state: OnPremServicesState;
   initial: OnPremCatalogItem | null;
   server?: string;
+  /** Only services that can back this resource type (queue, storage, database, cache, custom). */
+  resourceType?: string;
   onClose: () => void;
   onCreated: (svc: OnPremService, attach: string[]) => void;
 }) {
@@ -267,7 +273,7 @@ function CreateDrawer({
 
   const choose = (c: OnPremCatalogItem) => {
     setItem(c);
-    setRole(c.roles[0] || "");
+    setRole((resourceType && c.roles.find((r) => roleType(r) === resourceType)) || c.roles[0] || "");
     setPort(undefined);
     setImage("");
     setKey(
@@ -361,10 +367,15 @@ function CreateDrawer({
         )
       }
     >
+      {!item && resourceType && !state.catalog.some((c) => c.kind === "service" && c.roles.some((r) => roleType(r) === resourceType)) && (
+        <p className="muted">No one-click service for {resourceType} resources yet; add it as an existing service instead.</p>
+      )}
       {!item && (
         <div className="catalog">
           {GROUPS.map((g) => {
-            const items = state.catalog.filter(g.match);
+            const items = state.catalog.filter(
+              (c) => g.match(c) && (!resourceType || (c.kind === "service" && c.roles.some((r) => roleType(r) === resourceType))),
+            );
             return (
               items.length > 0 && (
                 <div key={g.title} className="catalog-group">

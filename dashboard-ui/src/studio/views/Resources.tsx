@@ -4,7 +4,7 @@ import { DataTable, type Column } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { CloudResources } from "../components/CloudResources";
 import { Markdown } from "../components/Markdown";
-import { OnPremServices } from "../components/OnPremServices";
+import { CreateDrawer, OnPremServices } from "../components/OnPremServices";
 import { ResourceData } from "../components/ResourceData";
 import { ResourceGuides, type GuideRef } from "../components/ResourceGuides";
 import { ResourceTester } from "../components/ResourceTester";
@@ -14,7 +14,7 @@ import { DiscoverModal, InlineIssues, PageHeader } from "../components/Misc";
 import { href, navigate } from "../route";
 import { api, errorMessage } from "../api";
 import { useStudio } from "../store";
-import type { Driver, Json, JsonObject } from "../types";
+import type { Driver, Json, JsonObject, OnPremService, OnPremServicesState } from "../types";
 import { asArray, asObject, CLASS_RE, getIn, NAME_RE, setIn, str, uniqueName, type Path } from "../util";
 
 interface Row {
@@ -52,6 +52,25 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const [browse, setBrowse] = useState<string | null>(null);
   const { providerName } = useStudio();
   const onpremTarget = (state.target?.provider || providerName) === "onprem";
+  // One-click on-prem services: create one straight into the list, or add one that is not in pskit.yml yet.
+  const [onprem, setOnprem] = useState<OnPremServicesState | null>(null);
+  const [createOnprem, setCreateOnprem] = useState<{ type?: string } | null>(null);
+  const [onpremVersion, setOnpremVersion] = useState(0);
+  useEffect(() => {
+    api.onpremServices().then(setOnprem, () => setOnprem(null));
+  }, [onpremVersion]);
+  const declared = (key: string) => key in resources || key in asObject(getIn(draft, ["providers", "onprem", "resources"]));
+  const notDeclared = (onprem?.services || []).filter((svc) => svc.kind === "service" && svc.resource && !declared(svc.key));
+  const backing = (key: string) => (onprem?.services || []).find((svc) => svc.key === key && svc.kind === "service");
+  const addService = async (svc: OnPremService, attach?: string[]) => {
+    try {
+      const { raw } = await api.onpremApply(draft, svc.key, attach);
+      replace(raw);
+      toast(`Added ${svc.key} (${svc.service}) to the resources${attach && attach.length ? ` with triggers on ${attach.join(", ")}` : ""}; save to keep it`, "ok");
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+    }
+  };
   const test = (key: string) => {
     setTesting(key);
     window.setTimeout(() => document.getElementById("resource-test")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
@@ -129,7 +148,19 @@ export function ResourcesView({ rest }: { rest: string[] }) {
     {
       key: "mode",
       header: "Mode",
-      render: (r) => (r.res.external ? <span className="badge badge-warn">external</span> : <span className="badge badge-ok">managed</span>),
+      render: (r) => {
+        const svc = backing(r.name);
+        return (
+          <span className="row-gap">
+            {r.res.external ? <span className="badge badge-warn">external</span> : <span className="badge badge-ok">managed</span>}
+            {svc && (
+              <span className="badge" title={`One-click on-prem service on ${svc.target_label}`}>
+                on-prem {svc.service} · {svc.target_label}
+              </span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: "driver",
@@ -186,12 +217,27 @@ export function ResourcesView({ rest }: { rest: string[] }) {
             <button type="button" className="btn" onClick={() => setGuide({ cloud: providerName || "index", page: "readme" })}>
               Guides
             </button>
+            <button type="button" className="btn" onClick={() => setCreateOnprem({})} disabled={!onprem} title="Start Redis, Kafka, PostgreSQL, MinIO, OpenBao, ... with Docker and add it here">
+              + On-prem service
+            </button>
             <a className="btn btn-primary" href={href("resources", "new")}>
               + Add resource
             </a>
           </span>
         }
       />
+      {notDeclared.length > 0 && (
+        <div className="hint-box row-gap wrap">
+          <span>
+            On-prem services not in the resource list yet:
+          </span>
+          {notDeclared.map((svc) => (
+            <button key={svc.key} type="button" className="btn btn-sm" onClick={() => void addService(svc)} title={`${svc.service} on ${svc.target_label}`}>
+              + {svc.key} <span className="muted small">({svc.service})</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="card">
         <DataTable
           columns={columns}
@@ -205,10 +251,31 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       <div id="resource-test">
         <ResourceTester key={testing || ""} selected={testing} onSelect={setTesting} />
       </div>
-      <OnPremServices onGuide={setGuide} />
+      <OnPremServices onGuide={setGuide} key={onpremVersion} />
+      {createOnprem && onprem && (
+        <CreateDrawer
+          state={onprem}
+          initial={null}
+          resourceType={createOnprem.type}
+          onClose={() => setCreateOnprem(null)}
+          onCreated={(svc, attach) => {
+            setOnpremVersion((v) => v + 1);
+            void addService(svc, attach);
+          }}
+        />
+      )}
       <CloudResources />
       {editing && (
-        <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} onGuide={setGuide} />
+        <ResourceDrawer
+          key={editing}
+          name={editing === "new" ? null : editing}
+          onClose={() => navigate("resources")}
+          onGuide={setGuide}
+          onCreateOnprem={(type) => {
+            navigate("resources");
+            setCreateOnprem({ type });
+          }}
+        />
       )}
       <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
       {browse && <ResourceData resourceKey={browse} onClose={() => setBrowse(null)} />}
@@ -217,7 +284,17 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   );
 }
 
-function ResourceDrawer({ name: existing, onClose, onGuide }: { name: string | null; onClose: () => void; onGuide: (ref: GuideRef) => void }) {
+function ResourceDrawer({
+  name: existing,
+  onClose,
+  onGuide,
+  onCreateOnprem,
+}: {
+  name: string | null;
+  onClose: () => void;
+  onGuide: (ref: GuideRef) => void;
+  onCreateOnprem?: (type: string) => void;
+}) {
   const studio = useStudio();
   const { draft, meta, providerName, replace, issuesAt, state } = studio;
   const toast = useToast();
@@ -295,6 +372,17 @@ function ResourceDrawer({ name: existing, onClose, onGuide }: { name: string | n
     >
       <div className="form">
         {existing && <InlineIssues issues={issuesAt(["resources", existing])} />}
+        {!existing && onCreateOnprem && type !== "topic" && (
+          <div className="hint-box row-between wrap">
+            <span className="small">
+              Need the {type} itself on premises? pskit can start one with Docker (here or on an SSH server) and add it to this list, with its
+              connection and credentials.
+            </span>
+            <button type="button" className="btn btn-sm btn-primary" onClick={() => onCreateOnprem(type)}>
+              Create a {type} on premises
+            </button>
+          </div>
+        )}
         <FormRow label="Key" required error={nameError} help="How handlers refer to it: resource(&quot;key&quot;), and triggers use resource: key.">
           <TextInput mono value={name} onChange={setName} invalid={!!nameError} autoFocus={!existing} />
         </FormRow>

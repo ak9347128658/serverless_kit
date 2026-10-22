@@ -354,11 +354,13 @@ def make_handler(app: Studio) -> type:
             if parts and parts[0] == "logs":
                 provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
                 stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
+                server = _param(params, "server") or None
                 if parts == ["logs"] and method == "GET":
                     return 200, system.logs_query(
                         root,
                         provider,
                         stage,
+                        server=server,
                         since=_int(params, "since", 0),
                         limit=max(1, min(1000, _int(params, "limit", 200))),
                         level=_param(params, "level"),
@@ -367,9 +369,9 @@ def make_handler(app: Studio) -> type:
                         source=_param(params, "source"),
                     )
                 if parts == ["logs", "streams"] and method == "GET":
-                    return 200, system.logs_streams(root, provider, stage, _param(params, "function"))
+                    return 200, system.logs_streams(root, provider, stage, _param(params, "function"), server)
                 if parts == ["logs", "delete"] and method == "POST":
-                    return 200, system.logs_delete(root, provider, stage, _obj(self._body()))
+                    return 200, system.logs_delete(root, provider, stage, _obj(self._body()), server)
             if parts == ["jobs"]:
                 if method == "GET":
                     return 200, {"jobs": app.jobs.list()}

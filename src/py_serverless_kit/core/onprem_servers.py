@@ -37,7 +37,7 @@ _FACTS = (
 )
 
 
-class ServerError(Exception):
+class ServerError(ValueError):
     pass
 
 

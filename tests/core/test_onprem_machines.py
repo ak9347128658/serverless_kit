@@ -383,3 +383,24 @@ def test_get_secret_in_node(kv_server, tmp_path):
     assert out.returncode == 0, out.stderr
     assert out.stdout.split() == ["1", "d"]
     del put_secret
+
+
+def test_host_control_for_a_chosen_server(tmp_path, monkeypatch):
+    from py_serverless_kit.core.cloud_logs import OnPremLogs, log_backend
+    from py_serverless_kit.core.onprem_control import control_for
+
+    app = tmp_path / ".pskit" / "onprem-dev" / "onprem_app"
+    app.mkdir(parents=True)
+    (app / "pskit_host.json").write_text(json.dumps({"port": 9090, "admin_token": "tok", "endpoint": "http://10.0.0.5:9090",
+                                                     "deploy": {"method": "ssh"}}), "utf-8")
+    srv.save_server(tmp_path, "edge2", {"host": "10.0.0.6", "user": "u"})
+    record = {"provider": "onprem", "stage": "dev", "key": "onprem-dev"}
+    assert control_for(record, tmp_path).base_url == "http://10.0.0.5:9090"            # the last deploy
+    chosen = control_for(record, tmp_path, "edge2")
+    assert chosen.base_url == "http://10.0.0.6:9090" and chosen.token == "tok"
+    monkeypatch.setenv(srv.SERVER_ENV, "edge2")                                   # pskit logs --server edge2
+    assert control_for(record, tmp_path).base_url == "http://10.0.0.6:9090"
+    monkeypatch.delenv(srv.SERVER_ENV)
+    assert isinstance(log_backend(record, tmp_path, "edge2"), OnPremLogs)
+    with pytest.raises(ValueError, match="no saved SSH server"):
+        control_for(record, tmp_path, "nope")

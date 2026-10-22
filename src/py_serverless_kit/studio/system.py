@@ -297,11 +297,18 @@ def _not_deployed(provider: str, stage: str) -> Dict[str, Any]:
     }
 
 
-def _backend(root: Path, provider: str, stage: str) -> Any:
+def _backend(root: Path, provider: str, stage: str, server: Optional[str] = None) -> Any:
     from ..core.cloud_logs import log_backend
 
     record = deployment_record(root, provider, stage)
-    return None if record is None else log_backend(record, root)
+    if record is None:
+        return None
+    try:
+        if server and provider == "onprem":
+            return log_backend(record, root, server)
+        return log_backend(record, root)
+    except ValueError as exc:                    # an unknown saved server
+        raise StudioError(400, str(exc)) from None
 
 
 def _call(fn: Any) -> Dict[str, Any]:
@@ -315,8 +322,8 @@ def _call(fn: Any) -> Dict[str, Any]:
         raise StudioError(502, f"{type(exc).__name__}: {exc}") from None
 
 
-def logs_query(root: Path, provider: str, stage: str, **params: Any) -> Dict[str, Any]:
-    backend = _backend(root, provider, stage)
+def logs_query(root: Path, provider: str, stage: str, server: Optional[str] = None, **params: Any) -> Dict[str, Any]:
+    backend = _backend(root, provider, stage, server)
     if backend is None:
         return _not_deployed(provider, stage)
     out = _call(lambda: backend.query(**params))
@@ -324,8 +331,10 @@ def logs_query(root: Path, provider: str, stage: str, **params: Any) -> Dict[str
     return out
 
 
-def logs_streams(root: Path, provider: str, stage: str, function: Optional[str] = None) -> Dict[str, Any]:
-    backend = _backend(root, provider, stage)
+def logs_streams(
+    root: Path, provider: str, stage: str, function: Optional[str] = None, server: Optional[str] = None
+) -> Dict[str, Any]:
+    backend = _backend(root, provider, stage, server)
     if backend is None:
         return _not_deployed(provider, stage)
     out = _call(lambda: backend.streams(function=function))
@@ -333,8 +342,10 @@ def logs_streams(root: Path, provider: str, stage: str, function: Optional[str] 
     return out
 
 
-def logs_delete(root: Path, provider: str, stage: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    backend = _backend(root, provider, stage)
+def logs_delete(
+    root: Path, provider: str, stage: str, body: Dict[str, Any], server: Optional[str] = None
+) -> Dict[str, Any]:
+    backend = _backend(root, provider, stage, server)
     if backend is None:
         raise StudioError(404, f"{provider}/{stage} is not deployed from this folder")
     ids = body.get("ids")

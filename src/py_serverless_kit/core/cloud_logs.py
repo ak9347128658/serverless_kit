@@ -652,13 +652,13 @@ def _installed(module: str) -> bool:
         return False
 
 
-def log_backend(record: Dict[str, Any], root: Path) -> LogBackend:
-    """Pick the log backend for one deployment record (``deployment.json``)."""
+def log_backend(record: Dict[str, Any], root: Path, server: Optional[str] = None) -> LogBackend:
+    """Pick the log backend for one deployment record (``deployment.json``); ``server``: an on-prem saved server."""
     provider = str(record.get("provider") or "")
     if provider == "onprem":
         from .onprem_control import control_for
 
-        control = control_for(record, root)
+        control = control_for(record, root, server)
         if control is None:
             return UnsupportedLogs(record, "the on-premises host address is unknown; run `pskit deploy` first")
         return OnPremLogs(record, control)

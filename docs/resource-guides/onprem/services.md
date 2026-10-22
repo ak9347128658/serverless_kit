@@ -37,7 +37,8 @@ with the main port: a second RabbitMQ on port 5682 gets its UI on 15682.
 
 ## In the studio
 
-1. **Resources → On-prem services → + Create service**.
+1. **Resources → + On-prem service** (or *On-prem services → + Create service*, or *Add resource → Create a <type> on
+   premises*).
 2. Pick a service. For Redis / Valkey choose **Queue** (list), **Stream** (consumer group) or **Cache**.
 3. **Where**: *This machine*, or *SSH server* with host, user, port, *Log in with* (key file, SSH agent / default
    key, or password, see [SSH login](#ssh-login-key-agent-or-password)) and *use sudo*. When
@@ -244,7 +245,11 @@ stages:
 ```
 
 The saved server's host, user, port and login replace those in `options.deploy`; `method`, `path`, `python`,
-`install` and the rest stay. In the studio, **Deploy → Machine** picks one for that run. Use one stage per machine:
+`install` and the rest stay. In the studio, **Deploy → Machine** picks one for that run.
+
+Logs, triggers and executions follow the same choice: **Logs → Server** in the studio, or `--server` on the CLI
+(`pskit logs --server edge2`, `pskit trigger --server edge2 -f api`, `pskit resources send --server edge2 jobs`). Without
+it they read the host of the last deploy. The host's port (default 8080) must be reachable from this machine. Use one stage per machine:
 each stage has its own Terraform state, so two machines never overwrite each other's deployment.
 
 ## Install software on a server

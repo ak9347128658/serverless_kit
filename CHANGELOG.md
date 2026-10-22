@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.8] - 2026-10-22
+
+### Added
+- **On-prem services from the Resources list**: *Resources → + On-prem service* creates Redis, Kafka, PostgreSQL, MinIO, OpenBao, ... and adds it to the resource list with its triggers; *Add resource* offers *Create a <type> on premises* (catalog filtered to services that can back that type). Services created earlier but missing from `pskit.yml` are listed above the table with one-click **Add**, and rows backed by a service show `on-prem <service> · <server>`.
+- **Logs per server**: the studio *Logs* view has a **Server** picker for on-prem projects, and `pskit logs --server NAME` reads the host on that saved server instead of the last deploy's endpoint. The same `--server` also points `pskit trigger`, `pskit resources send`, executions and the other host commands at that machine (one project deployed to several servers).
+
 ## [1.3.7] - 2026-10-22
 
 ### Added
