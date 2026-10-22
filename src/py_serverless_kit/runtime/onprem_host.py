@@ -8,6 +8,7 @@ path you already have instead.
 * ``POST /__pskit/queues/<name>`` publishes a message (JSON body, or ``{"messages": [...]}``).
 * ``POST /__pskit/topics/<name>`` publishes. ``{"message": ..., "attributes": {...}}``
   sets attributes used by topic filters.
+* ``GET /__pskit/storage/<bucket>[?prefix=&offset=&limit=]`` lists objects; ``GET .../<key>`` returns one.
 * ``PUT`` / ``DELETE /__pskit/storage/<bucket>/<key>`` writes an object and emits
   ``created`` / ``deleted``. Dropping a file in the bucket directory does the same.
 * ``POST /__pskit/invoke/<function>`` calls a function.
@@ -1451,6 +1452,11 @@ class Host:
                     return self._lease(parts[1], parts[2], raw)
                 if parts and parts[0] == "topics" and len(parts) == 2:
                     return self._topic(parts[1], raw)
+                if parts and parts[0] == "storage" and len(parts) == 2 and self.command == "GET":
+                    page = host.broker.list_bucket(
+                        parts[1], _int_arg(query, "offset", 0), min(1000, _int_arg(query, "limit", 100)), query.get("prefix") or ""
+                    )
+                    return self._json(200, {"bucket": parts[1], **page})
                 if parts and parts[0] == "storage" and len(parts) >= 3:
                     return self._storage(parts[1], "/".join(parts[2:]), raw)
                 if parts and parts[0] == "invoke" and len(parts) == 2:
@@ -1571,7 +1577,13 @@ class Host:
                     removed = host.broker.delete_object(bucket, key)
                     host.pump_storage(time.time())
                     return self._json(200, {"deleted": removed, "bucket": bucket, "key": key})
-                self._json(405, {"error": "PUT or DELETE an object"})
+                if self.command in ("GET", "HEAD"):
+                    try:
+                        data = host.broker.get_object(bucket, key)
+                    except (FileNotFoundError, KeyError):
+                        return self._json(404, {"error": f"no object {key!r} in {bucket}"})
+                    return self._send(200, {"content-type": "application/octet-stream"}, data)
+                self._json(405, {"error": "GET, PUT or DELETE an object"})
 
             def _invoke(self, function: str, raw: bytes) -> None:
                 try:

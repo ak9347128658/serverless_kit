@@ -117,6 +117,10 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
+  client      info | install-node | tunnel
+              pskit client info
+              pskit client install-node
+              pskit client tunnel
   resources   list | send | check | usage | data | clear | delete | onprem
               pskit resources list -s dev
               pskit resources delete aws_s3_bucket.b_uploads -s dev
@@ -877,6 +881,38 @@ def resources_onprem_usage(key: str, reveal: bool, config_path: Optional[str]) -
     click.echo(text.encode(encoding, "replace").decode(encoding))
 
 
+@resources_onprem.command("tunnel", short_help="Reach a service on a server through SSH (firewalled port).")
+@click.argument("key")
+@click.option("--local-port", type=int, default=None, help="Port on this machine (default: the service's port).")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_tunnel(key: str, local_port: Optional[int], config_path: Optional[str]) -> None:
+    """Forward 127.0.0.1:<port> here to the service on its SSH server, until Ctrl+C.
+
+    \b
+    Use it when the service's port is closed in the server's firewall (connections time out):
+    scripts on this machine then connect to 127.0.0.1 with the variables printed below.
+    """
+    import subprocess
+
+    from ..core import onprem_services as svc
+
+    root, _path, _raw = _raw_project(config_path)
+    entry = _service_call(svc._entry, root, key)
+    if entry.get("kind") == "runtime":
+        raise click.ClickException(f"{key} is a runtime, not a service")
+    port = int(local_port or entry["port"])
+    argv = _service_call(svc.tunnel_argv, entry["target"], port, int(entry["port"]))
+    info(f"Forwarding 127.0.0.1:{port} -> {entry['address']}:{entry['port']} over SSH. Ctrl+C to stop.")
+    for name, value in sorted(svc.local_env(entry, port).items()):
+        echo(f"  export {name}='{value}'")
+    if not entry.get("env"):
+        echo(f"  connect your client to 127.0.0.1:{port}")
+    try:
+        raise SystemExit(subprocess.call(argv))
+    except KeyboardInterrupt:
+        ok("Tunnel closed.")
+
+
 @resources_onprem.command("logs", short_help="The service container's recent output.")
 @click.argument("key")
 @click.option("-n", "--tail", default=200, show_default=True)
@@ -918,6 +954,87 @@ def resources_onprem_remove(key: str, delete_data: bool, save: bool, yes: bool, 
     if save:
         _save_raw(path, svc.remove_from_raw(raw, key))
     ok(f"Removed {key}")
+
+
+# ----------------------------------------------------------------------------- client
+@cli.group(short_help="Call the on-prem host from scripts.")
+def client() -> None:
+    """Use the deployed on-prem host from any program: Python / Node.js client, HTTP, tunnel.
+
+    \b
+    Examples:
+      pskit client info                      # endpoint, token, reachability, code to copy
+      pskit client install-node              # ./node_modules/pskit for scripts outside pskit
+      pskit client tunnel                    # 127.0.0.1:8080 here -> the host on its server
+    """
+
+
+def _host_control(project: Any) -> Any:
+    from ..core.deployer import Deployer
+    from ..core.onprem_control import control_for
+
+    if project.config.provider.name != "onprem":
+        raise click.ClickException("the pskit client talks to an on-prem host: use -p onprem")
+    record = Deployer(project, echo=echo).load_record()
+    control = control_for(record or {}, project.root) if record else None
+    if control is None:
+        raise click.ClickException("the on-prem host is not deployed yet: run `pskit deploy`")
+    return control
+
+
+@client.command("info", short_help="Endpoint, token, reachability and code to call the host.")
+@project_options
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def client_info(project, as_json: bool) -> None:  # noqa: ANN001
+    """How to call the deployed host from scripts: Python, Node.js and curl, checked for reachability."""
+    from ..core.client_guide import client_guide
+
+    control = _host_control(project)
+    guide = client_guide(project, control.base_url, bool(control.token))
+    if as_json:
+        click.echo(json.dumps(guide, indent=2))
+        return
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    click.echo(guide["markdown"].encode(encoding, "replace").decode(encoding))
+
+
+@client.command("install-node", short_help="Put the pskit Node.js package (with PskitClient) in node_modules.")
+@click.option("--dir", "target_dir", default=".", show_default=True, help="Project whose node_modules gets it.")
+def client_install_node(target_dir: str) -> None:
+    """Copy the `pskit` package (no dependencies) to <dir>/node_modules/pskit, for scripts outside pskit."""
+    from ..packaging.node import copy_runtime
+
+    dest = Path(target_dir).resolve() / "node_modules" / "pskit"
+    copy_runtime(dest)
+    ok(f"Installed pskit into {dest}")
+    echo('Use it: const { PskitClient } = require("pskit");')
+
+
+@client.command("tunnel", short_help="Forward the host's port here over SSH (firewalled host port).")
+@project_options
+@click.option("--local-port", type=int, default=None, help="Port on this machine (default: the host's port).")
+def client_tunnel(project, local_port: Optional[int]) -> None:  # noqa: ANN001
+    """127.0.0.1:<port> here -> the on-prem host on its SSH server, until Ctrl+C."""
+    import subprocess
+
+    from ..core.onprem_services import tunnel_argv
+    from ..providers.onprem_spec import parse_deploy
+
+    cfg = project.config
+    spec = parse_deploy(cfg.provider.options, service=cfg.service, stage=cfg.provider.stage,
+                        runtime=cfg.provider.runtime, architecture=cfg.provider.architecture)
+    if not spec.ssh_host:
+        raise click.ClickException("the host runs on this machine; no tunnel needed")
+    remote = int(cfg.provider.options.get("port") or 8080)
+    port = int(local_port or remote)
+    target = {"method": "ssh", "host": spec.ssh_host, "user": spec.ssh_user or "root", "port": spec.ssh_port,
+              "identity_file": spec.identity_file or "", "known_hosts": spec.known_hosts}
+    argv = tunnel_argv(target, port, remote)
+    info(f"Forwarding 127.0.0.1:{port} -> {spec.ssh_host}:{remote}. In another terminal: export PSKIT_HOST=http://127.0.0.1:{port}")
+    try:
+        raise SystemExit(subprocess.call(argv))
+    except KeyboardInterrupt:
+        ok("Tunnel closed.")
 
 
 def _ask_onprem_pem(project: Any) -> None:

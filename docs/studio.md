@@ -91,6 +91,9 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   resource, `provider.options.env_file` and triggers on the functions you ticked are added to the draft. Each service
   has **Details** (state, health, credentials, container log), **Backup** and **Remove**. See
   [resource-guides/onprem/services.md](resource-guides/onprem/services.md).
+- **Resources → Call from code** (on-prem target): the pskit client for Python and Node.js and the HTTP calls for
+  every resource, with a live check that this machine reaches the host and what to do if not
+  ([client.md](client.md)). *On-prem services → Details* warns when a service's port is unreachable from here.
 - **On-prem services**: the create form has a *Security* box (user, password with *Generate*, listen on 127.0.0.1 or
   the network); each service has **How to use** (connect from any program: Python / Node.js clients, terminal,
   security). **Resources → Data** pages through what an on-prem queue, topic or bucket holds, with previews.

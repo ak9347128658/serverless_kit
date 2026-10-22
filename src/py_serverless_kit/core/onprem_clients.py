@@ -193,7 +193,7 @@ import uuid
 
 import redis
 
-r = redis.from_url({_py_env(url)})            # from {v.get("env_file", ".env.onprem")}
+r = redis.from_url({_py_env(url)}, socket_connect_timeout=5, socket_timeout=10)   # from {v.get("env_file", ".env.onprem")}
 
 # Add data: the envelope the pskit redis driver reads (plain strings work too)
 r.lpush("{lkey}", json.dumps({{"id": uuid.uuid4().hex, "body": json.dumps({{"order_id": 1}}),
@@ -211,7 +211,7 @@ item = r.brpop("{lkey}", timeout=5)
 const {{ randomUUID }} = require("crypto");
 
 async function main() {{
-  const r = new Redis(process.env.{url});
+  const r = new Redis(process.env.{url}, {{ connectTimeout: 5000, maxRetriesPerRequest: 1 }});
 
   // Add data: the envelope the pskit redis driver reads (plain strings work too)
   await r.lpush("{lkey}", JSON.stringify({{ id: randomUUID(), body: JSON.stringify({{ orderId: 1 }}), attributes: {{}}, receives: 0, enqueued_at: Date.now() / 1000 }}));
@@ -237,7 +237,7 @@ import os
 
 import redis
 
-r = redis.from_url({_py_env(url)})            # from {v.get("env_file", ".env.onprem")}
+r = redis.from_url({_py_env(url)}, socket_connect_timeout=5, socket_timeout=10)   # from {v.get("env_file", ".env.onprem")}
 
 # Add data (the fields the pskit redis_stream driver reads)
 r.xadd("{skey}", {{"body": json.dumps({{"order_id": 1}}), "attributes": json.dumps({{"kind": "new"}})}})
@@ -259,7 +259,7 @@ for _stream, entries in r.xreadgroup("my-app", "worker-1", {{"{skey}": ">"}}, co
         js = f'''const Redis = require("ioredis");
 
 async function main() {{
-  const r = new Redis(process.env.{url});
+  const r = new Redis(process.env.{url}, {{ connectTimeout: 5000, maxRetriesPerRequest: 1 }});
 
   // Add data (the fields the pskit redis_stream driver reads)
   await r.xadd("{skey}", "*", "body", JSON.stringify({{ orderId: 1 }}), "attributes", JSON.stringify({{ kind: "new" }}));
@@ -294,8 +294,11 @@ main();
         py = f'''import json
 
 import boto3
+from botocore.config import Config
 
-sqs = boto3.client("sqs", region_name="{v.get("region", "us-east-1")}"{ep_py}{creds_py})
+# Fail in seconds when the port is closed, instead of retrying for minutes
+quick = Config(connect_timeout=5, read_timeout=25, retries={{"total_max_attempts": 1, "mode": "standard"}})
+sqs = boto3.client("sqs", region_name="{v.get("region", "us-east-1")}"{ep_py}{creds_py}, config=quick)
 QUEUE = "{queue_url}"
 
 # Add data
@@ -311,7 +314,7 @@ for msg in sqs.receive_message(QueueUrl=QUEUE, MaxNumberOfMessages=10, WaitTimeS
 '''
         js = f'''const {{ SQSClient, SendMessageCommand, ReceiveMessageCommand, DeleteMessageCommand }} = require("@aws-sdk/client-sqs");
 
-const sqs = new SQSClient({{ region: "{v.get("region", "us-east-1")}", {ep_js}{creds_js}}});
+const sqs = new SQSClient({{ region: "{v.get("region", "us-east-1")}", {ep_js}{creds_js}maxAttempts: 1, requestHandler: {{ connectionTimeout: 5000 }} }});
 const QUEUE = "{queue_url}";
 
 async function main() {{
@@ -341,7 +344,8 @@ from kafka import KafkaConsumer, KafkaProducer
 SERVERS = "{servers}".split(",")
 
 # Add data
-producer = KafkaProducer(bootstrap_servers=SERVERS, value_serializer=lambda v: json.dumps(v).encode())
+producer = KafkaProducer(bootstrap_servers=SERVERS, value_serializer=lambda v: json.dumps(v).encode(),
+                         request_timeout_ms=10000, max_block_ms=10000)
 producer.send("{topic}", {{"order_id": 1}}).get(timeout=30)
 
 # Read with YOUR OWN group id (pskit's group keeps its own offsets)
@@ -352,7 +356,7 @@ for record in consumer:
 '''
         js = f'''const {{ Kafka }} = require("kafkajs");
 
-const kafka = new Kafka({{ brokers: "{servers}".split(",") }});
+const kafka = new Kafka({{ brokers: "{servers}".split(","), connectionTimeout: 5000, retry: {{ retries: 1 }} }});
 
 async function main() {{
   // Add data
@@ -383,7 +387,7 @@ import nats
 
 
 async def main():
-    nc = await nats.connect({_py_env(url)})
+    nc = await nats.connect({_py_env(url)}, connect_timeout=5, max_reconnect_attempts=1)
     js = nc.jetstream()
 
     # Add data
@@ -409,7 +413,7 @@ asyncio.run(main())
 async function main() {{
   // nats.js takes the credentials separately from the server address.
   const u = new URL(process.env.{url});
-  const nc = await connect({{ servers: `${{u.hostname}}:${{u.port || 4222}}`, user: decodeURIComponent(u.username), pass: decodeURIComponent(u.password) }});
+  const nc = await connect({{ servers: `${{u.hostname}}:${{u.port || 4222}}`, user: decodeURIComponent(u.username), pass: decodeURIComponent(u.password), timeout: 5000 }});
   const js = nc.jetstream();
   const sc = StringCodec();
 
@@ -441,7 +445,10 @@ import os
 
 import pika
 
-conn = pika.BlockingConnection(pika.URLParameters({_py_env(url)}))
+params = pika.URLParameters({_py_env(url)})
+params.socket_timeout = 5
+params.connection_attempts = 1
+conn = pika.BlockingConnection(params)
 ch = conn.channel()
 ch.queue_declare(queue="{queue}", durable=True)
 
@@ -462,7 +469,7 @@ conn.close()
         js = f'''const amqp = require("amqplib");
 
 async function main() {{
-  const conn = await amqp.connect(process.env.{url});
+  const conn = await amqp.connect(process.env.{url}, {{ timeout: 5000 }});
   const ch = await conn.createChannel();
   await ch.assertQueue("{queue}", {{ durable: true }});
 
@@ -491,9 +498,11 @@ main();
         py = f'''import os
 
 import boto3
+from botocore.config import Config
 
 s3 = boto3.client("s3", endpoint_url="{endpoint}", region_name="us-east-1",
-                  aws_access_key_id={_py_env(ak)}, aws_secret_access_key={_py_env(sk)})
+                  aws_access_key_id={_py_env(ak)}, aws_secret_access_key={_py_env(sk)},
+                  config=Config(connect_timeout=5, retries={{"total_max_attempts": 1, "mode": "standard"}}))
 
 # Add data (pskit storage triggers see it on their next poll)
 s3.put_object(Bucket="{bucket}", Key="in/hello.txt", Body=b"hello")
@@ -510,7 +519,7 @@ s3.delete_object(Bucket="{bucket}", Key="in/hello.txt")
         js = f'''const {{ S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand }} = require("@aws-sdk/client-s3");
 
 const s3 = new S3Client({{
-  endpoint: "{endpoint}", region: "us-east-1", forcePathStyle: true,
+  endpoint: "{endpoint}", region: "us-east-1", forcePathStyle: true, maxAttempts: 1, requestHandler: {{ connectionTimeout: 5000 }},
   credentials: {{ accessKeyId: process.env.{ak}, secretAccessKey: process.env.{sk} }},
 }});
 
@@ -544,7 +553,7 @@ def _service_client(flavor: str, v: Dict[str, str], url: str) -> Snip:
 
 import psycopg
 
-with psycopg.connect({_py_env(url)}) as conn:
+with psycopg.connect({_py_env(url)}, connect_timeout=5) as conn:
     conn.execute("create table if not exists notes (id serial primary key, text text)")
     conn.execute("insert into notes (text) values (%s)", ("hello",))
     for row in conn.execute("select id, text from notes order by id desc limit 50"):
@@ -553,7 +562,7 @@ with psycopg.connect({_py_env(url)}) as conn:
         js = f'''const {{ Client }} = require("pg");
 
 async function main() {{
-  const db = new Client({{ connectionString: process.env.{url} }});
+  const db = new Client({{ connectionString: process.env.{url}, connectionTimeoutMillis: 5000 }});
   await db.connect();
   await db.query("create table if not exists notes (id serial primary key, text text)");
   await db.query("insert into notes (text) values ($1)", ["hello"]);
@@ -573,7 +582,7 @@ import pymysql
 
 u = urlsplit({_py_env(url)})
 conn = pymysql.connect(host=u.hostname, port=u.port or 3306, user=unquote(u.username), password=unquote(u.password),
-                       database=u.path.lstrip("/"), autocommit=True)
+                       database=u.path.lstrip("/"), autocommit=True, connect_timeout=5)
 with conn.cursor() as cur:
     cur.execute("create table if not exists notes (id int auto_increment primary key, text varchar(200))")
     cur.execute("insert into notes (text) values (%s)", ("hello",))
@@ -584,7 +593,7 @@ conn.close()
         js = f'''const mysql = require("mysql2/promise");
 
 async function main() {{
-  const db = await mysql.createConnection(process.env.{url});
+  const db = await mysql.createConnection({{ uri: process.env.{url}, connectTimeout: 5000 }});
   await db.query("create table if not exists notes (id int auto_increment primary key, text varchar(200))");
   await db.query("insert into notes (text) values (?)", ["hello"]);
   console.log((await db.query("select id, text from notes order by id desc limit 50"))[0]);
@@ -600,7 +609,7 @@ main();
 
 from pymongo import MongoClient
 
-client = MongoClient({_py_env(url)})
+client = MongoClient({_py_env(url)}, serverSelectionTimeoutMS=5000)
 notes = client["app"]["notes"]
 notes.insert_one({{"text": "hello"}})
 for doc in notes.find().sort("_id", -1).limit(50):
@@ -609,7 +618,7 @@ for doc in notes.find().sort("_id", -1).limit(50):
         js = f'''const {{ MongoClient }} = require("mongodb");
 
 async function main() {{
-  const client = await MongoClient.connect(process.env.{url});
+  const client = await MongoClient.connect(process.env.{url}, {{ serverSelectionTimeoutMS: 5000 }});
   const notes = client.db("app").collection("notes");
   await notes.insertOne({{ text: "hello" }});
   console.log(await notes.find().sort({{ _id: -1 }}).limit(50).toArray());
@@ -625,7 +634,7 @@ main();
 
 import redis
 
-r = redis.from_url({_py_env(url)})
+r = redis.from_url({_py_env(url)}, socket_connect_timeout=5, socket_timeout=10)
 r.set("greeting", "hello", ex=3600)
 print(r.get("greeting"))
 for key in r.scan_iter(count=100):      # browse keys page by page
@@ -634,7 +643,7 @@ for key in r.scan_iter(count=100):      # browse keys page by page
         js = f'''const Redis = require("ioredis");
 
 async function main() {{
-  const r = new Redis(process.env.{url});
+  const r = new Redis(process.env.{url}, {{ connectTimeout: 5000, maxRetriesPerRequest: 1 }});
   await r.set("greeting", "hello", "EX", 3600);
   console.log(await r.get("greeting"));
   const [, keys] = await r.scan(0, "COUNT", 100);
@@ -649,14 +658,14 @@ main();
     if flavor == "memcached":
         py = f'''from pymemcache.client.base import Client
 
-client = Client(("{host}", {port or 11211}))
+client = Client(("{host}", {port or 11211}), connect_timeout=5, timeout=5)
 client.set("greeting", "hello", expire=3600)
 print(client.get("greeting"))
 '''
         js = f'''const memjs = require("memjs");
 
 async function main() {{
-  const client = memjs.Client.create("{host}:{port or 11211}");
+  const client = memjs.Client.create("{host}:{port or 11211}", {{ timeout: 5, retries: 1 }});
   await client.set("greeting", "hello", {{ expires: 3600 }});
   console.log((await client.get("greeting")).value.toString());
   client.close();
@@ -672,12 +681,12 @@ from email.message import EmailMessage
 msg = EmailMessage()
 msg["From"], msg["To"], msg["Subject"] = "app@example.com", "you@example.com", "Hello"
 msg.set_content("Sent from a script.")
-with smtplib.SMTP("{host}", {port or 25}) as smtp:
+with smtplib.SMTP("{host}", {port or 25}, timeout=10) as smtp:
     smtp.send_message(msg)
 '''
     js = f'''const nodemailer = require("nodemailer");
 
-nodemailer.createTransport({{ host: "{host}", port: {port or 25} }})
+nodemailer.createTransport({{ host: "{host}", port: {port or 25}, connectionTimeout: 5000 }})
   .sendMail({{ from: "app@example.com", to: "you@example.com", subject: "Hello", text: "Sent from a script." }})
   .then(() => console.log("sent"));
 '''
@@ -718,12 +727,24 @@ def flavor_for(kind: str, options: Dict[str, Any], connection: Dict[str, Any], s
     return None
 
 
-def markdown(title: str, intro: str, host: Optional[Snip], direct_snip: Optional[Snip], direct_label: str) -> str:
+def markdown(
+    title: str,
+    intro: str,
+    host: Optional[Snip],
+    direct_snip: Optional[Snip],
+    direct_label: str,
+    client: Optional[Snip] = None,
+) -> str:
     def fence(lang: str, text: str) -> str:
         return f"```{lang}\n{text.rstrip()}\n```\n"
 
     out: List[str] = [f"## {title}\n", intro + "\n"]
-    for label, snip in (("Through the pskit host (any driver, no extra library)", host), (direct_label, direct_snip)):
+    options = (
+        ("With the pskit client (recommended: only the host port has to be open)", client),
+        ("Over HTTP through the pskit host (any language, any driver)", host),
+        (direct_label, direct_snip),
+    )
+    for label, snip in options:
         if not snip:
             continue
         out.append(f"### {label}\n")
@@ -736,6 +757,8 @@ def markdown(title: str, intro: str, host: Optional[Snip], direct_snip: Optional
                 + (f"`npm install {' '.join(reqs['node'])}`" if reqs["node"] else "")
                 + "\n"
             )
+        if snip.get("note"):
+            out.append(snip["note"] + "\n")
         out.append("Python:\n")
         out.append(fence("python", snip["python"]))
         out.append("Node.js (18+):\n")

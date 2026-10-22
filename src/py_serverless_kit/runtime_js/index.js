@@ -18,6 +18,7 @@ const { getLogger, Logger } = require("./log");
 const { Resource, resources, resource } = require("./resources");
 const { invoke, InvokeError } = require("./invoke");
 const { submitQueue, submitTopic, putObject, deleteObject } = require("./onprem");
+const { PskitClient, PskitClientError } = require("./client");
 const { registerModules } = require("./dispatch");
 const { registerManifest } = require("./manifest");
 
@@ -41,6 +42,8 @@ module.exports = {
   submitTopic,
   putObject,
   deleteObject,
+  PskitClient,
+  PskitClientError,
   getLogger,
   toResponse,
   eventFromWire,

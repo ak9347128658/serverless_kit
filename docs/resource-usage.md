@@ -119,7 +119,11 @@ exports.orders = async () => {
 
 ## On premises: from any other program
 
-On premises a resource is also reachable from scripts and services that are not pskit functions. The resource's
+The simplest way is the **pskit client** ([client.md](client.md)): `from py_serverless_kit.client import PskitClient`
+or `const { PskitClient } = require("pskit")`. It goes through the host, so only the host port must be open.
+
+
+A resource is also reachable from scripts and services that are not pskit functions in two other ways. The resource's
 *How to use* guide (section 7) shows both ways with Python and Node.js code:
 
 - **Through the pskit host** (standard library / `fetch`, any driver): `POST /__pskit/queues/<name>` and

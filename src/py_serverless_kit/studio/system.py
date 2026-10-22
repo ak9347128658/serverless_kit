@@ -237,6 +237,25 @@ def resource_action(
         raise StudioError(400, str(exc)) from None
 
 
+def client_info(root: Path, provider: str, stage: str) -> Dict[str, Any]:
+    """How scripts call the deployed on-prem host (pskit client, HTTP), with a reachability check."""
+    from ..core.client_guide import client_guide
+    from ..core.onprem_control import control_for
+    from ..core.project import Project
+
+    if provider != "onprem":
+        raise StudioError(400, "the pskit client calls an on-prem host; pick the onprem target")
+    try:
+        project = Project.load(cwd=root, provider=provider, stage=stage)
+    except Exception as exc:  # noqa: BLE001
+        raise StudioError(400, f"the saved pskit.yml does not load for {provider}/{stage}: {exc}") from None
+    record = deployment_record(root, provider, stage)
+    control = control_for(record or {}, root) if record else None
+    if control is None:
+        raise StudioError(400, "the on-prem host is not deployed yet: deploy first")
+    return client_guide(project, control.base_url, bool(control.token))
+
+
 def test_events(root: Path) -> Dict[str, Any]:
     """Saved test payloads: ``{function: [{"name", "event", "payload", "path"?}]}``."""
     path = root / TEST_EVENTS

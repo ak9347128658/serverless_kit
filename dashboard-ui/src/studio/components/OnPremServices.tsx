@@ -511,6 +511,13 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
             </span>
           </p>
           {info.error && <div className="form-error">{info.error}</div>}
+          {info.reachable_from_here === false && (
+            <div className="hint-box">
+              This machine cannot reach {info.address}:{info.port} (the server's firewall probably blocks it). Scripts here would time out. Run{" "}
+              <code className="mono">pskit resources onprem tunnel {serviceKey}</code> to reach it through SSH, open the port to your IP, or go through
+              the pskit host (<b>Resources → Call from code</b>).
+            </div>
+          )}
           {info.port && (
             <FormRow label="Endpoint">
               <code className="mono">

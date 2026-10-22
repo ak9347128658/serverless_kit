@@ -312,6 +312,10 @@ def make_handler(app: Studio) -> type:
                 stage = str(body.get("stage") or raw_provider.get("stage") or "dev")
                 action = parts[0].split("-", 1)[1]
                 return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action, body)
+            if parts == ["client-info"] and method == "GET":
+                provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
+                stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
+                return 200, system.client_info(root, provider, stage)
             if parts == ["test-events"]:
                 if method == "GET":
                     return 200, system.test_events(root)

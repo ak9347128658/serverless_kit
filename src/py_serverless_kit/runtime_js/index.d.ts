@@ -289,3 +289,60 @@ export declare class TooManyRequests extends HttpError {}
 export type Handler<R = any> = (event: Event, context: Context) => R | Promise<R>;
 
 export declare const version: string;
+
+// ------------------------------------------------------------------ PskitClient (any Node.js program)
+export interface PskitPage<T = Record<string, unknown>> {
+  items: T[];
+  total: number | null;
+  offset: number;
+  limit: number;
+  supported: boolean;
+  note: string;
+}
+export interface PskitMessage {
+  id: string;
+  body: string;
+  attributes: Record<string, unknown>;
+  receives: number;
+  receipt: string;
+  json(): unknown;
+  ack(): Promise<number>;
+  nack(): Promise<number>;
+}
+export declare class PskitClientError extends Error {
+  status: number;
+}
+export declare class PskitQueue {
+  send(message: unknown, attributes?: Record<string, unknown>): Promise<string>;
+  sendBatch(messages: unknown[]): Promise<string[]>;
+  depth(): Promise<number | null>;
+  peek(options?: { offset?: number; limit?: number }): Promise<PskitPage>;
+  receive(options?: { batch?: number; visibility?: number }): Promise<PskitMessage[]>;
+  ack(messages: PskitMessage[]): Promise<number>;
+  nack(messages: PskitMessage[]): Promise<number>;
+}
+export declare class PskitTopic {
+  publish(message: unknown, attributes?: Record<string, unknown>): Promise<string>;
+  peek(options?: { offset?: number; limit?: number }): Promise<PskitPage>;
+}
+export declare class PskitBucket {
+  put(key: string, data: string | Uint8Array): Promise<void>;
+  get(key: string): Promise<Buffer>;
+  delete(key: string): Promise<boolean>;
+  list(options?: { prefix?: string; offset?: number; limit?: number }): Promise<PskitPage<{ key: string; size: number }>>;
+  keys(options?: { prefix?: string; pageSize?: number }): AsyncGenerator<string>;
+}
+/** Use an on-premises pskit host from any Node.js program (its /__pskit HTTP API). */
+export declare class PskitClient {
+  constructor(endpoint?: string, options?: { token?: string; timeout?: number });
+  endpoint: string;
+  health(): Promise<Record<string, unknown>>;
+  resources(): Promise<Record<string, unknown>[]>;
+  queue(name: string): PskitQueue;
+  bucket(name: string): PskitBucket;
+  topic(name: string): PskitTopic;
+  check(key: string): Promise<Record<string, unknown>>;
+  invoke(fn: string, data?: unknown): Promise<unknown>;
+  startWorkflow(workflow: string, data?: unknown, options?: { wait?: boolean }): Promise<Record<string, unknown>>;
+  execution(id: string): Promise<Record<string, unknown>>;
+}

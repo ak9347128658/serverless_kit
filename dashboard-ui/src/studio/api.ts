@@ -218,6 +218,10 @@ export const api = {
     request<{ key: string; markdown: string }>("GET", `/api/onprem-services/${encodeURIComponent(key)}/usage`, undefined, {
       query: { reveal: reveal ? "1" : undefined },
     }),
+  clientInfo: (provider: string, stage: string) =>
+    request<{ endpoint: string; reachable: boolean | null; problem: string | null; markdown: string }>("GET", "/api/client-info", undefined, {
+      query: { provider, stage },
+    }),
   guides: () => request<GuideIndex>("GET", "/api/resource-guides"),
   guide: (cloud: string, page: string) =>
     request<GuidePage>("GET", `/api/resource-guides/${encodeURIComponent(cloud)}/${encodeURIComponent(page)}`),

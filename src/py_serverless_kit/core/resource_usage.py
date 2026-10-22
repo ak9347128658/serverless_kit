@@ -437,4 +437,18 @@ def _any_program(project: Any, record: Optional[Dict[str, Any]], key: str, res: 
     if host_snip and not snip:
         intro += (" pskit has no direct client example for this driver; the host API works for every driver, or use the "
                   "service's own SDK with the connection values above.")
-    return markdown("7. Use it from any other program", intro, host_snip, snip, "Directly, with the client library")
+    client_snip = None
+    if res.type in ("queue", "storage", "topic"):
+        from .client_guide import node_example, python_example
+
+        one = [{"key": key, "name": native, "type": res.type}]
+        client_snip = {
+            "python": python_example(endpoint, one),
+            "node": node_example(endpoint, one),
+            "cli": [],
+            "requirements": {"python": ["py-serverless-kit"], "node": []},
+            "note": "Node.js: `pskit client install-node` puts the `pskit` package in ./node_modules. "
+            "`pskit client info` checks that this machine reaches the host.",
+        }
+    return markdown("7. Use it from any other program", intro, host_snip, snip, "Directly, with the client library",
+                    client_snip)

@@ -188,6 +188,16 @@ pskit resources send uploads -d '{"key": "in/a.csv", "content": "a,b"}'   # obje
 pskit resources send events -d '{"message": {"id": 1}, "attributes": {"type": "order"}}'
 ```
 
+## `pskit client`
+
+Call the deployed on-prem host from scripts. Details: [client.md](client.md).
+
+| Command | |
+|---|---|
+| `client info [-p onprem -s STAGE] [--json]` | endpoint, token, whether this machine reaches the host, Python / Node.js / curl code for each resource |
+| `client install-node [--dir DIR]` | copy the `pskit` Node.js package (with `PskitClient`) to `DIR/node_modules/pskit` |
+| `client tunnel [--local-port N]` | forward `127.0.0.1:<port>` to the host on its SSH server until Ctrl+C |
+
 ### `pskit resources onprem`
 
 Create the services on-premises functions use, as Docker containers on this machine or on an SSH server, and add them
@@ -212,6 +222,7 @@ pskit resources onprem remove jobs --delete-data --save
 | `--port`, `--address`, `--bind`, `--image` | published port, address functions use, interface to listen on, Docker image |
 | `-a, --attach FN` | add a `queue` / `storage` trigger on resource KEY to FN (repeatable) |
 | `--save` | write the resource, `provider.options.env_file` and triggers into `pskit.yml` (comments are not kept) |
+| `tunnel KEY [--local-port N]` | forward the service's port to `127.0.0.1` over SSH (firewalled ports) and print the variables to use |
 | `usage KEY [--reveal]` | connect from any program: address, credentials, Python / Node.js client code, terminal tools, security |
 | `list`, `status KEY [--reveal]`, `logs KEY` | what exists, its state / health / credentials, the container log |
 | `backup KEY [-o FILE]` | dump the data to `.pskit/backups/` |

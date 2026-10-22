@@ -92,6 +92,11 @@ The API mirrors the [Python handler API](handlers.md) in camelCase: `event.http.
 
   Run `pskit package` once (or `pskit init`) if your editor can't resolve `pskit` yet.
 
+## Calling an on-prem host from other Node.js programs
+
+The `pskit` package also has `PskitClient` for scripts outside pskit; `pskit client install-node` copies the package
+into `./node_modules/pskit`. See [client.md](client.md).
+
 ## Dependencies and packaging
 
 `package.json` dependencies are bundled with the function: either `npm install --omit=dev --ignore-scripts`

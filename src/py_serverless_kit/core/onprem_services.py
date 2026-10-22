@@ -1059,6 +1059,7 @@ def status(root: Path, key: str, *, run: Optional[RunFn] = None, reveal: bool = 
     parts = (text.strip().splitlines() or [""])[-1].split("|")
     parts += [""] * (4 - len(parts))
     out.update({"state": parts[0], "health": parts[1] or None, "started_at": parts[2], "running_image": parts[3]})
+    out["reachable_from_here"] = reachable(str(entry.get("address")), int(entry.get("port") or 0))
     spec = SERVICES.get(entry["service"]) or {}
     if parts[0] == "running" and spec.get("health"):
         health = _fill(spec["health"], _values({**entry, "key": key}))
@@ -1229,7 +1230,7 @@ def client_values(entry: Dict[str, Any]) -> Dict[str, Any]:
     return values
 
 
-def service_usage(root: Path, key: str, *, reveal: bool = False) -> Dict[str, Any]:
+def service_usage(root: Path, key: str, *, reveal: bool = False, probe: bool = True) -> Dict[str, Any]:
     """Markdown: connection details, credentials, client code (Python / Node.js), terminal and security."""
     from .onprem_clients import direct, flavor_for, markdown
 
@@ -1262,6 +1263,17 @@ def service_usage(root: Path, key: str, *, reveal: bool = False) -> Dict[str, An
     for extra in spec["extra_ports"]:
         rows.append((f"Port {extra}", f"http://{entry.get('address')}:{extra}"))
     md.append("| | |\n|---|---|\n" + "".join(f"| {a} | {b} |\n" for a, b in rows))
+    if probe and not reachable(str(entry.get("address")), int(entry.get("port") or 0)):
+        md.append(
+            f"**This machine cannot reach `{entry.get('address')}:{entry.get('port')}` right now** (connections time "
+            "out or are refused). The service may be fine and only the port closed. Pick one:\n\n"
+            f"1. **SSH tunnel** (nothing to open): `pskit resources onprem tunnel {key}` forwards "
+            f"`127.0.0.1:{entry.get('port')}` here to the service and prints the variables to use.\n"
+            f"2. **Open the port** to your IP in the server's firewall (Azure: network security group inbound rule; "
+            "AWS: security group; Linux: `ufw allow`). Keep it closed to the internet.\n"
+            "3. **Go through the pskit host** with the pskit client or HTTP (only the host port, usually 8080, must be "
+            "open): see *Resources > How to use* for this resource, or `pskit client info`.\n"
+        )
     env_file = entry.get("env_file") or DEFAULT_ENV_FILE
     exports = [f"export {n}='<value from {env_file}>'" for n in sorted(entry.get("env") or {})]
     if exports:
@@ -1304,3 +1316,43 @@ def service_usage(root: Path, key: str, *, reveal: bool = False) -> Dict[str, An
         f"pskit resources onprem logs {key}\n```\n"
     )
     return {"key": key, "markdown": "\n".join(md)}
+
+
+# ----------------------------------------------------------------------------- reachability / tunnels
+
+
+def reachable(host: str, port: int) -> bool:
+    """Can this machine open a TCP connection to ``host:port``? (2 s)"""
+    return _tcp_open(host, port)
+
+
+def tunnel_argv(target: Dict[str, Any], local_port: int, remote_port: int) -> List[str]:
+    """``ssh -N -L local:127.0.0.1:remote user@host``: the service's port on localhost here."""
+    from ..providers.onprem_remote import _ssh_options, _target
+
+    if target.get("method") != "ssh":
+        raise ServiceError("the service runs on this machine; connect to 127.0.0.1 directly")
+    ssh = {
+        "host": target["host"],
+        "user": target["user"],
+        "port": target.get("port") or 22,
+        "identity_file": target.get("identity_file") or "",
+        "known_hosts": target.get("known_hosts") or "accept-new",
+    }
+    opts = [o for o in _ssh_options(ssh, port_flag="-p") if o != "BatchMode=yes"]
+    # _ssh_options pairs every value with "-o"; drop the orphaned flag left by removing BatchMode.
+    cleaned: List[str] = []
+    for item in opts:
+        if cleaned and cleaned[-1] == "-o" and item.startswith("-"):
+            cleaned.pop()
+        cleaned.append(item)
+    return ["ssh", "-N", "-L", f"{int(local_port)}:127.0.0.1:{int(remote_port)}", *cleaned, _target(ssh)]
+
+
+def local_env(entry: Dict[str, Any], local_port: int) -> Dict[str, str]:
+    """The service's variables rewritten to reach it through a tunnel on ``127.0.0.1:local_port``."""
+    out: Dict[str, str] = {}
+    address, port = str(entry.get("address")), str(entry.get("port"))
+    for name, value in (entry.get("env") or {}).items():
+        out[name] = str(value).replace(f"@{address}:{port}", f"@127.0.0.1:{local_port}")
+    return out

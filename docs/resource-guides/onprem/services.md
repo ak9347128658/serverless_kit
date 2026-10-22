@@ -84,6 +84,10 @@ consumer groups where the service has them.
 
 From the terminal: `pskit resources onprem usage <key> [--reveal]`.
 
+When the service's port is closed to your machine (a cloud VM's security group), connecting directly times out. Either
+forward it with `pskit resources onprem tunnel <key>` (scripts then use `127.0.0.1`), or skip the port entirely with the
+[pskit client](../../client.md), which goes through the host.
+
 ## From the command line
 
 ```bash
@@ -227,6 +231,7 @@ Data directories are copied while the service runs. For Kafka and NATS, stop pro
 | `pull access denied` | the image moved; set *Advanced → Docker image* (`--image`) to a mirror you can pull |
 | `port is already allocated` | pick another *Port* (`--port`) |
 | `did not become ready within 90 s` | `pskit resources onprem logs <key>`; on small servers Kafka needs about 1 GB of RAM |
+| a script times out (`TimeoutError`, `ConnectTimeoutError`, `ECONNREFUSED`) | the port is closed from your machine: `pskit resources onprem tunnel <key>`, open it to your IP, or use the pskit client through the host ([client.md](../../client.md#when-connections-time-out)) |
 | `is not reachable from this machine; check the firewall` | the service runs; open the port from the functions' server |
 | `sqs: ... QueueDoesNotExist` (ElasticMQ) | ElasticMQ forgets queues on restart; redeploy so the sqs driver gets `create_queue` (the default for non-AWS endpoints since 1.3.1) |
 | `environment variable PSKIT_..._URL ... is not set on the host` | `provider.options.env_file` is missing or the file was deleted; recreate the service or add the line |

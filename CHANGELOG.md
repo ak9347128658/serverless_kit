@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-10-22
+
+### Added
+- **pskit client** for any program: `py_serverless_kit.client.PskitClient` (Python, standard library only) and `PskitClient` in the `pskit` Node.js package (with TypeScript types). Queues (`send`, `send_batch`, `depth`, `peek`, `receive` + `ack` / `nack`), topics (`publish`, `peek`), buckets (`put`, `get`, `delete`, `list`, `keys`), `invoke`, workflows, `check`, `resources`; resource keys or native names; `PskitClient.from_project(".")`. Everything goes through the host's HTTP API, so only the host port must be reachable.
+- `pskit client info` (endpoint, token, reachability check, Python / Node.js / curl code per resource), `pskit client install-node` (copies the `pskit` package into `node_modules`), `pskit client tunnel` and `pskit resources onprem tunnel KEY` (SSH port forwarding for firewalled ports, printing the variables to use).
+- Host: `GET /__pskit/storage/<bucket>` lists objects and `GET /__pskit/storage/<bucket>/<key>` returns one.
+- Studio: *Resources → Call from code* (client guide with a live reachability check); *On-prem services → Details* and *How to use* warn when this machine cannot reach a service's port and say how to fix it.
+- `docs/client.md`: client APIs, the full host HTTP API, and what to do when connections time out.
+
+### Fixed
+- Scripts generated for on-prem services hung for a minute when the service's port was firewalled (e.g. ElasticMQ on an Azure VM). Every direct-client example now uses short connect timeouts and a single attempt (boto3, redis, kafka-python, nats, pika, psycopg, pymysql, pymongo, pymemcache, smtplib, and their Node.js counterparts), so it fails in about five seconds; the guides explain the firewall and offer the tunnel and the pskit client instead.
+
 ## [1.3.3] - 2026-10-22
 
 ### Added

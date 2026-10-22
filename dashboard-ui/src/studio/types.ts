@@ -375,6 +375,7 @@ export interface OnPremService {
   started_at?: string;
   error?: string;
   version?: string[];
+  reachable_from_here?: boolean;
 }
 
 export interface OnPremServicesState {
