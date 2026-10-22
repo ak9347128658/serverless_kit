@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Chip } from "../../components/Badge";
 import { DataTable, type Column } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { CloudResources } from "../components/CloudResources";
+import { Markdown } from "../components/Markdown";
 import { OnPremServices } from "../components/OnPremServices";
 import { ResourceGuides, type GuideRef } from "../components/ResourceGuides";
 import { ResourceTester } from "../components/ResourceTester";
@@ -46,6 +47,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const editing = rest[0] === "new" ? "new" : rest[0] && rest[0] in resources ? rest[0] : null;
   const [testing, setTesting] = useState<string | null>(null);
   const [guide, setGuide] = useState<GuideRef | null>(null);
+  const [usage, setUsage] = useState<string | null>(null);
   const { providerName } = useStudio();
   const test = (key: string) => {
     setTesting(key);
@@ -152,6 +154,9 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       header: "",
       render: (r) => (
         <span className="row-gap" onClick={(e) => e.stopPropagation()}>
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => setUsage(r.name)} title="Libraries, pskit.yml, Python / Node.js code and tests">
+            How to use
+          </button>
           <button type="button" className="btn btn-sm" onClick={() => test(r.name)} title="Send a test message / object">
             Test
           </button>
@@ -198,6 +203,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
         <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} onGuide={setGuide} />
       )}
       <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
+      {usage && <UsageDrawer resourceKey={usage} onClose={() => setUsage(null)} onTest={() => { setUsage(null); test(usage); }} />}
     </div>
   );
 }
@@ -437,6 +443,53 @@ function ResourceDrawer({ name: existing, onClose, onGuide }: { name: string | n
           if (item.arn) set("connection", { ...asObject(res.connection), arn: item.arn });
         }}
       />
+    </Drawer>
+  );
+}
+
+/** End-to-end guide for one resource: libraries, pskit.yml, code, local and deployed tests. */
+function UsageDrawer({ resourceKey, onClose, onTest }: { resourceKey: string; onClose: () => void; onTest: () => void }) {
+  const { state, providerName, dirty } = useStudio();
+  const target = state.target || { provider: providerName, stage: "dev" };
+  const [doc, setDoc] = useState<{ markdown: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setDoc(null);
+    setError(null);
+    api
+      .resourceUsage(target.provider, target.stage, resourceKey)
+      .then((d) => live && setDoc(d))
+      .catch((exc: unknown) => live && setError(errorMessage(exc)));
+    return () => {
+      live = false;
+    };
+  }, [resourceKey, target.provider, target.stage]);
+  return (
+    <Drawer
+      open
+      title={`How to use ${resourceKey}`}
+      onClose={onClose}
+      actions={
+        <span className="row-gap">
+          {doc && (
+            <button type="button" className="btn" onClick={() => void navigator.clipboard?.writeText(doc.markdown)} title="Copy the whole guide as Markdown">
+              Copy guide
+            </button>
+          )}
+          <button type="button" className="btn btn-primary" onClick={onTest}>
+            Test it
+          </button>
+        </span>
+      }
+    >
+      <p className="muted small">
+        For {target.provider} / {target.stage}, from the saved pskit.yml{dirty ? " (you have unsaved changes: save to include them)" : ""}. Terminal:{" "}
+        <code className="mono">pskit resources usage {resourceKey} -p {target.provider} -s {target.stage}</code>
+      </p>
+      {error && <div className="form-error">{error}</div>}
+      {!doc && !error && <p className="muted">Loading…</p>}
+      {doc && <Markdown text={doc.markdown} />}
     </Drawer>
   );
 }

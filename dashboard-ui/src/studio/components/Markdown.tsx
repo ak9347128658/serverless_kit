@@ -19,10 +19,16 @@ export function Markdown({ text, onLink }: { text: string; onLink?: (href: strin
       i++;
       while (i < lines.length && !lines[i].startsWith("```")) body.push(lines[i++]);
       i++;
+      const code = body.join("\n");
       out.push(
-        <pre key={key++} className="md-code" data-lang={lang || undefined}>
-          <code>{body.join("\n")}</code>
-        </pre>,
+        <div key={key++} className="code-block">
+          <button type="button" className="btn btn-sm code-copy" onClick={() => void navigator.clipboard?.writeText(code)} title="Copy">
+            Copy
+          </button>
+          <pre className="md-code" data-lang={lang || undefined}>
+            <code>{code}</code>
+          </pre>
+        </div>,
       );
       continue;
     }

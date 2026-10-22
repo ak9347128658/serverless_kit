@@ -204,6 +204,8 @@ export const api = {
     request<ResourceCheck>("POST", "/api/resource-check", { provider, stage, key }),
   resourceClear: (provider: string, stage: string, key: string) =>
     request<{ key: string; deleted: number; path: string }>("POST", "/api/resource-clear", { provider, stage, key }),
+  resourceUsage: (provider: string, stage: string, key: string) =>
+    request<{ key: string; title: string; markdown: string }>("POST", "/api/resource-usage", { provider, stage, key }),
   guides: () => request<GuideIndex>("GET", "/api/resource-guides"),
   guide: (cloud: string, page: string) =>
     request<GuidePage>("GET", `/api/resource-guides/${encodeURIComponent(cloud)}/${encodeURIComponent(page)}`),

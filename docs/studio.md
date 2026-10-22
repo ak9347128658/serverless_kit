@@ -91,6 +91,9 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   resource, `provider.options.env_file` and triggers on the functions you ticked are added to the draft. Each service
   has **Details** (state, health, credentials, container log), **Backup** and **Remove**. See
   [resource-guides/onprem/services.md](resource-guides/onprem/services.md).
+- **Resources → How to use** on every resource opens its end-to-end guide: the library to install for Python and
+  Node.js and how pskit packages it, the `pskit.yml` and trigger, handler code with copy buttons, local tests
+  (`pskit invoke`, `pskit dev`), deployed tests and provider notes ([resource-usage.md](resource-usage.md)).
 - **Resources → Test a resource** shows *Use it in a handler* (Python / Node.js code and the library to add) and
   **Test connection** for every resource. **Delete** on a resource asks whether to keep or delete its data (one-click
   services: stop or delete the container; built-in on-prem resources: clear them on the host).

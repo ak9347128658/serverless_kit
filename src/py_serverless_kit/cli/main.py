@@ -117,11 +117,12 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  resources   list | send | check | clear | delete | onprem
+  resources   list | send | check | usage | clear | delete | onprem
               pskit resources list -s dev
               pskit resources delete aws_s3_bucket.b_uploads -s dev
               pskit resources send jobs -d '{"order_id": 1}'
               pskit resources check orders-db
+              pskit resources usage jobs
               pskit resources clear jobs --yes
               pskit resources onprem create jobs --service redis --attach worker --save
   workflow    run | show | start | executions | status | cancel
@@ -569,6 +570,31 @@ def resources_check(project, key: str, as_json: bool) -> None:  # noqa: ANN001
         fail(f"{key}: {result['detail']} (from {result['checked_from']})")
     if not result.get("ok"):
         raise SystemExit(1)
+
+
+@resources.command("usage", short_help="End-to-end guide: libraries, pskit.yml, code, tests for a resource.")
+@project_options
+@click.argument("key")
+def resources_usage(project, key: str) -> None:  # noqa: ANN001
+    """How to use resource KEY: what to install (Python / Node.js), the pskit.yml, handler code,
+    local and deployed tests, provider notes and troubleshooting, as Markdown.
+
+    \b
+    Examples:
+      pskit resources usage jobs
+      pskit resources usage orders-db -p onprem > docs/orders-db.md
+    """
+    from ..core.deployer import Deployer
+    from ..core.resource_usage import usage
+    from ..core.testing import TriggerError
+
+    try:
+        out = usage(project, Deployer(project, echo=echo).load_record(), key)
+    except TriggerError as exc:
+        raise click.ClickException(str(exc)) from None
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    # Guides quote docs with arrows and dashes a legacy Windows console cannot print.
+    click.echo(out["markdown"].encode(encoding, "replace").decode(encoding))
 
 
 @resources.command("clear", short_help="Delete the data of a built-in on-prem queue, bucket or topic.")

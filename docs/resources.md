@@ -46,6 +46,8 @@ def api(event, ctx):
 
 Full example: [`examples/18-resources`](../examples/18-resources).
 
+Calling it from code (which library, Python and Node.js examples, how to test): [resource-usage.md](resource-usage.md), or **Resources → How to use** in the studio / `pskit resources usage <key>` for your own resources.
+
 Step-by-step console guides (where to find each value, per cloud and type): [resource-guides](resource-guides/README.md), for example [an existing Azure Storage queue](resource-guides/azure/queue.md).
 
 ## Fields

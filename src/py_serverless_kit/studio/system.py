@@ -214,6 +214,10 @@ def resource_action(root: Path, provider: str, stage: str, key: str, action: str
     try:
         if action == "check":
             return check_resource(project, record, key)
+        if action == "usage":
+            from ..core.resource_usage import usage
+
+            return usage(project, record, key)
         return purge_resource(project, record, key)
     except TriggerError as exc:
         raise StudioError(400, str(exc)) from None

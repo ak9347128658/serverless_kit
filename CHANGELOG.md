@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-10-22
+
+### Added
+- **How to use, for every resource**: studio *Resources → How to use* and `pskit resources usage KEY` show an end-to-end guide for that resource on the current provider and stage: the library to install for Python and Node.js and how pskit packages it, the `pskit.yml` and trigger, handler code (publish / consume / connect) with copy buttons, local tests (`pskit invoke`, `pskit dev`), deployed tests (`resources send`, `resources check`, `logs`, cloud CLI), provider notes and troubleshooting. Covers every provider and resource type: S3-compatible buckets on Alibaba, Tencent, Huawei, Oracle, IBM, DigitalOcean and Cloudflare get `boto3` / `@aws-sdk/client-s3` code with the right endpoint; queues and topics there use the SDK example from the resource guides, with its library in the install step.
+- `docs/resource-usage.md`: libraries per provider and type, how dependencies reach the function, secrets and a testing checklist.
+
 ## [1.3.1] - 2026-10-22
 
 ### Added
