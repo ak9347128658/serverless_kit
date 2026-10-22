@@ -340,6 +340,13 @@ def usage(project: Any, record: Optional[Dict[str, Any]], key: str) -> Dict[str,
     # ------------------------------------------------------------------ any program (on premises)
     if provider == "onprem":
         md.append(_any_program(project, record, key, res, service))
+        if kind == "queue":
+            md.append(_aws_sdk_section(project, record, key, native))
+        entry = load_state(project.root)["services"].get(key)
+        if isinstance(entry, dict) and entry.get("kind") == "service":
+            from .onprem_services import gui_markdown
+
+            md.append(gui_markdown(entry, key))
 
     # ------------------------------------------------------------------ troubleshooting
     md.append("## 8. Troubleshooting\n")
@@ -430,25 +437,144 @@ def _any_program(project: Any, record: Optional[Dict[str, Any]], key: str, res: 
         values["env_file"] = entry["env_file"]
     flavor = flavor_for(res.type, dict(res.options), dict(res.connection), service)
     snip = direct(flavor, values) if flavor else None
-    intro = (
-        "Not only functions: any script, web app, cron job or other service can add data to it, read it and consume "
-        "it. Secrets are the variables named by `*_env` (in the on-prem env file); export them where the program runs."
+    eventful = res.type in ("queue", "storage", "topic")
+    token, problem = _host_access(project, record, endpoint) if record else (bool(options.get("admin_token")), None)
+    md: List[str] = ["## 7. Call it from code (any program)\n"]
+    md.append(
+        "Not only functions: any script, web app, cron job or other service can use this resource. "
+        + (
+            "The simplest way is the **pskit client** (7.1): it calls the pskit host, so only the host's port has to be "
+            "reachable, whatever the resource's driver. Plain HTTP (7.2) works from any language"
+            + ("; the service's own library (7.3) connects to it directly." if snip else ".")
+            if eventful
+            else "Connect with the service's own library (7.1), using the connection values above."
+        )
+        + "\n"
     )
-    if host_snip and not snip:
-        intro += (" pskit has no direct client example for this driver; the host API works for every driver, or use the "
-                  "service's own SDK with the connection values above.")
-    client_snip = None
-    if res.type in ("queue", "storage", "topic"):
-        from .client_guide import node_example, python_example
+    if eventful:
+        rows = [("Host", f"`{endpoint}`"), ("Resource", f"key `{key}`, native name `{native}`")]
+        rows.append(("Token", "set `PSKIT_ADMIN_TOKEN` (the host's `admin_token`)" if token else "none needed"))
+        if record:
+            rows.append(("From this machine", "reachable" if problem is None else "**not reachable** (see 7.4)"))
+        md.append("| | |\n|---|---|\n" + "".join(f"| {a} | {b} |\n" for a, b in rows))
+    if eventful:
+        from .client_examples import node_program, python_program
 
-        one = [{"key": key, "name": native, "type": res.type}]
-        client_snip = {
-            "python": python_example(endpoint, one),
-            "node": node_example(endpoint, one),
-            "cli": [],
-            "requirements": {"python": ["py-serverless-kit"], "node": []},
-            "note": "Node.js: `pskit client install-node` puts the `pskit` package in ./node_modules. "
-            "`pskit client info` checks that this machine reaches the host.",
-        }
-    return markdown("7. Use it from any other program", intro, host_snip, snip, "Directly, with the client library",
-                    client_snip)
+        driver = res.options.get("driver")
+        driver = driver.get("use") if isinstance(driver, dict) else driver
+        builtin = str(driver or "builtin") in ("builtin", "directory")
+        consumed = any(
+            ev.type == res.type and getattr(ev.config, "resource", None) == key
+            for fn in project.config.functions.values()
+            for ev in fn.events
+        )
+        md.append("### 7.1 With the pskit client\n")
+        md.append(
+            "Install it once: `pip install py-serverless-kit` (Python; the client uses only the standard library) or "
+            "`pskit client install-node` (copies the `pskit` package into `./node_modules`). Then run the program with "
+            f"`PSKIT_HOST={endpoint}`" + (" and `PSKIT_ADMIN_TOKEN=...`" if token else "") + ".\n"
+        )
+        md.append("Python (`use_" + key.replace("-", "_") + ".py`):\n")
+        md.append(_fence("python", python_program(endpoint, key, native, res.type, consumed=consumed, builtin=builtin)))
+        md.append("Node.js (`use-" + key + ".js`):\n")
+        md.append(_fence("js", node_program(endpoint, key, native, res.type, consumed=consumed, builtin=builtin)))
+        md.append(
+            "API: `send` / `send_batch` / `depth` / `peek` / `receive` + `ack` / `nack` (queues), `publish` / `peek` "
+            "(topics), `put` / `get` / `list` / `keys` / `delete` (buckets), `invoke`, `check`, `resources`. "
+            "Full reference: `docs/client.md`.\n"
+        )
+        md.append(markdown("", "", host_snip, None, "", host_label="7.2 Over HTTP (any language, no pskit package)"))
+        if snip:
+            md.append(markdown("", "", None, snip, "7.3 Directly, with the service's library"))
+    elif snip:
+        md.append(markdown("", "", None, snip, "7.1 With the service's library"))
+    md.append(_timeouts_section(key, endpoint, problem, bool(snip)))
+    return "\n".join(md)
+
+
+def _host_access(project: Any, record: Dict[str, Any], endpoint: str) -> tuple:
+    """(host has a token?, why this machine cannot reach the host or None)."""
+    from .client_guide import probe_host
+    from .onprem_control import control_for
+
+    control = control_for(record, project.root)
+    token = control.token if control is not None else ""
+    return bool(token), probe_host(endpoint, token, timeout=3)
+
+
+def _timeouts_section(key: str, endpoint: str, problem: Optional[str], direct_example: bool) -> str:
+    port = endpoint.rsplit(":", 1)[-1].strip("/")
+    lines = ["### 7.4 If it times out\n"]
+    if problem:
+        lines.append(f"Right now this machine cannot reach the host: {problem}\n")
+    lines.append(
+        "`TimeoutError`, `ConnectTimeoutError` or `ECONNREFUSED` mean the port is closed from where the program runs "
+        "(cloud security group / NSG / `ufw`); the service itself is usually fine.\n\n"
+        f"- **pskit client / HTTP** need only the host port (`{port}`). Open it to your IP, or tunnel it: "
+        f"`pskit client tunnel`, then `PSKIT_HOST=http://127.0.0.1:{port}`.\n"
+        + (
+            f"- **The service's library** needs the service's own port. Tunnel it with `pskit resources onprem tunnel {key}` "
+            "(prints the variables pointing at `127.0.0.1`), or open that port to your IP.\n"
+            if direct_example
+            else ""
+        )
+        + "- `pskit client info` checks the host from this machine; `pskit resources check "
+        + key
+        + "` checks the resource from the host.\n"
+    )
+    return "\n".join(lines)
+
+
+def _host_endpoint(project: Any, record: Optional[Dict[str, Any]]) -> str:
+    from .testing import _onprem_endpoint
+
+    options = project.config.provider.options
+    endpoint = _onprem_endpoint(record, project.root) if record else None
+    if endpoint:
+        return endpoint
+    bind = str(options.get("host") or "127.0.0.1")
+    host = "127.0.0.1" if bind == "0.0.0.0" else bind  # noqa: S104 - a wildcard bind answers on loopback
+    return str(options.get("advertise") or f"http://{host}:{options.get('port') or 8080}")
+
+
+def _aws_sdk_section(project: Any, record: Optional[Dict[str, Any]], key: str, native: str) -> str:
+    """Existing boto3 / AWS SDK code against the host's SQS-compatible API."""
+    endpoint = _host_endpoint(project, record)
+    token = bool(project.config.provider.options.get("admin_token"))
+    creds = 'aws_access_key_id=os.environ["PSKIT_ADMIN_TOKEN"], aws_secret_access_key="x"' if token else (
+        'aws_access_key_id="pskit", aws_secret_access_key="pskit"')
+    js_creds = 'accessKeyId: process.env.PSKIT_ADMIN_TOKEN, secretAccessKey: "x"' if token else (
+        'accessKeyId: "pskit", secretAccessKey: "pskit"')
+    py = (
+        "import json\nimport os\n\nimport boto3\n\n"
+        "# Same code as on AWS: only endpoint_url changes. Inside a pskit function, the queue URL is\n"
+        f'# resource("{key}").url and the host is os.environ["PSKIT_ENDPOINT"].\n'
+        f'sqs = boto3.client("sqs", endpoint_url=os.environ.get("PSKIT_HOST", "{endpoint}"), region_name="us-east-1",\n'
+        f"                   {creds})\n"
+        f'queue_url = sqs.get_queue_url(QueueName="{native}")["QueueUrl"]\n'
+        'sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps({"order_id": 1}),\n'
+        '                 MessageAttributes={"kind": {"DataType": "String", "StringValue": "new"}})\n'
+        'print(sqs.get_queue_attributes(QueueUrl=queue_url, AttributeNames=["ApproximateNumberOfMessages"]))\n'
+        "# Receiving (built-in queues): only if no pskit trigger consumes this queue\n"
+        "for msg in sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=2).get(\"Messages\", []):\n"
+        '    print(msg["Body"])\n'
+        '    sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg["ReceiptHandle"])\n'
+    )
+    js = (
+        'const { SQSClient, GetQueueUrlCommand, SendMessageCommand } = require("@aws-sdk/client-sqs");\n\n'
+        f'const sqs = new SQSClient({{ endpoint: process.env.PSKIT_HOST || "{endpoint}", region: "us-east-1",\n'
+        f"  credentials: {{ {js_creds} }} }});\n\n"
+        "async function main() {\n"
+        f'  const {{ QueueUrl }} = await sqs.send(new GetQueueUrlCommand({{ QueueName: "{native}" }}));\n'
+        "  await sqs.send(new SendMessageCommand({ QueueUrl, MessageBody: JSON.stringify({ orderId: 1 }) }));\n"
+        "}\n\nmain();\n"
+    )
+    return (
+        "## Existing AWS SDK code (SQS API)\n\n"
+        "Code written for Amazon SQS works against this host unchanged except for `endpoint_url`: the host speaks "
+        "the SQS API (send / batch / receive / delete / visibility / attributes / purge) for its queues."
+        + (" It has an `admin_token`: use it as the access key id." if token else "")
+        + " Calling functions by name or Lambda ARN works the same way (the Lambda Invoke API); see "
+        "*Guides > Compatibility*.\n\n"
+        f"```python\n{py.rstrip()}\n```\n\n```js\n{js.rstrip()}\n```\n"
+    )

@@ -5,21 +5,35 @@ pskit can **create** the queue, stream, bucket, database or cache your on-premis
 on this machine or on any server you can reach with SSH. That can be the server your functions run on or a different
 one. It can also install Python or Docker on an SSH server.
 
-| Service | Use as | Driver in `pskit.yml` | Default port | Backup |
-|---|---|---|---|---|
-| Redis | queue, stream, cache | `redis` (list), `redis_stream` (consumer group) | 6379 | RDB snapshot |
-| Valkey | queue, stream, cache | `redis`, `redis_stream` | 6379 | RDB snapshot |
-| Kafka (Redpanda, one node) | queue | `custom`: `pskit_drivers.kafka_queue:KafkaQueue` (adds `kafka-python`) | 9092 | data directory (`.tar.gz`) |
-| NATS JetStream | queue | `custom`: `pskit_drivers.nats_queue:NatsQueue` (adds `nats-py`) | 4222 (monitor 8222) | data directory |
-| RabbitMQ | queue | `custom`: `pskit_drivers.rabbitmq_queue:RabbitQueue` (adds `pika`) | 5672 (UI 15672) | definitions (queues, users) |
-| ElasticMQ (SQS API) | queue | `sqs` with `endpoint` | 9324 (UI 9325) | none (in memory) |
-| MinIO | storage | `minio` | 9000 (console 9001) | data directory |
-| PostgreSQL | database | connection values | 5432 | `pg_dumpall` (`.sql`) |
-| MySQL / MariaDB | database | connection values | 3306 | `mysqldump` / `mariadb-dump` (`.sql`) |
-| MongoDB | database | connection values | 27017 | `mongodump --archive` |
-| Memcached | cache | connection values | 11211 | none |
-| Mailpit (SMTP) | custom | connection values | 1025 (web 8025) | none |
-| Python 3, Docker | runtime on an SSH server | — | — | — |
+| Service | Use as | Driver in `pskit.yml` | Default port | Backup | Web UI |
+|---|---|---|---|---|---|
+| Redis | queue, stream, cache | `redis` (list), `redis_stream` (consumer group) | 6379 | RDB snapshot | Redis Commander (companion) |
+| Valkey | queue, stream, cache | `redis`, `redis_stream` | 6379 | RDB snapshot | Redis Commander (companion) |
+| KeyDB | queue, stream, cache | `redis`, `redis_stream` | 6379 | RDB snapshot | Redis Commander (companion) |
+| Dragonfly | queue, stream, cache (password only) | `redis`, `redis_stream` | 6379 | snapshot (`.tar.gz`) | Redis Commander (companion) |
+| Apache Kafka (KRaft) | queue | `custom`: `pskit_drivers.kafka_queue:KafkaQueue` | 9092 | data directory | Kafka UI (companion) |
+| LavinMQ | queue | `custom`: `pskit_drivers.rabbitmq_queue:RabbitQueue` (AMQP) | 5672 | definitions | Management UI (15672) |
+| Azurite | queue, storage | `azure_queue` (10001), `azure_blob` (10000), own account and key | 10000 | data directory | Azure Storage Explorer (desktop) |
+| LocalStack | queue, storage | `sqs`, `s3` (one port) | 4566 | data directory | status page |
+| fake-gcs-server | storage | `gcs` (emulator) | 4443 | | |
+| RustFS | storage | `s3` with endpoint and keys | 9000 | data directory | Console (9001) |
+| Kafka (Redpanda, one node) | queue | `custom`: `pskit_drivers.kafka_queue:KafkaQueue` (adds `kafka-python`) | 9092 | data directory (`.tar.gz`) | Kafka UI (companion) |
+| NATS JetStream | queue | `custom`: `pskit_drivers.nats_queue:NatsQueue` (adds `nats-py`) | 4222 (monitor 8222) | data directory | monitoring (8222) |
+| RabbitMQ | queue | `custom`: `pskit_drivers.rabbitmq_queue:RabbitQueue` (adds `pika`) | 5672 (UI 15672) | definitions (queues, users) | Management UI (15672) |
+| ElasticMQ (SQS API) | queue | `sqs` with `endpoint` | 9324 (UI 9325) | none (in memory) | queue browser (9325) |
+| MinIO | storage | `minio` | 9000 (console 9001) | data directory | Console (9001) |
+| PostgreSQL | database | connection values | 5432 | `pg_dumpall` (`.sql`) | Adminer (companion) |
+| MySQL / MariaDB | database | connection values | 3306 | `mysqldump` / `mariadb-dump` (`.sql`) | Adminer (companion) |
+| MongoDB | database | connection values | 27017 | `mongodump --archive` | Mongo Express (companion) |
+| Memcached | cache | connection values | 11211 | none | |
+| Mailpit (SMTP) | custom | connection values | 1025 (web 8025) | none | Mailbox (8025) |
+| Python 3, Docker | runtime on an SSH server | — | — | — | |
+
+Every service and role above was created with Docker and driven through its pskit driver (publish, receive, settle;
+put, list, get) during development. Queues and buckets on Azurite, LocalStack, fake-gcs-server and RustFS are created
+on first use by the driver (`create_queue` / `create_bucket`), from the host's side, so a firewall between your laptop
+and the server doesn't matter and an emulator restart is survived. Extra ports (consoles, Azurite's queue port) move
+with the main port: a second RabbitMQ on port 5682 gets its UI on 15682.
 
 ## In the studio
 
@@ -58,6 +72,30 @@ pskit resources onprem create cache --service redis --role cache --user app --pa
 
 To change a password later: *Remove → Stop service, keep data*, create it again with the same key and the new
 password, then redeploy.
+
+## Web UIs
+
+Services with a built-in UI (RabbitMQ, LavinMQ, MinIO, RustFS, ElasticMQ, NATS monitoring, Mailpit) show its URL and
+login in *How to use* and *Details*. For the others pskit starts a **companion** UI next to the service, on a private
+Docker network with it, listening on the same interface as the service:
+
+| Service | Companion | Default port | Login |
+|---|---|---|---|
+| PostgreSQL, MySQL, MariaDB | Adminer | 8089 | the database user and password (server filled in) |
+| Redis, Valkey, KeyDB, Dragonfly | Redis Commander | 8082 | `admin` + a generated password (`PSKIT_<KEY>_GUI_PASSWORD`) |
+| Kafka (Redpanda), Apache Kafka | Kafka UI | 8088 | `admin` + a generated password (sign-in page `/auth`) |
+| MongoDB | Mongo Express | 8081 | the MongoDB user and password |
+
+Start it with *Also start the web UI* when creating, *Details > Add web UI*, or the CLI:
+
+```bash
+pskit resources onprem create orders-db --service postgres --gui --save
+pskit resources onprem gui cache                 # add / show the web UI of an existing service
+pskit resources onprem gui cache --remove
+pskit resources onprem tunnel orders-db --remote-port 8089     # firewalled: browse http://127.0.0.1:8089
+```
+
+Azurite has no web UI: attach **Azure Storage Explorer** (desktop) with the connection string from the env file.
 
 ## Use it from any program
 
@@ -138,6 +176,13 @@ functions:
   overwrites them.
 - **What was created** is kept in `.pskit/onprem-services.json`, credentials included: keep `.pskit/` out of git.
 - When the main provider is not `onprem`, everything goes under `providers.onprem:` so the other clouds are unaffected.
+
+## Existing cloud code
+
+Code written for AWS, Azure or Google Cloud SDKs works against these services unchanged except for the endpoint:
+S3 code against RustFS / MinIO / LocalStack, SQS code against LocalStack / ElasticMQ, Azure SDK code against Azurite,
+`google-cloud-storage` against fake-gcs-server, AMQP code against RabbitMQ / LavinMQ, Kafka code against either
+Kafka. The host itself also speaks the Lambda Invoke and SQS APIs. Details: [compatibility](../compatibility.md).
 
 ## Same server or a different one
 

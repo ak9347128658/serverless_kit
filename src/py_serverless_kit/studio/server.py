@@ -312,10 +312,6 @@ def make_handler(app: Studio) -> type:
                 stage = str(body.get("stage") or raw_provider.get("stage") or "dev")
                 action = parts[0].split("-", 1)[1]
                 return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action, body)
-            if parts == ["client-info"] and method == "GET":
-                provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
-                stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
-                return 200, system.client_info(root, provider, stage)
             if parts == ["test-events"]:
                 if method == "GET":
                     return 200, system.test_events(root)
@@ -465,6 +461,21 @@ def make_handler(app: Studio) -> type:
                     return 200, svc.service_usage(root, rest[0], reveal=_param(params, "reveal") in ("1", "true"))
                 if len(rest) == 2 and rest[1] == "logs" and method == "GET":
                     return 200, {"text": svc.logs(root, rest[0], tail=max(10, min(2000, _int(params, "tail", 200))))}
+                if len(rest) == 2 and rest[1] in ("gui", "gui-remove") and method == "POST":
+                    key, action = rest
+                    body = _obj(self._body())
+                    svc._entry(root, key)
+
+                    def run_gui(job: Any) -> int:
+                        if action == "gui":
+                            port = body.get("port")
+                            svc.add_gui(root, key, job.emit, port=int(port) if port else None)
+                        else:
+                            svc.remove_gui(root, key, job.emit)
+                        return 0
+
+                    label = f"{'Start' if action == 'gui' else 'Remove'} web UI of {key}"
+                    return 202, {"job_id": app.jobs.run_callable("onprem-service", run_gui, label=label).id}
                 if len(rest) == 2 and rest[1] in ("backup", "remove") and method == "POST":
                     key, action = rest
                     body = _obj(self._body())

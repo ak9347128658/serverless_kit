@@ -73,8 +73,36 @@ def _gcp_id_token(audience: str) -> str:  # pragma: no cover - needs GCP metadat
         return resp.read().decode("utf-8")
 
 
+def logical_name(function: str) -> str:
+    """The pskit function name for ``function`` given as a name, a deployed name or an ARN.
+
+    ``arn:aws:lambda:eu-west-1:123:function:shop-dev-billing[:alias]`` and ``shop-dev-billing``
+    both become ``billing`` when that is a function of this service, so code written against
+    cloud names keeps working on every provider.
+    """
+    name = str(function)
+    if name.startswith("arn:"):
+        parts = name.split(":")
+        # arn:partition:service:region:account:function:NAME[:qualifier]
+        name = parts[6] if len(parts) > 6 and parts[5] == "function" else parts[-1]
+    try:
+        functions = load_manifest().functions
+    except Exception:  # noqa: BLE001 - no manifest (plain scripts, tests): keep the name
+        return name
+    if name in functions:
+        return name
+    for logical, spec in functions.items():
+        if name == getattr(spec, "resource_name", None) or name == physical_name(logical):
+            return logical
+    return name
+
+
 def invoke(function: str, payload: Any = None, *, asynchronous: bool = False, timeout: float = 30.0) -> Any:
-    """Invoke another function of this service and return its result."""
+    """Invoke another function of this service and return its result.
+
+    ``function`` may be the pskit name, the deployed name or a Lambda ARN.
+    """
+    function = logical_name(function)
     override = os.environ.get(_env_key(function))
     if override:
         return _http_post(override, payload, timeout)

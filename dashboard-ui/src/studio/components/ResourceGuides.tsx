@@ -62,10 +62,9 @@ export function ResourceGuides({ open, start, onClose }: { open: boolean; start?
         {index?.available && (
           <div className="guide-nav">
             <select value={current.cloud} aria-label="Cloud" onChange={(e) => setCurrent({ cloud: e.target.value, page: "readme" })}>
-              <option value="index">All clouds</option>
               {index.clouds.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.id === "onprem" ? "On premises" : c.title.replace(/^Adding resources:\s*/i, "").replace(/ resources$/i, "")}
+                  {c.id === "index" ? "General (all clouds, compatibility)" : c.id === "onprem" ? "On premises" : c.title.replace(/^Adding resources:\s*/i, "").replace(/ resources$/i, "")}
                 </option>
               ))}
             </select>
@@ -78,7 +77,7 @@ export function ResourceGuides({ open, start, onClose }: { open: boolean; start?
                     className={p.id === current.page ? "chip chip-accent chip-btn" : "chip chip-btn"}
                     onClick={() => setCurrent({ cloud: cloud.id, page: p.id })}
                   >
-                    {p.id === "readme" ? "Overview" : p.id}
+                    {p.id === "readme" ? "Overview" : p.id === "compatibility" ? "Existing cloud code" : p.id}
                   </button>
                 ))}
               </span>

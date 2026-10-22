@@ -91,9 +91,11 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   resource, `provider.options.env_file` and triggers on the functions you ticked are added to the draft. Each service
   has **Details** (state, health, credentials, container log), **Backup** and **Remove**. See
   [resource-guides/onprem/services.md](resource-guides/onprem/services.md).
-- **Resources → Call from code** (on-prem target): the pskit client for Python and Node.js and the HTTP calls for
-  every resource, with a live check that this machine reaches the host and what to do if not
-  ([client.md](client.md)). *On-prem services → Details* warns when a service's port is unreachable from here.
+- **Resources → How to use**, section 7 *Call it from code* (on-prem target): complete Python and Node.js programs
+  for that resource with the pskit client (add data, page through it, consume with ack / nack, upload / download /
+  list files, publish), the same over HTTP, the service's own library, and what to do if it times out, with a live
+  check that this machine reaches the host ([client.md](client.md)). *On-prem services → Details* warns when a
+  service's port is unreachable from here.
 - **On-prem services**: the create form has a *Security* box (user, password with *Generate*, listen on 127.0.0.1 or
   the network); each service has **How to use** (connect from any program: Python / Node.js clients, terminal,
   security). **Resources → Data** pages through what an on-prem queue, topic or bucket holds, with previews.
@@ -103,6 +105,13 @@ The **Test** page (or **Test** on a function row) sends events to a function:
 - **Resources → Test a resource** shows *Use it in a handler* (Python / Node.js code and the library to add) and
   **Test connection** for every resource. **Delete** on a resource asks whether to keep or delete its data (one-click
   services: stop or delete the container; built-in on-prem resources: clear them on the host).
+- **On-prem services**: one-click Dragonfly, KeyDB, Apache Kafka, LavinMQ, Azurite, LocalStack, fake-gcs-server and
+  RustFS next to the earlier services; *Also start the web UI* in the create form and *Details > Add / Remove web UI*
+  (Adminer, Redis Commander, Kafka UI, Mongo Express). Every guide has a **Web UI** section with the URL, login and
+  tunnel command.
+- **Resources → Guides → General → Existing cloud code**: what works when you bring Lambda ARNs, boto3 Lambda / SQS
+  code or S3 / Azure / GCS SDK code, on every provider ([compatibility](resource-guides/compatibility.md)). On-prem
+  queue guides show the boto3 SQS code against the host.
 - **Resources → Guides** (and the *How to set up* links in the resource form) shows the step-by-step
   [resource guides](resource-guides/README.md) for every cloud inside the studio.
 - **Resources → In the cloud** lists the buckets, queues and topics pskit created for the provider and stage in the top

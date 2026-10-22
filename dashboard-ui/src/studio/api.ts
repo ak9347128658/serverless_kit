@@ -194,6 +194,8 @@ export const api = {
   onpremCreate: (body: JsonObject) => request<{ job_id: string }>("POST", "/api/onprem-services", body),
   onpremStatus: (key: string, reveal = false) =>
     request<OnPremService>("GET", `/api/onprem-services/${encodeURIComponent(key)}`, undefined, { query: { reveal: reveal ? "1" : undefined } }),
+  onpremGui: (key: string, port?: number) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui`, { port }),
+  onpremGuiRemove: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui-remove`, {}),
   onpremLogs: (key: string) => request<{ text: string }>("GET", `/api/onprem-services/${encodeURIComponent(key)}/logs`),
   onpremBackup: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/backup`, {}),
   onpremRemove: (key: string, deleteData: boolean) =>
@@ -217,10 +219,6 @@ export const api = {
   onpremUsage: (key: string, reveal = false) =>
     request<{ key: string; markdown: string }>("GET", `/api/onprem-services/${encodeURIComponent(key)}/usage`, undefined, {
       query: { reveal: reveal ? "1" : undefined },
-    }),
-  clientInfo: (provider: string, stage: string) =>
-    request<{ endpoint: string; reachable: boolean | null; problem: string | null; markdown: string }>("GET", "/api/client-info", undefined, {
-      query: { provider, stage },
     }),
   guides: () => request<GuideIndex>("GET", "/api/resource-guides"),
   guide: (cloud: string, page: string) =>

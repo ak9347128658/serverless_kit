@@ -104,7 +104,7 @@ def test_roles_and_services_produce_the_right_resources(tmp_path):
     assert kafka["resource"]["options"]["class"] == "pskit_drivers.kafka_queue:KafkaQueue"
     assert kafka["resource"]["options"]["bootstrap_servers"] == "127.0.0.1:19092"
     run = [c for c in fake.calls if c[:2] == ["docker", "run"]][-1]
-    assert "internal://127.0.0.1:9093,external://127.0.0.1:19092" in run
+    assert "internal://127.0.0.1:9093,external://127.0.0.1:19092,docker://pskit-shop-events:9095" in run
     assert any("rpk topic create events" in " ".join(c) for c in fake.calls)
     nats = _create(tmp_path, fake, key="tasks", service="nats")
     assert nats["resource"]["options"]["url_env"] == "PSKIT_TASKS_URL"
@@ -280,3 +280,100 @@ def test_service_usage_guides(tmp_path):
     assert password not in hidden and password in shown
     assert "without authentication" not in svc.service_usage(tmp_path, "db")["markdown"]
     assert "No authentication" in svc.service_usage(tmp_path, "events")["markdown"]
+
+
+def test_new_services_map_to_existing_drivers(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc, "_http_answers", lambda _url: True)   # no real containers here
+    fake = FakeDocker()
+    expect = {
+        ("df", "dragonfly", "stream"): "redis_stream",
+        ("kdb", "keydb", "queue"): "redis",
+        ("ak", "apache-kafka", "queue"): "custom",
+        ("lav", "lavinmq", "queue"): "custom",
+        ("azq", "azurite", "queue"): "azure_queue",
+        ("azb", "azurite", "storage"): "azure_blob",
+        ("lsq", "localstack", "queue"): "sqs",
+        ("lsb", "localstack", "storage"): "s3",
+        ("gcs", "fake-gcs", "storage"): "gcs",
+        ("rfs", "rustfs", "storage"): "s3",
+    }
+    for (key, service, role), driver in expect.items():
+        body = {"key": key, "service": service, "role": role}
+        if service == "azurite":
+            body["user"] = "acct1"
+        entry = _create(tmp_path, fake, **body)
+        assert entry["resource"]["options"]["driver"] == driver, key
+    env = parse_env_text((tmp_path / ".env.onprem").read_text("utf-8"))
+    assert "AccountName=acct1;" in env["PSKIT_AZQ_CONNECTION_STRING"]
+    assert svc.load_state(tmp_path)["services"]["azb"]["resource"]["options"]["create_bucket"] is True
+    assert (tmp_path / "pskit_drivers" / "rabbitmq_queue.py").is_file()   # LavinMQ speaks AMQP
+    with pytest.raises(svc.ServiceError, match="password only"):
+        svc.check_request({"key": "x", "service": "dragonfly", "user": "bob"}, tmp_path, RAW)
+    with pytest.raises(svc.ServiceError, match="Azurite account"):
+        svc.check_request({"key": "x", "service": "azurite", "user": "Bad_Name"}, tmp_path, RAW)
+
+
+def test_extra_ports_move_with_the_main_port(tmp_path):
+    fake = FakeDocker()
+    entry = _create(tmp_path, fake, key="mq", service="rabbitmq", port=5682)
+    run = [c for c in fake.calls if c[:2] == ["docker", "run"]][-1]
+    assert "127.0.0.1:5682:5672" in run and "127.0.0.1:15682:15672" in run
+    assert entry["resource"]["connection"]["management_url"] == "http://127.0.0.1:15682"
+    assert [g["port"] for g in svc.gui_links(entry)] == [15682]
+    assert svc.host_port({"service": "azurite", "port": 10020}, 10001) == 10021
+
+
+def test_companion_web_ui(tmp_path):
+    fake = FakeDocker()
+    _create(tmp_path, fake, key="db", service="postgres", gui=True)
+    entry = svc.load_state(tmp_path)["services"]["db"]
+    assert entry["gui"]["name"] == "adminer" and entry["gui"]["port"] == 8089
+    ui = next(c for c in fake.calls if c[:2] == ["docker", "run"] and "adminer:4.8.1" in c)
+    assert "--network" in ui and "ADMINER_DEFAULT_SERVER=pskit-shop-db:5432" in ui
+    assert ["docker", "network", "connect", "pskit-shop-db-net", "pskit-shop-db"] in fake.calls
+    links = svc.gui_links(entry)
+    assert links[0]["kind"] == "companion" and links[0]["url"] == "http://127.0.0.1:8089/"
+    assert "## Web UI" in svc.service_usage(tmp_path, "db", probe=False)["markdown"]
+
+    _create(tmp_path, fake, key="cache", service="redis", role="cache")
+    gui = svc.add_gui(tmp_path, "cache", lambda _l: None, run=fake)
+    run = next(c for c in fake.calls if c[:2] == ["docker", "run"] and "rediscommander/redis-commander:latest" in c)
+    service_pw = parse_env_text((tmp_path / ".env.onprem").read_text("utf-8"))["PSKIT_CACHE_PASSWORD"]
+    assert f"REDIS_PASSWORD={service_pw}" in run
+    assert gui["password_env"] == "PSKIT_CACHE_GUI_PASSWORD" and "PSKIT_CACHE_GUI_PASSWORD" in gui["login"]
+    svc.add_gui(tmp_path, "cache", lambda _l: None, run=fake)            # again: still the service password
+    run = [c for c in fake.calls if c[:2] == ["docker", "run"] and "rediscommander/redis-commander:latest" in c][-1]
+    assert f"REDIS_PASSWORD={service_pw}" in run
+    svc.remove_gui(tmp_path, "cache", lambda _l: None, run=fake)
+    assert "gui" not in svc.load_state(tmp_path)["services"]["cache"]
+    assert "PSKIT_CACHE_GUI_PASSWORD" not in (tmp_path / ".env.onprem").read_text("utf-8")
+    with pytest.raises(svc.ServiceError, match="built-in web UI"):
+        _create(tmp_path, fake, key="mq", service="rabbitmq")
+        svc.add_gui(tmp_path, "mq", lambda _l: None, run=fake)
+
+
+def test_ensured_drivers_create_once_and_after_a_restart():
+    from py_serverless_kit.runtime.drivers import Ensured
+
+    calls = []
+
+    class Inner:
+        def __init__(self):
+            self.lost = False
+
+        def put(self, key, data):
+            if self.lost:
+                self.lost = False
+                raise RuntimeError("s3: request failed (404): NoSuchBucket")
+            calls.append(("put", key))
+
+    inner = Inner()
+    wrapped = Ensured(inner, lambda: calls.append("create") or 200, "bucket b")
+    wrapped.put("a", b"1")
+    wrapped.put("b", b"2")
+    inner.lost = True                                  # the emulator restarted without its bucket
+    wrapped.put("c", b"3")
+    assert calls == ["create", ("put", "a"), ("put", "b"), "create", ("put", "c")]
+    assert Ensured(inner, lambda: 409, "x")._ensure() is None   # already exists is fine
+    with pytest.raises(RuntimeError, match="could not create"):
+        Ensured(inner, lambda: 403, "x")._ensure()

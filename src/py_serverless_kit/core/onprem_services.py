@@ -19,6 +19,7 @@ What was created lives in ``.pskit/onprem-services.json`` (with the credentials,
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import re
@@ -64,10 +65,12 @@ def _svc(
     backup_ext: str = "",
     notes: str = "",
     run_args: Sequence[str] = (),
-    init: str = "",
+    init: Any = "",
+    gui: Sequence[Dict[str, Any]] = (),
 ) -> Dict[str, Any]:
     return {
         "init": init,
+        "gui": [dict(g) for g in gui],
         "label": label,
         "kind": "service",
         "image": image,
@@ -99,8 +102,8 @@ def _redis_start(binary: str, var: str) -> str:
 
 
 # Services that run without authentication in this setup (keep them on 127.0.0.1 or a private network).
-NO_AUTH = ("elasticmq", "kafka", "memcached", "mailpit")
-DEFAULT_USER = {"redis": "default", "valkey": "default"}
+NO_AUTH = ("elasticmq", "kafka", "apache-kafka", "memcached", "mailpit", "localstack", "fake-gcs")
+DEFAULT_USER = {"redis": "default", "valkey": "default", "keydb": "default", "dragonfly": "default"}
 _PASSWORD_OK = re.compile(r"^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$")
 _LOGIN_OK = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,63}$")
 
@@ -248,9 +251,9 @@ SERVICES: Dict[str, Dict[str, Any]] = {
             "--memory",
             "1G",
             "--kafka-addr",
-            "internal://0.0.0.0:9093,external://0.0.0.0:9092",
+            "internal://0.0.0.0:9093,external://0.0.0.0:9092,docker://0.0.0.0:9095",
             "--advertise-kafka-addr",
-            "internal://127.0.0.1:9093,external://{address}:{port}",
+            "internal://127.0.0.1:9093,external://{address}:{port},docker://{container}:9095",
         ),
         health="rpk cluster health -X brokers=127.0.0.1:9093 | grep -Eq 'Healthy:[[:space:]]+true'",
         init="rpk topic create {name} -X brokers=127.0.0.1:9093 || true",
@@ -274,6 +277,139 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         notes="A JetStream stream with a durable pull consumer, through a driver class pskit adds to your app "
         "(needs nats-py). Monitoring on port 8222.",
     ),
+    "dragonfly": _svc(
+        "Dragonfly (Redis-compatible)",
+        "docker.dragonflydb.io/dragonflydb/dragonfly:v1.25.1",
+        6379,
+        ("queue", "stream", "cache"),
+        data="/data",
+        env={"DFLY_requirepass": "{password}"},
+        health='redis-cli -a "$DFLY_requirepass" --no-auth-warning ping | grep -q PONG',
+        backup='redis-cli -a "$DFLY_requirepass" --no-auth-warning SAVE >/dev/null && tar czf - -C /data .',
+        backup_ext="tar.gz",
+        notes="A faster Redis-compatible store: the same redis / redis_stream drivers and clients. Password only "
+        "(user default).",
+    ),
+    "keydb": _svc(
+        "KeyDB (Redis-compatible)",
+        "eqalpha/keydb:latest",
+        6379,
+        ("queue", "stream", "cache"),
+        data="/data",
+        env={"KEYDB_USER": "{user}", "KEYDB_PASSWORD": "{password}"},
+        command=("sh", "-c", _redis_start("keydb", "KEYDB")),
+        health='keydb-cli --user "$KEYDB_USER" -a "$KEYDB_PASSWORD" --no-auth-warning ping | grep -q PONG',
+        backup='keydb-cli --user "$KEYDB_USER" -a "$KEYDB_PASSWORD" --no-auth-warning SAVE >/dev/null '
+        "&& cat /data/dump.rdb",
+        backup_ext="rdb",
+        notes="Multithreaded Redis fork: the same redis / redis_stream drivers and clients.",
+    ),
+    "apache-kafka": _svc(
+        "Apache Kafka (KRaft, single node)",
+        "apache/kafka:3.8.1",
+        9092,
+        ("queue",),
+        data="/var/lib/kafka/data",
+        env={
+            "KAFKA_NODE_ID": "1",
+            "KAFKA_PROCESS_ROLES": "broker,controller",
+            "KAFKA_LISTENERS": "EXTERNAL://:9092,INTERNAL://:19092,DOCKER://:9095,CONTROLLER://:9093",
+            "KAFKA_ADVERTISED_LISTENERS": "EXTERNAL://{address}:{port},INTERNAL://localhost:19092,DOCKER://{container}:9095",
+            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,DOCKER:PLAINTEXT,CONTROLLER:PLAINTEXT",
+            "KAFKA_CONTROLLER_LISTENER_NAMES": "CONTROLLER",
+            "KAFKA_INTER_BROKER_LISTENER_NAME": "INTERNAL",
+            "KAFKA_CONTROLLER_QUORUM_VOTERS": "1@localhost:9093",
+            "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR": "1",
+            "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR": "1",
+            "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR": "1",
+            "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS": "0",
+            "KAFKA_LOG_DIRS": "/var/lib/kafka/data",
+        },
+        health="/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1",
+        init="/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --create --if-not-exists --topic {name}",
+        backup="tar czf - -C /var/lib/kafka/data .",
+        backup_ext="tar.gz",
+        notes="The Apache Kafka distribution (no ZooKeeper), consumed through the Kafka driver class pskit adds "
+        "(needs kafka-python). No authentication: keep the port on a private network.",
+    ),
+    "lavinmq": _svc(
+        "LavinMQ (AMQP 0.9.1)",
+        "cloudamqp/lavinmq:latest",
+        5672,
+        ("queue",),
+        extra_ports=(15672,),
+        data="/var/lib/lavinmq",
+        env={"LAVINMQ_APP_PASSWORD": "{password}"},
+        health="lavinmqctl status >/dev/null 2>&1",
+        init='lavinmqctl add_user {user} "$LAVINMQ_APP_PASSWORD" && lavinmqctl set_user_tags {user} administrator '
+        '&& lavinmqctl set_permissions -p / {user} ".*" ".*" ".*" && (lavinmqctl delete_user guest || true)',
+        backup="lavinmqctl definitions export /tmp/defs.json >/dev/null 2>&1 && cat /tmp/defs.json",
+        backup_ext="definitions.json",
+        notes="A light, fast AMQP broker that speaks RabbitMQ's protocol: the RabbitMQ driver class and clients work "
+        "unchanged. Management UI on port 15672.",
+        gui=({"port": 15672, "label": "Management UI", "login": "user"},),
+    ),
+    "azurite": _svc(
+        "Azurite (Azure Blob + Queue emulator)",
+        "mcr.microsoft.com/azure-storage/azurite:3.33.0",
+        10000,
+        ("queue", "storage"),
+        extra_ports=(10001,),
+        data="/data",
+        env={"AZURITE_ACCOUNTS": "{user}:{account_key}"},
+        command=(
+            "azurite", "--blobHost", "0.0.0.0", "--queueHost", "0.0.0.0", "--location", "/data",  # noqa: S104 - inside the container
+            "--skipApiVersionCheck", "--loose",
+        ),
+        backup="tar czf - -C /data .",
+        backup_ext="tar.gz",
+        notes="Azure Storage blobs (port 10000) and queues (10001) with your own account name and key: the "
+        "azure_blob / azure_queue drivers and the Azure SDKs work unchanged. Browse it with Azure Storage Explorer.",
+    ),
+    "localstack": _svc(
+        "LocalStack (SQS + S3 emulator)",
+        "localstack/localstack:3.8",
+        4566,
+        ("queue", "storage"),
+        data="/var/lib/localstack",
+        env={"SERVICES": "sqs,s3", "PERSISTENCE": "1"},
+        health="curl -fs localhost:4566/_localstack/health | grep -q '\"sqs\": \"\\(available\\|running\\)\"'",
+        backup="tar czf - -C /var/lib/localstack .",
+        backup_ext="tar.gz",
+        notes="Amazon SQS and S3 on one port: the sqs / s3 drivers, boto3 and the AWS CLI work with endpoint_url. "
+        "Credentials are not checked (test / test). For development and tests.",
+        gui=({"port": 4566, "path": "/_localstack/health", "label": "Status (JSON)", "login": "none"},),
+    ),
+    "fake-gcs": _svc(
+        "fake-gcs-server (Cloud Storage emulator)",
+        "fsouza/fake-gcs-server:1.52",
+        4443,
+        ("storage",),
+        data="/data",
+        command=(
+            "-scheme", "http", "-port", "4443", "-external-url", "http://{address}:{port}",
+            "-backend", "filesystem", "-filesystem-root", "/data",
+        ),
+        backup="",
+        notes="Google Cloud Storage JSON API: the gcs driver (emulator mode) and the google-cloud-storage library work "
+        "with its endpoint. No authentication. For development and tests.",
+    ),
+    "rustfs": _svc(
+        "RustFS (S3-compatible)",
+        "rustfs/rustfs:latest",
+        9000,
+        ("storage",),
+        extra_ports=(9001,),
+        data="/data",
+        env={
+            "RUSTFS_ACCESS_KEY": "{user}",
+            "RUSTFS_SECRET_KEY": "{password}",
+            "RUSTFS_CONSOLE_ENABLE": "true",
+        },
+        notes="An S3-compatible object store with a web console (port 9001), an alternative to MinIO: the s3 driver, "
+        "boto3 and the AWS CLI work with its endpoint.",
+        gui=({"port": 9001, "label": "Console", "login": "user"},),
+    ),
     "memcached": _svc("Memcached", "memcached:1.6-alpine", 11211, ("cache",), notes="In-memory cache; nothing to back up."),
     "mailpit": _svc(
         "Mailpit (SMTP)",
@@ -283,6 +419,78 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         extra_ports=(8025,),
         notes="An SMTP server that keeps every mail for inspection (web UI on port 8025). For development and tests.",
     ),
+}
+
+for _name, _path in (("azurite", "/"), ("rustfs", "/"), ("fake-gcs", "/storage/v1/b"), ("elasticmq", "/"),
+                     ("mailpit", "/")):
+    SERVICES[_name]["ready_path"] = _path
+
+SERVICES["rabbitmq"]["gui"] = [{"port": 15672, "label": "Management UI", "login": "user"}]
+SERVICES["elasticmq"]["gui"] = [{"port": 9325, "label": "Queue browser", "login": "none"}]
+SERVICES["minio"]["gui"] = [{"port": 9001, "label": "Console", "login": "user"}]
+SERVICES["nats"]["gui"] = [{"port": 8222, "label": "Monitoring (JSON)", "login": "none"}]
+SERVICES["mailpit"]["gui"] = [{"port": 8025, "label": "Mailbox", "login": "none"}]
+
+# Web UIs started next to a service that has none, on a private Docker network with it.
+# `{target}` / `{target_port}` are the service container's name and port on that network.
+COMPANIONS: Dict[str, Dict[str, Any]] = {
+    "adminer": {
+        "label": "Adminer (database UI)",
+        "image": "adminer:4.8.1",
+        "port": 8080,
+        "default_port": 8089,
+        "for": ("postgres", "mysql", "mariadb"),
+        "env": {"ADMINER_DEFAULT_SERVER": "{target}:{target_port}"},
+        "login": "the database user and password (server is filled in)",
+    },
+    "redis-commander": {
+        "label": "Redis Commander",
+        "image": "rediscommander/redis-commander:latest",
+        "port": 8081,
+        "default_port": 8082,
+        "for": ("redis", "valkey", "keydb", "dragonfly"),
+        "env": {
+            "REDIS_HOST": "{target}",
+            "REDIS_PORT": "{target_port}",
+            "REDIS_USERNAME": "{user}",
+            "REDIS_PASSWORD": "{password}",
+            "REDIS_LABEL": "{name}",
+            "HTTP_USER": "admin",
+            "HTTP_PASSWORD": "{gui_password}",
+        },
+        "login": "user admin, password in the env file",
+        "password_login": True,
+    },
+    "kafka-ui": {
+        "label": "Kafka UI",
+        "image": "provectuslabs/kafka-ui:v0.7.2",
+        "port": 8080,
+        "default_port": 8088,
+        "for": ("kafka", "apache-kafka"),
+        "env": {
+            "KAFKA_CLUSTERS_0_NAME": "{name}",
+            "KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS": "{target}:9095",
+            "AUTH_TYPE": "LOGIN_FORM",
+            "SPRING_SECURITY_USER_NAME": "admin",
+            "SPRING_SECURITY_USER_PASSWORD": "{gui_password}",
+        },
+        "login": "user admin, password in the env file (sign-in page /auth)",
+        "password_login": True,
+    },
+    "mongo-express": {
+        "label": "Mongo Express",
+        "image": "mongo-express:1.0.2",
+        "port": 8081,
+        "default_port": 8081,
+        "for": ("mongodb",),
+        "env": {
+            "ME_CONFIG_MONGODB_URL": "mongodb://{user}:{password}@{target}:{target_port}/?authSource=admin",
+            "ME_CONFIG_BASICAUTH": "true",
+            "ME_CONFIG_BASICAUTH_USERNAME": "{user}",
+            "ME_CONFIG_BASICAUTH_PASSWORD": "{password}",
+        },
+        "login": "the MongoDB user and password",
+    },
 }
 
 RUNTIMES: Dict[str, Dict[str, Any]] = {
@@ -341,6 +549,8 @@ def catalog() -> List[Dict[str, Any]]:
                 "backup": bool(svc["backup"]),
                 "persistent": bool(svc["data"]),
                 "auth": name not in NO_AUTH,
+                "gui": [g["label"] for g in svc["gui"]],
+                "companion": next((c["label"] for c in COMPANIONS.values() if name in c["for"]), None),
                 "default_user": DEFAULT_USER.get(name, "pskit"),
                 "notes": svc["notes"],
             }
@@ -620,6 +830,10 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
         raise ServiceError("user must be 3-64 characters: a letter, then letters, digits, _ . or -")
     if password and not _PASSWORD_OK.match(password):
         raise ServiceError("password must be 8-128 characters of letters, digits and !#%*+,.:=?@^_~-")
+    if service == "dragonfly" and user not in ("", "default"):
+        raise ServiceError("Dragonfly has a password only; leave user empty (default)")
+    if service == "azurite" and user and not re.match(r"^[a-z0-9]{3,24}$", user):
+        raise ServiceError("the Azurite account name must be 3-24 lowercase letters and digits")
     if service == "mongodb" and user == "admin":
         raise ServiceError("pick another user than admin for MongoDB")
     project = str((raw or {}).get("service") or "")
@@ -640,6 +854,18 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
         "container": _container_name(project, key),
         "volume": _container_name(project, key) + "-data" if spec["data"] else "",
     }
+
+
+def host_port(item: Dict[str, Any], container_port: int) -> int:
+    """The host port of a container port: extra ports (consoles, Azurite queues) move with the main port,
+    so two instances of one service on a server don't collide."""
+    spec = SERVICES.get(str(item.get("service"))) or {}
+    main = int(item.get("port") or spec.get("port") or 0)
+    if container_port == spec.get("port"):
+        return main
+    if container_port in (spec.get("extra_ports") or []):
+        return container_port + (main - int(spec["port"]))
+    return container_port
 
 
 def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dict[str, str], List[str]]:
@@ -676,7 +902,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
             "url_env": f"{prefix}_URL",
             "queue": key,
         }
-        res["connection"] = {"management_url": f"http://{addr}:15672", "user": user}
+        res["connection"] = {"management_url": f"http://{addr}:{host_port(req, 15672)}", "user": user}
         notes.append("added pskit_drivers/rabbitmq_queue.py to your code and pika to requirements.txt")
     elif service == "kafka":
         project = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("project") or "pskit"))
@@ -699,7 +925,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
             "subject": f"{key}.jobs",
             "durable": "pskit",
         }
-        res["connection"] = {"monitor_url": f"http://{addr}:8222"}
+        res["connection"] = {"monitor_url": f"http://{addr}:{host_port(req, 8222)}"}
         notes.append("added pskit_drivers/nats_queue.py to your code and nats-py to requirements.txt")
     elif service == "elasticmq":
         res["options"] = {
@@ -713,7 +939,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
             # ElasticMQ forgets queues on restart; the driver recreates this one when it is missing.
             "create_queue": True,
         }
-        res["connection"] = {"ui_url": f"http://{addr}:9325"}
+        res["connection"] = {"ui_url": f"http://{addr}:{host_port(req, 9325)}"}
     elif service in ("postgres", "mysql", "mariadb"):
         scheme = "postgresql" if service == "postgres" else "mysql"
         env[f"{prefix}_URL"] = f"{scheme}://{safe_user}:{safe_pw}@{addr}:{port}/{database}"
@@ -749,11 +975,103 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
             "access_key_env": f"{prefix}_ACCESS_KEY",
             "secret_key_env": f"{prefix}_SECRET_KEY",
         }
-        res["connection"] = {"console_url": f"http://{addr}:9001"}
+        res["connection"] = {"console_url": f"http://{addr}:{host_port(req, 9001)}"}
+    elif service in ("dragonfly", "keydb"):
+        login = "" if user == "default" else safe_user
+        env[f"{prefix}_URL"] = f"redis://{login}:{safe_pw}@{addr}:{port}/0"
+        env[f"{prefix}_PASSWORD"] = password
+        if role in ("queue", "stream"):
+            res["options"] = {"driver": "redis" if role == "queue" else "redis_stream", "url_env": f"{prefix}_URL", "key": key}
+        else:
+            res["connection"] = {"host": addr, "port": port, "url_env": f"{prefix}_URL", "password_env": f"{prefix}_PASSWORD"}
+    elif service == "apache-kafka":
+        project = re.sub(r"[^A-Za-z0-9_.-]", "-", str(req.get("project") or "pskit"))
+        res["options"] = {
+            "driver": "custom",
+            "class": "pskit_drivers.kafka_queue:KafkaQueue",
+            "bootstrap_servers": f"{addr}:{port}",
+            "topic": key,
+            "group_id": f"{project}-{key}",
+        }
+        notes.append("added pskit_drivers/kafka_queue.py to your code and kafka-python to requirements.txt")
+    elif service == "lavinmq":
+        env[f"{prefix}_URL"] = f"amqp://{safe_user}:{safe_pw}@{addr}:{port}/%2F"
+        env[f"{prefix}_PASSWORD"] = password
+        res["options"] = {
+            "driver": "custom",
+            "class": "pskit_drivers.rabbitmq_queue:RabbitQueue",
+            "url_env": f"{prefix}_URL",
+            "queue": key,
+        }
+        res["connection"] = {"management_url": f"http://{addr}:{host_port(req, 15672)}", "user": user}
+        notes.append("added pskit_drivers/rabbitmq_queue.py to your code and pika to requirements.txt")
+    elif service == "azurite":
+        account_key = base64.b64encode(password.encode("utf-8")).decode("ascii")
+        name = _bucket_name(key)
+        env[f"{prefix}_CONNECTION_STRING"] = (
+            f"DefaultEndpointsProtocol=http;AccountName={user};AccountKey={account_key};"
+            f"BlobEndpoint=http://{addr}:{port}/{user};QueueEndpoint=http://{addr}:{host_port(req, 10001)}/{user};"
+        )
+        if name != key:
+            res["name"] = name
+        if role == "queue":
+            res["options"] = {"driver": "azure_queue", "connection_string_env": f"{prefix}_CONNECTION_STRING",
+                              "queue": name, "create_queue": True}
+        else:
+            res["options"] = {"driver": "azure_blob", "connection_string_env": f"{prefix}_CONNECTION_STRING",
+                              "container": name, "create_bucket": True}
+        res["connection"] = {"account": user, "blob_endpoint": f"http://{addr}:{port}/{user}",
+                             "queue_endpoint": f"http://{addr}:{host_port(req, 10001)}/{user}"}
+    elif service == "localstack":
+        if role == "queue":
+            res["options"] = {
+                "driver": "sqs",
+                "queue_url": f"http://{addr}:{port}/000000000000/{key}",
+                "endpoint": f"http://{addr}:{port}",
+                "region": "us-east-1",
+                "access_key": "test",
+                "secret_key": "test",
+                "create_queue": True,
+            }
+        else:
+            bucket = _bucket_name(key)
+            if bucket != key:
+                res["name"] = bucket
+            res["options"] = {
+                "driver": "s3",
+                "endpoint": f"http://{addr}:{port}",
+                "bucket": bucket,
+                "access_key": "test",
+                "secret_key": "test",
+                "path_style": True,
+                "create_bucket": True,
+            }
+    elif service == "fake-gcs":
+        bucket = _bucket_name(key)
+        if bucket != key:
+            res["name"] = bucket
+        res["options"] = {"driver": "gcs", "endpoint": f"http://{addr}:{port}", "emulator": True, "bucket": bucket,
+                          "project": "pskit", "create_bucket": True}
+    elif service == "rustfs":
+        bucket = _bucket_name(key)
+        env[f"{prefix}_ACCESS_KEY"] = user
+        env[f"{prefix}_SECRET_KEY"] = password
+        if bucket != key:
+            res["name"] = bucket
+        res["options"] = {
+            "driver": "s3",
+            "endpoint": f"http://{addr}:{port}",
+            "bucket": bucket,
+            "access_key_env": f"{prefix}_ACCESS_KEY",
+            "secret_key_env": f"{prefix}_SECRET_KEY",
+            "path_style": True,
+            "create_bucket": True,
+        }
+        res["connection"] = {"console_url": f"http://{addr}:{host_port(req, 9001)}"}
     elif service == "memcached":
         res["connection"] = {"host": addr, "port": port}
     elif service == "mailpit":
-        res["connection"] = {"smtp_host": addr, "smtp_port": port, "web_url": f"http://{addr}:8025"}
+        res["connection"] = {"smtp_host": addr, "smtp_port": port, "web_url": f"http://{addr}:{host_port(req, 8025)}"}
     return res, env, notes
 
 
@@ -772,6 +1090,8 @@ def _values(req: Dict[str, Any], password: str = "") -> Dict[str, str]:
         "name": req["key"],
         "address": str(req.get("address") or "127.0.0.1"),
         "port": str(req.get("port") or ""),
+        "container": str(req.get("container") or ""),
+        "account_key": base64.b64encode(password.encode("utf-8")).decode("ascii") if password else "",
     }
 
 
@@ -784,7 +1104,7 @@ def run_args(req: Dict[str, Any], password: str) -> List[str]:
     bind = req["bind"]
     argv += ["-p", f"{bind}:{req['port']}:{spec['port']}"]
     for extra in spec["extra_ports"]:
-        argv += ["-p", f"{bind}:{extra}:{extra}"]
+        argv += ["-p", f"{bind}:{host_port(req, extra)}:{extra}"]
     for name, template in spec["env"].items():
         argv += ["-e", f"{name}={_fill(template, values)}"]
     if spec["data"]:
@@ -831,8 +1151,9 @@ def create(
         sh(docker_argv(target, ["volume", "create", req["volume"]]), show=False)
     sh(docker_argv(target, run_args(req, password)))
     _wait_ready(req, spec, target, sh, wait_seconds, emit)
-    if spec["init"]:
-        sh(docker_argv(target, ["exec", req["container"], "sh", "-c", _fill(spec["init"], _values(req))]))
+    init = spec["init"].get(req["role"], "") if isinstance(spec["init"], dict) else spec["init"]
+    if init:
+        sh(docker_argv(target, ["exec", req["container"], "sh", "-c", _fill(init, _values(req, password))]))
     if req["service"] == "elasticmq":
         _elasticmq_queue(req, emit, sh)
     resource, env_values, notes = _connection(req, password)
@@ -869,6 +1190,8 @@ def create(
     for note in notes:
         emit(note)
     emit(f"{spec['label']} is ready at {req['address']}:{req['port']}")
+    if body.get("gui") and companion_for(req["service"]):
+        entry["gui"] = add_gui(root, req["key"], emit, run=run)
     return entry
 
 
@@ -940,6 +1263,10 @@ def _wait_ready(
                 code, _out = sh.run_fn(docker_argv(target, ["exec", req["container"], "sh", "-c", health]), None)
                 if code == 0:
                     return
+            elif spec.get("ready_path"):
+                # Docker's port proxy accepts TCP before the app listens: wait for an HTTP answer.
+                if _http_answers(f"http://{req['address']}:{req['port']}{spec['ready_path']}"):
+                    return
             elif _tcp_open(req["address"], req["port"]):
                 return
             elif target.get("method") == "ssh" and time.monotonic() - started > 10:
@@ -949,6 +1276,20 @@ def _wait_ready(
         if time.monotonic() > deadline:
             raise ServiceError(f"{spec['label']} did not become ready within {int(timeout)} s")
         time.sleep(2)
+
+
+def _http_answers(url: str) -> bool:
+    """True once the URL gives any HTTP response (403 / 400 included)."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=3):  # noqa: S310 - the service just started
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:  # noqa: BLE001 - not listening yet / connection dropped
+        return False
 
 
 def _tcp_open(host: str, port: int) -> bool:
@@ -991,7 +1332,9 @@ def _elasticmq_queue(req: Dict[str, Any], emit: Emit, sh: Optional[_Runner] = No
 # service -> (module written to <source>/pskit_drivers/, requirement added to requirements.txt)
 DRIVER_TEMPLATES = {
     "rabbitmq": ("rabbitmq_queue", "pika>=1.3"),
+    "lavinmq": ("rabbitmq_queue", "pika>=1.3"),
     "kafka": ("kafka_queue", "kafka-python>=2.0.3"),
+    "apache-kafka": ("kafka_queue", "kafka-python>=2.0.3"),
     "nats": ("nats_queue", "nats-py>=2.6"),
 }
 
@@ -1060,6 +1403,8 @@ def status(root: Path, key: str, *, run: Optional[RunFn] = None, reveal: bool = 
     parts += [""] * (4 - len(parts))
     out.update({"state": parts[0], "health": parts[1] or None, "started_at": parts[2], "running_image": parts[3]})
     out["reachable_from_here"] = reachable(str(entry.get("address")), int(entry.get("port") or 0))
+    out["gui"] = gui_links(entry)
+    out["companion"] = companion_for(str(entry.get("service")))
     spec = SERVICES.get(entry["service"]) or {}
     if parts[0] == "running" and spec.get("health"):
         health = _fill(spec["health"], _values({**entry, "key": key}))
@@ -1117,6 +1462,10 @@ def remove(
     entry = _entry(root, key)
     sh = _Runner(emit, run)
     if entry.get("kind") != "runtime":
+        gui = entry.get("gui")
+        if isinstance(gui, dict):
+            sh(docker_argv(entry["target"], ["rm", "-f", gui["container"]]), check=False)
+            sh(docker_argv(entry["target"], ["network", "rm", _network(entry)]), check=False, show=False)
         sh(docker_argv(entry["target"], ["rm", "-f", entry["container"]]), check=False)
         if delete_data and entry.get("volume"):
             sh(docker_argv(entry["target"], ["volume", "rm", entry["volume"]]), check=False)
@@ -1261,7 +1610,7 @@ def service_usage(root: Path, key: str, *, reveal: bool = False, probe: bool = T
     for name, value in sorted((shown.get("env") or {}).items()):
         rows.append((f"`{name}`", f"`{value}`"))
     for extra in spec["extra_ports"]:
-        rows.append((f"Port {extra}", f"http://{entry.get('address')}:{extra}"))
+        rows.append((f"Port {host_port(entry, extra)}", f"http://{entry.get('address')}:{host_port(entry, extra)}"))
     md.append("| | |\n|---|---|\n" + "".join(f"| {a} | {b} |\n" for a, b in rows))
     if probe and not reachable(str(entry.get("address")), int(entry.get("port") or 0)):
         md.append(
@@ -1300,6 +1649,7 @@ def service_usage(root: Path, key: str, *, reveal: bool = False, probe: bool = T
         f"on `{key}`, or run `pskit resources usage {key}`: handler code, triggers and tests. Through the deployed "
         "host, scripts can also publish and browse with plain HTTP (shown there).\n"
     )
+    md.append(gui_markdown(entry, key))
     md.append(
         "## Security\n\n"
         + (f"- Listens on `{entry.get('bind')}`. " + ("Only this machine can connect. " if entry.get("bind") == "127.0.0.1"
@@ -1356,3 +1706,145 @@ def local_env(entry: Dict[str, Any], local_port: int) -> Dict[str, str]:
     for name, value in (entry.get("env") or {}).items():
         out[name] = str(value).replace(f"@{address}:{port}", f"@127.0.0.1:{local_port}")
     return out
+
+
+# ----------------------------------------------------------------------------- web UIs
+
+
+def companion_for(service: str) -> Optional[str]:
+    return next((name for name, c in COMPANIONS.items() if service in c["for"]), None)
+
+
+def gui_links(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every web UI of a service: built in (RabbitMQ, MinIO, ...) or a companion pskit started."""
+    spec = SERVICES.get(str(entry.get("service"))) or {}
+    address = entry.get("address")
+    user = entry.get("user") or ""
+    out: List[Dict[str, Any]] = []
+    for gui in spec.get("gui") or []:
+        login = f"user `{user}`, password in the env file" if gui.get("login") == "user" else "no login"
+        port = host_port(entry, int(gui["port"]))
+        out.append({"label": gui["label"], "url": f"http://{address}:{port}{gui.get('path', '/')}",
+                    "port": port, "login": login, "kind": "built-in"})
+    companion = entry.get("gui")
+    if isinstance(companion, dict):
+        out.append({"label": companion["label"], "url": f"http://{address}:{companion['port']}/",
+                    "port": companion["port"], "login": companion["login"], "kind": "companion",
+                    "container": companion["container"]})
+    return out
+
+
+def _network(entry: Dict[str, Any]) -> str:
+    return f"{entry['container']}-net"
+
+
+def add_gui(root: Path, key: str, emit: Emit, *, port: Optional[int] = None, run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Start the companion web UI of service ``key`` (Adminer, Redis Insight, Kafka UI, Mongo Express)."""
+    entry = _entry(root, key)
+    name = companion_for(str(entry.get("service")))
+    if name is None:
+        builtin = [g["label"] for g in (SERVICES.get(str(entry.get("service"))) or {}).get("gui") or []]
+        raise ServiceError(
+            f"{entry.get('service')} has " + (f"a built-in web UI ({', '.join(builtin)})" if builtin else "no web UI pskit can add")
+        )
+    comp = COMPANIONS[name]
+    host_port = int(port or comp["default_port"])
+    if not 1 <= host_port <= 65535:
+        raise ServiceError("port must be between 1 and 65535")
+    sh = _Runner(emit, run)
+    target = entry["target"]
+    container = f"{entry['container']}-ui"
+    network = _network(entry)
+    spec = SERVICES[entry["service"]]
+    env_values = dict(entry.get("env") or {})
+    password = next(
+        (v for k, v in env_values.items() if k.endswith(("_PASSWORD", "_SECRET_KEY")) and not k.endswith("_GUI_PASSWORD")),
+        "",
+    )
+    gui_password = secrets.token_urlsafe(12) if "{gui_password}" in json.dumps(comp["env"]) else ""
+    values = {
+        "target": entry["container"],
+        "target_port": str(spec["port"]),
+        "user": str(entry.get("user") or ""),
+        "password": password,
+        "name": key,
+        "gui_password": gui_password,
+    }
+    sh(docker_argv(target, ["network", "create", network]), check=False, show=False)
+    sh(docker_argv(target, ["network", "connect", network, entry["container"]]), check=False, show=False)
+    sh(docker_argv(target, ["rm", "-f", container]), check=False, show=False)
+    sh(docker_argv(target, ["pull", comp["image"]]))
+    argv = ["run", "-d", "--name", container, "--restart", "unless-stopped", "--network", network,
+            "--label", f"pskit.gui-for={key}", "-p", f"{entry.get('bind') or '127.0.0.1'}:{host_port}:{comp['port']}"]
+    for env_name, template in comp["env"].items():
+        argv += ["-e", f"{env_name}={_fill(template, values)}"]
+    argv.append(comp["image"])
+    sh(docker_argv(target, argv))
+    gui = {"name": name, "label": comp["label"], "container": container, "image": comp["image"], "port": host_port,
+           "login": _fill(comp["login"], values)}
+    if gui_password:
+        var = _var_prefix(key) + "_GUI_PASSWORD"
+        update_env_file(root / str(entry.get("env_file") or DEFAULT_ENV_FILE), {var: gui_password})
+        gui["password_env"] = var
+        if comp.get("password_login"):
+            gui["login"] = comp["login"].replace("the env file", var)
+        entry.setdefault("env", {})[var] = gui_password
+    entry["gui"] = gui
+    state = load_state(root)
+    state["services"][key] = entry
+    save_state(root, state)
+    emit(f"{comp['label']} is starting at http://{entry.get('address')}:{host_port}/ ({gui['login']})")
+    return gui
+
+
+def remove_gui(root: Path, key: str, emit: Emit, *, run: Optional[RunFn] = None) -> None:
+    entry = _entry(root, key)
+    gui = entry.get("gui")
+    if not isinstance(gui, dict):
+        raise ServiceError(f"{key} has no companion web UI")
+    sh = _Runner(emit, run)
+    sh(docker_argv(entry["target"], ["rm", "-f", gui["container"]]), check=False)
+    sh(docker_argv(entry["target"], ["network", "disconnect", _network(entry), entry["container"]]), check=False, show=False)
+    sh(docker_argv(entry["target"], ["network", "rm", _network(entry)]), check=False, show=False)
+    if gui.get("password_env"):
+        update_env_file(root / str(entry.get("env_file") or DEFAULT_ENV_FILE), {gui["password_env"]: None})
+        (entry.get("env") or {}).pop(gui["password_env"], None)
+    entry.pop("gui", None)
+    state = load_state(root)
+    state["services"][key] = entry
+    save_state(root, state)
+
+
+def gui_markdown(entry: Dict[str, Any], key: str) -> str:
+    """The "Web UI" section of a guide: URLs, logins, tunnel, or how to add one."""
+    links = gui_links(entry)
+    md = ["## Web UI\n"]
+    if links:
+        md.append("| UI | Open | Login |\n|---|---|---|\n" + "".join(
+            f"| {g['label']} ({g['kind']}) | {g['url']} | {g['login']} |\n" for g in links))
+        remote = entry.get("target", {}).get("method") == "ssh"
+        first = links[0]
+        md.append(
+            "The UI listens on the same interface as the service (`" + str(entry.get("bind")) + "`). "
+            + ("When its port is closed in the server's firewall, open it through SSH and browse "
+               f"`http://127.0.0.1:{first['port']}`:\n\n```bash\npskit resources onprem tunnel {key} "
+               f"--remote-port {first['port']}\n```\n" if remote else "Open the link on this machine.\n")
+        )
+    if not isinstance(entry.get("gui"), dict):
+        name = companion_for(str(entry.get("service")))
+        if name:
+            comp = COMPANIONS[name]
+            md.append(
+                f"{'Add' if not links else 'Also available'}: **{comp['label']}**, started next to the service "
+                f"(*On-prem services > Details > Add web UI*, or `pskit resources onprem gui {key}`); "
+                f"login: {comp['login']}.\n"
+            )
+        elif not links:
+            hint = {
+                "azurite": "Use Azure Storage Explorer (desktop): *Attach to a resource > Storage account > Connection "
+                "string* and paste the connection string from the env file.",
+                "fake-gcs": "No web UI; list buckets with `curl http://<address>:<port>/storage/v1/b`.",
+                "memcached": "No web UI; `printf 'stats\\r\\nquit\\r\\n' | nc <address> <port>` shows its counters.",
+            }.get(str(entry.get("service")), "This service has no web UI; use its command-line tools shown above.")
+            md.append(hint + "\n")
+    return "\n".join(md)

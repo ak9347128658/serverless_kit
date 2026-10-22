@@ -644,6 +644,17 @@ class OnPremProvider(Provider):
                 raise ValueError(f"resource {key!r}: `{name}` is reserved and cannot be passed to a custom driver")
         return {"use": "custom", "class": cls, **options}
 
+    def resource_refs(self, ctx: RenderContext, key: str, res: ResourceConfig) -> Dict[str, str]:
+        """Queues get ``URL``: their SQS-compatible address on this host, so ``resource(key).url`` works
+        with boto3 (``endpoint_url`` = ``PSKIT_ENDPOINT``) the same way on AWS and on premises."""
+        if res.type != "queue":
+            return {}
+        options = ctx.config.provider.options
+        endpoint = advertise_host(
+            options, self._deploy(ctx.config), str(options.get("host") or "127.0.0.1"), int(options.get("port") or 8080)
+        )
+        return {"URL": f"{endpoint}/000000000000/{res.native_name(key)}"}
+
     def _resource_spec(self, ctx: RenderContext, spec: Any) -> Dict[str, Any]:
         cfg = ctx.config
         out: Dict[str, Any] = {}
@@ -934,8 +945,9 @@ def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> 
                 "path_style": True if path_style is None else bool(path_style),
             }
             binding.update({k: v for k, v in pick(*_AWS_KEYS).items() if k.endswith("_env")})
+            binding.update(pick("create_bucket"))
             return binding
-        binding = {"use": use, "bucket": bucket, **pick(*_S3_KEYS, *_AWS_KEYS)}
+        binding = {"use": use, "bucket": bucket, **pick(*_S3_KEYS, *_AWS_KEYS, "create_bucket")}
         if provider and use == "s3":
             binding["provider"] = provider
         if value("path_style") is not None:
@@ -964,8 +976,8 @@ def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> 
                 raise ValueError(f"{where}: the {use} driver needs account_key, sas_token or connection_string")
         if use == "azure_queue":
             encoding()
-            return {"use": use, "queue": str(value("queue") or native), **pick(*_AZURE_KEYS, "message_encoding")}
-        return {"use": use, "container": str(value("container") or native), **pick(*_AZURE_KEYS, "prefix")}
+            return {"use": use, "queue": str(value("queue") or native), **pick(*_AZURE_KEYS, "message_encoding", "create_queue")}
+        return {"use": use, "container": str(value("container") or native), **pick(*_AZURE_KEYS, "prefix", "create_bucket")}
 
     if use in ("pubsub", "gcs"):
         command = value("token_command")
@@ -979,7 +991,7 @@ def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> 
                     raise ValueError(f"{where}: pubsub {kind} {name!r} needs `project` (or a projects/... path)")
             binding = {"use": use, "subscription": sub, **pick(*_GCP_KEYS, "topic", "return_immediately")}
             return binding
-        return {"use": use, "bucket": str(value("bucket") or native), **pick(*_GCP_KEYS, "prefix")}
+        return {"use": use, "bucket": str(value("bucket") or native), **pick(*_GCP_KEYS, "prefix", "create_bucket")}
 
     if use == "mns":
         if endpoint is None:

@@ -50,7 +50,6 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const [guide, setGuide] = useState<GuideRef | null>(null);
   const [usage, setUsage] = useState<string | null>(null);
   const [browse, setBrowse] = useState<string | null>(null);
-  const [clientOpen, setClientOpen] = useState(false);
   const { providerName } = useStudio();
   const onpremTarget = (state.target?.provider || providerName) === "onprem";
   const test = (key: string) => {
@@ -187,11 +186,6 @@ export function ResourcesView({ rest }: { rest: string[] }) {
             <button type="button" className="btn" onClick={() => setGuide({ cloud: providerName || "index", page: "readme" })}>
               Guides
             </button>
-            {onpremTarget && (
-              <button type="button" className="btn" onClick={() => setClientOpen(true)} title="Python / Node.js client and HTTP for scripts">
-                Call from code
-              </button>
-            )}
             <a className="btn btn-primary" href={href("resources", "new")}>
               + Add resource
             </a>
@@ -218,7 +212,6 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       )}
       <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
       {browse && <ResourceData resourceKey={browse} onClose={() => setBrowse(null)} />}
-      {clientOpen && <ClientDrawer onClose={() => setClientOpen(false)} />}
       {usage && <UsageDrawer resourceKey={usage} onClose={() => setUsage(null)} onTest={() => { setUsage(null); test(usage); }} />}
     </div>
   );
@@ -459,40 +452,6 @@ function ResourceDrawer({ name: existing, onClose, onGuide }: { name: string | n
           if (item.arn) set("connection", { ...asObject(res.connection), arn: item.arn });
         }}
       />
-    </Drawer>
-  );
-}
-
-/** How scripts outside pskit call the deployed host: pskit client (Python / Node.js) and HTTP. */
-function ClientDrawer({ onClose }: { onClose: () => void }) {
-  const { state, providerName } = useStudio();
-  const target = state.target || { provider: providerName, stage: "dev" };
-  const [doc, setDoc] = useState<{ markdown: string; reachable: boolean | null } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    setError(null);
-    setDoc(null);
-    api.clientInfo(target.provider, target.stage).then(setDoc, (exc: unknown) => setError(errorMessage(exc)));
-  }, [target.provider, target.stage, attempt]);
-  return (
-    <Drawer
-      open
-      title="Call the host from code"
-      onClose={onClose}
-      actions={
-        <button type="button" className="btn" onClick={() => setAttempt((a) => a + 1)}>
-          Check again
-        </button>
-      }
-    >
-      <p className="muted small">
-        Any script, web app or service can use the deployed host. Terminal: <code className="mono">pskit client info -p {target.provider} -s {target.stage}</code>
-      </p>
-      {doc && doc.reachable === false && <div className="form-error">This machine cannot reach the host right now; the guide below says how to fix it.</div>}
-      {error && <div className="form-error">{error}</div>}
-      {!doc && !error && <p className="muted">Checking the host…</p>}
-      {doc && <Markdown text={doc.markdown} />}
     </Drawer>
   );
 }

@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-10-22
+
+### Added
+- **More one-click on-prem services**, each driven end to end through its pskit driver: Dragonfly and KeyDB (Redis-compatible: queue, stream, cache), Apache Kafka (KRaft), LavinMQ (AMQP, RabbitMQ driver class), Azurite (Azure Blob + Queue with your own account and key), LocalStack (SQS + S3), fake-gcs-server (Cloud Storage) and RustFS (S3-compatible with a console).
+- **Web UIs**: built-in UIs (RabbitMQ, LavinMQ, MinIO, RustFS, ElasticMQ, NATS, Mailpit) are listed with URL and login, and pskit can start a companion UI on a private Docker network with the service: Adminer (PostgreSQL / MySQL / MariaDB, server filled in), Redis Commander (Redis family, login), Kafka UI (login), Mongo Express (login). `pskit resources onprem gui KEY [--port] [--remove]`, `create --gui`, studio *Also start the web UI* and *Details > Add / Remove web UI*; every How to use guide has a **Web UI** section with a tunnel command (`tunnel --remote-port`).
+- **Existing cloud code on premises**: the host serves the Lambda Invoke API (`POST /2015-03-31/functions/<name|ARN>/invocations`, RequestResponse / Event / DryRun, `FunctionError` on handler errors) and the SQS API for its queues (send / batch / receive with long polling / delete / visibility / attributes / list / create / purge). boto3 and the AWS SDKs work by changing `endpoint_url`; the `admin_token` doubles as the access key id. On-prem queues expose their SQS-compatible URL as `resource(key).url`.
+- `invoke()` accepts deployed names and Lambda ARNs (with or without an alias) as well as pskit names, on every provider.
+- Drivers: `create_queue` (azure_queue) and `create_bucket` (s3 family, azure_blob, gcs) create the queue or bucket on first use and after an emulator restart.
+- Guides: *General > Existing cloud code* (`docs/resource-guides/compatibility.md`), shown in the studio; on-prem queue guides add an *Existing AWS SDK code* section.
+
+### Fixed
+- Extra ports (consoles, Azurite's queue port) were fixed numbers, so a second instance of a service on one server failed to start; they now move with the main port.
+- Services answering over HTTP are ready only once they answer (Docker's port proxy accepts TCP before the app listens).
+- Built-in queue messages count deliveries (`ApproximateReceiveCount` semantics) for leases and the SQS API.
+
+### Changed
+- Studio: calling the host from code is part of each resource's **How to use** guide (section 7, *Call it from code*) instead of a separate *Call from code* panel. On premises it has complete Python and Node.js programs for that resource with the pskit client (add data, page through it with `peek`, consume with `receive` + `ack` / `nack`, upload / download / list / delete files, publish with attributes, error handling), the host URL, token note and a live reachability check, then HTTP (7.2), the service's own library (7.3) and a timeouts section (7.4). The consume step is commented out when a pskit trigger already consumes the queue or its driver has no leases. `pskit client info` stays for the terminal.
+
 ## [1.3.4] - 2026-10-22
 
 ### Added

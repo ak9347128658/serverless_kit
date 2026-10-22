@@ -314,6 +314,8 @@ export interface OnPremCatalogItem {
   persistent?: boolean;
   auth?: boolean;
   default_user?: string;
+  gui?: string[];
+  companion?: string | null;
   notes: string;
 }
 
@@ -376,6 +378,8 @@ export interface OnPremService {
   error?: string;
   version?: string[];
   reachable_from_here?: boolean;
+  gui?: { label: string; url: string; port: number; login: string; kind: string; container?: string }[] | Record<string, unknown>;
+  companion?: string | null;
 }
 
 export interface OnPremServicesState {

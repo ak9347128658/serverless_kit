@@ -27,6 +27,11 @@ path you already have instead.
   ``.../nack`` (``{"receipts": [...]}``) let a host elsewhere consume a built-in queue
   with at-least-once leases (the ``pskit_host`` driver).
 * ``GET /__pskit/resources`` lists ``resources:`` with their backend and queue depth.
+* AWS-compatible: ``POST /2015-03-31/functions/<name|ARN>/invocations`` is the Lambda Invoke API,
+  and ``POST /`` with ``X-Amz-Target: AmazonSQS.*`` serves SendMessage(Batch), ReceiveMessage,
+  DeleteMessage(Batch), ChangeMessageVisibility, GetQueueUrl, GetQueueAttributes, ListQueues,
+  CreateQueue and PurgeQueue over the host's queues, so boto3 code only changes ``endpoint_url``.
+  With an ``admin_token``, pass it as the AWS access key id.
 
 Queue, storage and topic resources may carry a ``driver`` binding. ``directory``
 moves that queue/bucket to its own path; the others use ``runtime/drivers``.
@@ -169,6 +174,12 @@ def _body_text(message: Any) -> str:
 
 
 _PREVIEW = 4000
+
+
+def _md5(text: str) -> str:
+    import hashlib
+
+    return hashlib.md5(text.encode("utf-8")).hexdigest()  # noqa: S324 - SQS's message checksum, not security
 
 
 def _brief(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -420,6 +431,7 @@ class Broker:
             claimed = []
             for path, msg in chosen:
                 msg["visible_at"] = now + visibility
+                msg["deliveries"] = int(msg.get("deliveries") or 0) + 1
                 _write_json(path, msg)
                 msg["path"] = str(path)
                 claimed.append(msg)
@@ -468,8 +480,8 @@ class Broker:
                     "id": msg.get("id"),
                     "body": msg.get("body"),
                     "attributes": msg.get("attributes") or {},
-                    # Deliveries so far, counting this one (the file stores failures).
-                    "receives": int(msg.get("receives") or 0) + 1,
+                    # Deliveries so far, counting this one (like SQS's ApproximateReceiveCount).
+                    "receives": int(msg.get("deliveries") or int(msg.get("receives") or 0) + 1),
                     "enqueued_at": msg.get("enqueued_at"),
                     "receipt": Path(msg["path"]).name,
                 }
@@ -542,6 +554,24 @@ class Broker:
         keys = sorted(k for k in found if k.startswith(prefix))
         items = [{"key": k, "size": found[k][1], "etag": str(found[k][0])} for k in keys[offset : offset + limit]]
         return {"supported": True, "total": len(keys), "items": items}
+
+    def change_visibility(self, name: str, receipt: str, seconds: float) -> None:
+        with self._lock:
+            path = self._leased_path(name, receipt)
+            current = _read_json(path, None)
+            if isinstance(current, dict):
+                current["visible_at"] = time.time() + max(0.0, seconds)
+                _write_json(path, current)
+
+    def purge_queue(self, name: str) -> int:
+        if name in self._queue_drivers:
+            raise ValueError(f"queue {name} uses a driver; purge it in that service")
+        removed = 0
+        with self._lock:
+            for path in (self.queue_dir(name) / "messages").glob("*.json"):
+                path.unlink()
+                removed += 1
+        return removed
 
     def delete_message(self, name: str, ident: str) -> bool:
         if name in self._queue_drivers:
@@ -1407,6 +1437,12 @@ class Host:
                     url = urlsplit(self.path)
                     if url.path == "/__pskit/health" or url.path == "/__pskit":
                         return self._json(200, host.health())
+                    # AWS-compatible APIs: existing boto3 / AWS SDK code only changes endpoint_url.
+                    if url.path.startswith("/2015-03-31/functions/"):
+                        return self._lambda(url.path)
+                    target = self.headers.get("x-amz-target") or ""
+                    if self.command == "POST" and target.startswith("AmazonSQS."):
+                        return self._sqs(target.split(".", 1)[1])
                     if url.path.startswith("/__pskit/"):
                         if not self._admin_ok():
                             # Drain the body first: closing with unread data resets the connection (Windows).
@@ -1519,6 +1555,144 @@ class Host:
                 payload = json.loads(raw.decode("utf-8") or "null")
                 ids = [host.broker.submit_queue(name, message, attrs) for message, attrs in _messages_of(payload)]
                 return self._json(202, {"queued": ids})
+
+            # ------------------------------------------------------------ AWS-compatible APIs
+            def _aws_ok(self) -> bool:
+                """No token, the pskit header, or the token used as the AWS access key id (SigV4 credential)."""
+                token = str(host.spec.get("admin_token") or "")
+                if not token or self.headers.get("x-pskit-token") == token:
+                    return True
+                return f"Credential={token}/" in (self.headers.get("authorization") or "")
+
+            def _aws_error(self, status: int, code: str, message: str, query_code: str = "") -> None:
+                headers = {"content-type": "application/x-amz-json-1.0", "x-amzn-errortype": code}
+                if query_code:
+                    headers["x-amzn-query-error"] = f"{query_code};Sender"
+                body = {"__type": f"com.amazonaws.sqs#{code}" if query_code else code, "message": message, "Message": message}
+                self._send(status, headers, dumps(body).encode("utf-8"))
+
+            def _lambda(self, path: str) -> None:
+                """``POST /2015-03-31/functions/<name|ARN>/invocations`` (the Lambda Invoke API)."""
+                raw = self._read()
+                parts = path.split("/")
+                if self.command != "POST" or len(parts) != 5 or parts[4] != "invocations":
+                    return self._aws_error(404, "ResourceNotFoundException", "only Invoke is supported")
+                if not self._aws_ok():
+                    return self._aws_error(403, "AccessDeniedException", "use the host's admin_token as aws_access_key_id")
+                name = host.function_for(unquote(parts[3]))
+                if name is None:
+                    return self._aws_error(404, "ResourceNotFoundException", f"Function not found: {unquote(parts[3])}")
+                try:
+                    payload = json.loads(raw.decode("utf-8")) if raw else None
+                except ValueError:
+                    return self._aws_error(400, "InvalidRequestContentException", "the payload must be JSON")
+                if isinstance(payload, dict) and payload.get("__pskit") == "invoke":
+                    payload = payload.get("data")
+                kind = self.headers.get("x-amz-invocation-type") or "RequestResponse"
+                if kind == "DryRun":
+                    return self._send(204, {}, b"")
+                event = Event(type=EventType.INVOKE, data=payload, source="onprem.lambda")
+                if kind == "Event":
+
+                    def run() -> None:
+                        try:
+                            host.invoke(name, event)
+                        except Exception as exc:  # noqa: BLE001 - asynchronous: logged as a host note
+                            host._note(f"async invoke of {name} failed: {exc}")
+
+                    threading.Thread(target=run, name=f"pskit-event-{name}", daemon=True).start()
+                    return self._send(202, {"content-type": "application/json"}, b"")
+                headers = {"content-type": "application/json", "x-amz-executed-version": "$LATEST"}
+                try:
+                    result = host.invoke(name, event)
+                except Exception as exc:  # noqa: BLE001 - Lambda reports handler errors with status 200
+                    error = {"errorMessage": str(exc), "errorType": type(exc).__name__}
+                    return self._send(200, dict(headers, **{"x-amz-function-error": "Unhandled"}), dumps(error).encode())
+                if isinstance(result, Response):
+                    _status, _h, body = result.render()
+                    return self._send(200, headers, body)
+                return self._send(200, headers, dumps(result).encode("utf-8"))
+
+            def _sqs(self, action: str) -> None:
+                """A subset of the SQS JSON protocol over the host's queues (boto3 with endpoint_url)."""
+                raw = self._read()
+                if not self._aws_ok():
+                    return self._aws_error(403, "AccessDenied", "use the host's admin_token as aws_access_key_id")
+                try:
+                    req = json.loads(raw.decode("utf-8") or "{}")
+                except ValueError:
+                    return self._aws_error(400, "InvalidParameterValue", "the body must be JSON", "InvalidParameterValue")
+                base = f"http://{self.headers.get('host') or '127.0.0.1'}/000000000000/"
+                known = host.queue_names()
+                if action == "ListQueues":
+                    prefix = str(req.get("QueueNamePrefix") or "")
+                    return self._json(200, {"QueueUrls": [base + q for q in sorted(known) if q.startswith(prefix)]})
+                name = str(req.get("QueueName") or str(req.get("QueueUrl") or "").rstrip("/").rsplit("/", 1)[-1])
+                if action == "CreateQueue":
+                    return self._json(200, {"QueueUrl": base + name})
+                if name not in known:
+                    return self._aws_error(400, "QueueDoesNotExist", f"The specified queue {name} does not exist.",
+                                           "AWS.SimpleQueueService.NonExistentQueue")
+                broker = host.broker
+                if action == "GetQueueUrl":
+                    return self._json(200, {"QueueUrl": base + name})
+                if action == "GetQueueAttributes":
+                    depth = broker.queue_depth(name)
+                    attrs = {"QueueArn": f"arn:pskit:sqs:{host.spec.get('region') or 'local'}:000000000000:{name}"}
+                    if depth >= 0:
+                        attrs["ApproximateNumberOfMessages"] = str(depth)
+                    return self._json(200, {"Attributes": attrs})
+                if action in ("SendMessage", "SendMessageBatch"):
+                    entries = req.get("Entries") or [] if action == "SendMessageBatch" else [req]
+                    done = []
+                    for entry in entries:
+                        attributes = {k: v.get("StringValue", v.get("BinaryValue", ""))
+                                      for k, v in (entry.get("MessageAttributes") or {}).items() if isinstance(v, dict)}
+                        body = str(entry.get("MessageBody") or "")
+                        ident = broker.submit_queue(name, body, attributes)
+                        done.append({"Id": entry.get("Id"), "MessageId": ident, "MD5OfMessageBody": _md5(body)})
+                    if action == "SendMessage":
+                        return self._json(200, {"MessageId": done[0]["MessageId"], "MD5OfMessageBody": done[0]["MD5OfMessageBody"]})
+                    return self._json(200, {"Successful": done, "Failed": []})
+                if action == "ReceiveMessage":
+                    batch = max(1, min(int(req.get("MaxNumberOfMessages") or 1), 10))
+                    visibility = float(req.get("VisibilityTimeout") or 30)
+                    deadline = time.time() + max(0, min(int(req.get("WaitTimeSeconds") or 0), 20))
+                    try:
+                        leased = broker.lease_queue(name, batch, visibility, time.time())
+                        while not leased and time.time() < deadline:
+                            time.sleep(0.5)
+                            leased = broker.lease_queue(name, batch, visibility, time.time())
+                    except ValueError as exc:
+                        return self._aws_error(400, "UnsupportedOperation", str(exc), "AWS.SimpleQueueService.UnsupportedOperation")
+                    wanted = req.get("MessageAttributeNames") or []
+                    out = []
+                    for m in leased:
+                        body = m["body"] if isinstance(m["body"], str) else json.dumps(m["body"])
+                        item: Dict[str, Any] = {
+                            "MessageId": m["id"], "ReceiptHandle": m["receipt"], "Body": body, "MD5OfBody": _md5(body),
+                            "Attributes": {"ApproximateReceiveCount": str(m["receives"]),
+                                           "SentTimestamp": str(int(float(m.get("enqueued_at") or 0) * 1000))},
+                        }
+                        if wanted and m.get("attributes"):
+                            item["MessageAttributes"] = {k: {"DataType": "String", "StringValue": str(v)}
+                                                         for k, v in m["attributes"].items()}
+                        out.append(item)
+                    return self._json(200, {"Messages": out} if out else {})
+                if action in ("DeleteMessage", "DeleteMessageBatch"):
+                    entries = req.get("Entries") or [] if action == "DeleteMessageBatch" else [req]
+                    broker.ack_queue(name, [str(e.get("ReceiptHandle")) for e in entries])
+                    if action == "DeleteMessage":
+                        return self._json(200, {})
+                    return self._json(200, {"Successful": [{"Id": e.get("Id")} for e in entries], "Failed": []})
+                if action == "ChangeMessageVisibility":
+                    broker.change_visibility(name, str(req.get("ReceiptHandle")), float(req.get("VisibilityTimeout") or 0))
+                    return self._json(200, {})
+                if action == "PurgeQueue":
+                    broker.purge_queue(name)
+                    return self._json(200, {})
+                return self._aws_error(400, "InvalidAction", f"{action} is not supported by the pskit host",
+                                       "AWS.SimpleQueueService.InvalidAction")
 
             def _resource_admin(self, key: str, action: str, query: Dict[str, str]) -> None:
                 if action == "check" and self.command in ("GET", "POST"):
@@ -1697,6 +1871,30 @@ class Host:
                 item["path"] = str(self.broker.bucket_dir(name))
             items.append(item)
         return {"items": items}
+
+    def function_for(self, name: str) -> Optional[str]:
+        """This host's function for a pskit name, a deployed name or a Lambda ARN (None if unknown)."""
+        text = str(name)
+        if text.startswith("arn:"):
+            parts = text.split(":")
+            text = parts[6] if len(parts) > 6 and parts[5] == "function" else parts[-1]
+        functions = self.spec.get("functions") or {}
+        if text in functions:
+            return text
+        prefix = "-".join(p for p in (str(self.spec.get("service") or ""), str(self.spec.get("stage") or "")) if p) + "-"
+        if text.startswith(prefix) and text[len(prefix):] in functions:
+            return text[len(prefix):]
+        return None
+
+    def queue_names(self) -> List[str]:
+        """Queues this host knows: queue resources, queue triggers and their dead-letter queues."""
+        names = {str(r.get("name")) for r in (self.spec.get("resources") or {}).values()
+                 if isinstance(r, dict) and r.get("type") == "queue" and r.get("name")}
+        for ev in self._events("queue"):
+            names.add(str(ev["name"]))
+            if ev.get("dead_letter"):
+                names.add(str(ev["dead_letter"]))
+        return sorted(names)
 
     def _resource(self, key: str) -> Dict[str, Any]:
         res = (self.spec.get("resources") or {}).get(key)

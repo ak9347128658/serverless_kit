@@ -165,3 +165,32 @@ def test_client_guide_and_tunnels(make_project, tmp_path):
     assert "BatchMode=yes" not in argv and argv.count("-o") == sum(1 for a in argv if "=" in a)
     entry = {"address": "13.72.87.80", "port": 6379, "env": {"PSKIT_X_URL": "redis://:pw@13.72.87.80:6379/0"}}
     assert local_env(entry, 16379) == {"PSKIT_X_URL": "redis://:pw@127.0.0.1:16379/0"}
+
+
+@pytest.mark.parametrize("consumed", [False, True])
+def test_generated_programs_run_against_the_host(live_host, tmp_path, consumed):
+    import sys
+
+    from py_serverless_kit.core.client_examples import node_program, python_program
+
+    host, base = live_host
+    env = dict(os.environ, PSKIT_HOST=base, PSKIT_ADMIN_TOKEN="s3cret")
+    runtime_js = Path(__file__).resolve().parents[2] / "src" / "py_serverless_kit" / "runtime_js"
+    copy = tmp_path / "node_modules" / "pskit"
+    shutil.copytree(runtime_js, copy)
+    for key, native, kind in (("jobs", "order-jobs", "queue"), ("files", "files", "storage"), ("news", "news", "topic")):
+        code = python_program(base, key, native, kind, consumed=consumed, builtin=True)
+        script = tmp_path / f"use_{key}.py"
+        script.write_text(code, "utf-8")
+        proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env, cwd=tmp_path, timeout=60)
+        assert proc.returncode == 0, (kind, proc.stderr)
+        if kind == "queue":
+            assert "queued" in proc.stdout and ("processing" in proc.stdout) is (not consumed)
+        if shutil.which("node"):
+            js = tmp_path / f"use-{key}.js"
+            js.write_text(node_program(base, key, native, kind, consumed=consumed, builtin=True), "utf-8")
+            proc = subprocess.run(["node", str(js)], capture_output=True, text=True, env=env, cwd=tmp_path, timeout=60)
+            assert proc.returncode == 0, (kind, proc.stderr)
+    assert (tmp_path / "copy-of-hello.txt").read_text() == "hello from a script"
+    if not consumed:
+        assert host.broker.queue_depth("order-jobs") == 0   # the programs consumed what they sent

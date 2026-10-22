@@ -734,14 +734,17 @@ def markdown(
     direct_snip: Optional[Snip],
     direct_label: str,
     client: Optional[Snip] = None,
+    host_label: str = "Over HTTP through the pskit host (any language, any driver)",
 ) -> str:
+    """A ``## title`` section (no heading when ``title`` is empty) with one sub-section per snippet."""
+
     def fence(lang: str, text: str) -> str:
         return f"```{lang}\n{text.rstrip()}\n```\n"
 
-    out: List[str] = [f"## {title}\n", intro + "\n"]
+    out: List[str] = [f"## {title}\n", intro + "\n"] if title else []
     options = (
         ("With the pskit client (recommended: only the host port has to be open)", client),
-        ("Over HTTP through the pskit host (any language, any driver)", host),
+        (host_label, host),
         (direct_label, direct_snip),
     )
     for label, snip in options:

@@ -14,7 +14,8 @@ stay closed in the firewall. That is the usual fix for scripts that time out con
 pskit client info          # this project's host: endpoint, token, reachability, code for each resource
 ```
 
-The studio shows the same under **Resources → Call from code**.
+In the studio, each resource's **How to use** (section 7, *Call it from code*) has complete programs for that
+resource, with its key, the host URL, a reachability check and the token note filled in.
 
 ## Python
 
@@ -137,6 +138,17 @@ curl -X POST http://10.0.0.5:8080/__pskit/queues/jobs -H 'content-type: applicat
 curl 'http://10.0.0.5:8080/__pskit/resources/jobs/data?offset=0&limit=20'
 curl -X PUT --data-binary @report.csv http://10.0.0.5:8080/__pskit/storage/uploads/in/report.csv
 ```
+
+## AWS-compatible APIs
+
+The host also serves the **Lambda Invoke API** and the **SQS API** (for its queues), so existing boto3 / AWS SDK code
+works by setting `endpoint_url` to the host (use the `admin_token` as the access key id when the host has one). See
+[compatibility](resource-guides/compatibility.md).
+
+| Method and path | |
+|---|---|
+| `POST /2015-03-31/functions/<name, deployed name or ARN>/invocations` | `X-Amz-Invocation-Type: RequestResponse` (default), `Event` (202), `DryRun` (204) |
+| `POST /` with `X-Amz-Target: AmazonSQS.<Action>` | SendMessage(Batch), ReceiveMessage, DeleteMessage(Batch), ChangeMessageVisibility, GetQueueUrl, GetQueueAttributes, ListQueues, CreateQueue, PurgeQueue |
 
 ## When connections time out
 

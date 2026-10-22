@@ -516,12 +516,14 @@ def test_resource_guides_are_served(studio):
     base, _root, _httpd = studio
     status, index = call(base, "GET", "/api/resource-guides")
     assert status == 200 and index["available"]
-    assert index["clouds"][0]["id"] == "onprem"
-    onprem = index["clouds"][0]
+    assert index["clouds"][0]["id"] == "index" and "compatibility" in {p["id"] for p in index["clouds"][0]["pages"]}
+    assert index["clouds"][1]["id"] == "onprem"
+    onprem = index["clouds"][1]
     assert {"readme", "queue", "services"} <= {p["id"] for p in onprem["pages"]}
     status, page = call(base, "GET", "/api/resource-guides/onprem/queue")
     assert status == 200 and page["markdown"].startswith("# ")
     assert call(base, "GET", "/api/resource-guides/index/readme")[0] == 200
+    assert "Lambda Invoke API" in call(base, "GET", "/api/resource-guides/index/compatibility")[1]["markdown"]
     assert call(base, "GET", "/api/resource-guides/onprem/..%2Fsecret")[0] == 400
     assert call(base, "GET", "/api/resource-guides/onprem/nope")[0] == 404
 

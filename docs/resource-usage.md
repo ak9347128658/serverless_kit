@@ -120,7 +120,9 @@ exports.orders = async () => {
 ## On premises: from any other program
 
 The simplest way is the **pskit client** ([client.md](client.md)): `from py_serverless_kit.client import PskitClient`
-or `const { PskitClient } = require("pskit")`. It goes through the host, so only the host port must be open.
+or `const { PskitClient } = require("pskit")`. It goes through the host, so only the host port must be open. Each
+on-prem resource's guide (section 7, *Call it from code*) has complete programs for it: 7.1 pskit client, 7.2 HTTP,
+7.3 the service's own library, 7.4 what to do when it times out.
 
 
 A resource is also reachable from scripts and services that are not pskit functions in two other ways. The resource's

@@ -218,11 +218,13 @@ pskit resources onprem remove jobs --delete-data --save
 | `create KEY --service S` | start it (or install the runtime) and record it in `.pskit/onprem-services.json` |
 | `--role` | what the resource is used as: `queue`, `stream` (Redis / Valkey stream), `cache`, `database`, `storage`, `custom` |
 | `--ssh user@host[:port] --pem FILE --sudo` | create it on that server (default: `provider.options.deploy` when it targets one, else this machine); `--local` forces this machine |
+| `--gui` | also start the companion web UI (Adminer, Redis Commander, Kafka UI, Mongo Express) |
 | `--user`, `--password`, `--password-env VAR` | credentials to create (default user `pskit`, Redis `default`; default password generated) |
 | `--port`, `--address`, `--bind`, `--image` | published port, address functions use, interface to listen on, Docker image |
 | `-a, --attach FN` | add a `queue` / `storage` trigger on resource KEY to FN (repeatable) |
 | `--save` | write the resource, `provider.options.env_file` and triggers into `pskit.yml` (comments are not kept) |
-| `tunnel KEY [--local-port N]` | forward the service's port to `127.0.0.1` over SSH (firewalled ports) and print the variables to use |
+| `gui KEY [--port N] [--remove]` | start or remove the companion web UI, and list every web UI of the service with its login |
+| `tunnel KEY [--local-port N] [--remote-port N]` | forward the service's port to `127.0.0.1` over SSH (firewalled ports) and print the variables to use |
 | `usage KEY [--reveal]` | connect from any program: address, credentials, Python / Node.js client code, terminal tools, security |
 | `list`, `status KEY [--reveal]`, `logs KEY` | what exists, its state / health / credentials, the container log |
 | `backup KEY [-o FILE]` | dump the data to `.pskit/backups/` |

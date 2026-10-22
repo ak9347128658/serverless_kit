@@ -214,6 +214,7 @@ function CreateDrawer({
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [bind, setBind] = useState("");
+  const [withGui, setWithGui] = useState(true);
   const [attach, setAttach] = useState<string[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -261,6 +262,7 @@ function CreateDrawer({
     if (login.trim()) body.user = login.trim();
     if (password) body.password = password;
     if (bind) body.bind = bind;
+    if (item.companion && withGui) body.gui = true;
     if (TRIGGER_ROLES.includes(role)) body.attach = attach;
     try {
       setJobId((await api.onpremCreate(body)).job_id);
@@ -302,6 +304,9 @@ function CreateDrawer({
                         <b>{c.label}</b>
                         <span className="muted small">{c.notes || c.image}</span>
                         {c.port && <span className="mono small">port {c.port}</span>}
+                        {(c.companion || (c.gui && c.gui.length > 0)) && (
+                          <span className="small">web UI: {c.companion || (c.gui || []).join(", ")}</span>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -404,6 +409,22 @@ function CreateDrawer({
                   />
                 </FormRow>
               </div>
+              {(item.companion || (item.gui && item.gui.length > 0)) && (
+                <FormRow
+                  label="Web UI"
+                  help={
+                    item.companion
+                      ? `${item.companion} runs next to it on a private Docker network, on the same interface as the service.`
+                      : "Built in; How to use shows its address and login."
+                  }
+                >
+                  {item.companion ? (
+                    <Toggle checked={withGui} onChange={setWithGui} label={`Also start ${item.companion}`} />
+                  ) : (
+                    <span className="muted small">{(item.gui || []).join(", ")}</span>
+                  )}
+                </FormRow>
+              )}
               {TRIGGER_ROLES.includes(role) && (
                 <FormRow label="Trigger functions" help="Adds a queue / storage event on resource: key to each selected function.">
                   <div className="check-grid">
@@ -486,13 +507,28 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
   const [reveal, setReveal] = useState(false);
   const [logs, setLogs] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [guiJob, setGuiJob] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const job = useJob(guiJob);
   useEffect(() => {
     setError(null);
     api
       .onpremStatus(serviceKey, reveal)
       .then(setInfo)
       .catch((exc: unknown) => setError(errorMessage(exc)));
-  }, [serviceKey, reveal]);
+  }, [serviceKey, reveal, attempt]);
+  useEffect(() => {
+    if (job.status === "succeeded" || job.status === "failed") setAttempt((a) => a + 1);
+  }, [job.status]);
+  const links = Array.isArray(info?.gui) ? info.gui : [];
+  const hasCompanion = links.some((g) => g.kind === "companion");
+  const startGui = async (remove: boolean) => {
+    try {
+      setGuiJob((await (remove ? api.onpremGuiRemove(serviceKey) : api.onpremGui(serviceKey))).job_id);
+    } catch (exc) {
+      setError(errorMessage(exc));
+    }
+  };
   const ok = info?.state === "running" || info?.state === "installed";
   return (
     <Drawer open title={`Service ${serviceKey}`} onClose={onClose}>
@@ -515,7 +551,7 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
             <div className="hint-box">
               This machine cannot reach {info.address}:{info.port} (the server's firewall probably blocks it). Scripts here would time out. Run{" "}
               <code className="mono">pskit resources onprem tunnel {serviceKey}</code> to reach it through SSH, open the port to your IP, or go through
-              the pskit host (<b>Resources → Call from code</b>).
+              the pskit host with the pskit client (<b>Resources → How to use</b> on the resource, section 7).
             </div>
           )}
           {info.port && (
@@ -523,6 +559,35 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
               <code className="mono">
                 {info.address}:{info.port}
               </code>
+            </FormRow>
+          )}
+          {(links.length > 0 || info.companion) && (
+            <FormRow label="Web UI" help="Firewalled port? pskit resources onprem tunnel <key> --remote-port <ui port>, then open 127.0.0.1.">
+              <div className="stack-xs">
+                {links.map((g) => (
+                  <div key={g.url} className="row-gap wrap">
+                    <a className="btn btn-sm btn-primary" href={g.url} target="_blank" rel="noreferrer noopener">
+                      Open {g.label}
+                    </a>
+                    <code className="mono small">{g.url}</code>
+                    <span className="muted small">login: {g.login}</span>
+                  </div>
+                ))}
+                {info.companion && (
+                  <div className="row-gap">
+                    {!hasCompanion ? (
+                      <button type="button" className="btn btn-sm" disabled={job.status === "running"} onClick={() => void startGui(false)}>
+                        Add web UI
+                      </button>
+                    ) : (
+                      <button type="button" className="btn btn-sm btn-danger" disabled={job.status === "running"} onClick={() => void startGui(true)}>
+                        Remove web UI
+                      </button>
+                    )}
+                  </div>
+                )}
+                {guiJob && <JobConsole job={job} />}
+              </div>
             </FormRow>
           )}
           {info.env && Object.keys(info.env).length > 0 && (

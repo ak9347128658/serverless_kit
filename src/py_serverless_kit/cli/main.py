@@ -765,6 +765,7 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--password", default=None, help="Password to set (default: a generated one). Prefer --password-env.")
 @click.option("--password-env", default=None, help="Read the password from this environment variable.")
 @click.option("-a", "--attach", multiple=True, help="Add a trigger on this function (queue / storage). Repeatable.")
+@click.option("--gui", is_flag=True, help="Also start its web UI (Adminer, Redis Commander, Kafka UI, Mongo Express).")
 @click.option("--save", is_flag=True, help="Write the resource (and triggers) into pskit.yml.")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
 @click.option("--json", "as_json", is_flag=True, help="Print the created entry as JSON.")
@@ -784,6 +785,7 @@ def resources_onprem_create(  # noqa: PLR0913
     password: Optional[str],
     password_env: Optional[str],
     attach: tuple,
+    gui: bool,
     save: bool,
     config_path: Optional[str],
     as_json: bool,
@@ -817,6 +819,7 @@ def resources_onprem_create(  # noqa: PLR0913
         "bind": bind,
         "attach": list(attach),
         "target": target,
+        "gui": gui or None,
     }
     entry = _service_call(svc.create, root, {k: v for k, v in body.items() if v is not None}, raw, echo)
     if as_json:
@@ -883,9 +886,12 @@ def resources_onprem_usage(key: str, reveal: bool, config_path: Optional[str]) -
 
 @resources_onprem.command("tunnel", short_help="Reach a service on a server through SSH (firewalled port).")
 @click.argument("key")
-@click.option("--local-port", type=int, default=None, help="Port on this machine (default: the service's port).")
+@click.option("--local-port", type=int, default=None, help="Port on this machine (default: the remote port).")
+@click.option("--remote-port", type=int, default=None, help="Port on the server (default: the service's; e.g. its web UI).")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
-def resources_onprem_tunnel(key: str, local_port: Optional[int], config_path: Optional[str]) -> None:
+def resources_onprem_tunnel(
+    key: str, local_port: Optional[int], remote_port: Optional[int], config_path: Optional[str]
+) -> None:
     """Forward 127.0.0.1:<port> here to the service on its SSH server, until Ctrl+C.
 
     \b
@@ -900,8 +906,11 @@ def resources_onprem_tunnel(key: str, local_port: Optional[int], config_path: Op
     entry = _service_call(svc._entry, root, key)
     if entry.get("kind") == "runtime":
         raise click.ClickException(f"{key} is a runtime, not a service")
-    port = int(local_port or entry["port"])
-    argv = _service_call(svc.tunnel_argv, entry["target"], port, int(entry["port"]))
+    remote = int(remote_port or entry["port"])
+    port = int(local_port or remote)
+    argv = _service_call(svc.tunnel_argv, entry["target"], port, remote)
+    if remote != int(entry["port"]):
+        info(f"Open http://127.0.0.1:{port}/ in your browser.")
     info(f"Forwarding 127.0.0.1:{port} -> {entry['address']}:{entry['port']} over SSH. Ctrl+C to stop.")
     for name, value in sorted(svc.local_env(entry, port).items()):
         echo(f"  export {name}='{value}'")
@@ -911,6 +920,38 @@ def resources_onprem_tunnel(key: str, local_port: Optional[int], config_path: Op
         raise SystemExit(subprocess.call(argv))
     except KeyboardInterrupt:
         ok("Tunnel closed.")
+
+
+@resources_onprem.command("gui", short_help="Start (or --remove) the web UI of a service.")
+@click.argument("key")
+@click.option("--port", type=int, default=None, help="Port for the UI (default: Adminer 8089, Redis Commander 8082, ...).")
+@click.option("--remove", is_flag=True, help="Stop and delete the companion web UI.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_gui(key: str, port: Optional[int], remove: bool, config_path: Optional[str]) -> None:
+    """Web UIs of service KEY: built in (RabbitMQ, MinIO, ...) or a companion pskit starts next to it.
+
+    
+    Companions: Adminer (PostgreSQL / MySQL / MariaDB), Redis Commander (Redis, Valkey, KeyDB, Dragonfly),
+    Kafka UI (Kafka, Apache Kafka), Mongo Express (MongoDB). They share a private Docker network with the service.
+    """
+    from ..core import onprem_services as svc
+
+    root, _path, _raw = _raw_project(config_path)
+    if remove:
+        _service_call(svc.remove_gui, root, key, echo)
+        ok(f"Removed the web UI of {key}")
+        return
+    entry = _service_call(svc._entry, root, key)
+    if svc.companion_for(str(entry.get("service"))) and not isinstance(entry.get("gui"), dict):
+        _service_call(svc.add_gui, root, key, echo, port=port)
+        entry = _service_call(svc._entry, root, key)
+    links = svc.gui_links(entry)
+    if not links:
+        raise click.ClickException(f"{entry.get('service')} has no web UI")
+    for link in links:
+        echo(f"  {link['label']:<24} {link['url']:<32} login: {link['login']}")
+    if entry.get("target", {}).get("method") == "ssh":
+        info(f"Firewalled? pskit resources onprem tunnel {key} --remote-port {links[0]['port']}")
 
 
 @resources_onprem.command("logs", short_help="The service container's recent output.")

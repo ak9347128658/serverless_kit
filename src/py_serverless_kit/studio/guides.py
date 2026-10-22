@@ -35,6 +35,11 @@ def index() -> Dict[str, Any]:
     if base is None:
         return {"available": False, "clouds": []}
     clouds: List[Dict[str, Any]] = []
+    # Pages next to README (compatibility, ...): the "General" group, shown first.
+    general = [{"id": "readme", "title": _title(base / "README.md")}] + [
+        {"id": page.stem.lower(), "title": _title(page)} for page in sorted(base.glob("*.md")) if page.stem != "README"
+    ]
+    clouds.append({"id": "index", "title": "General", "pages": general})
     for folder in sorted((p for p in base.iterdir() if p.is_dir()), key=lambda p: (_ORDER + [p.name]).index(p.name)):
         pages = [
             {"id": page.stem.lower(), "title": _title(page)}

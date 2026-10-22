@@ -214,6 +214,80 @@ class CustomQueue:
             fn(now, visibility)
 
 
+# --------------------------------------------------------------------- self-provisioning
+
+_MISSING = ("404", "NotFound", "NoSuchBucket", "QueueNotFound", "ContainerNotFound", "does not exist")
+
+
+class Ensured:
+    """A driver whose queue / bucket is created on first use (emulators such as Azurite, LocalStack,
+    fake-gcs-server, MinIO-compatible stores), and again when the service reports it missing.
+
+    ``create`` must be idempotent: an "already exists" answer counts as success.
+    """
+
+    def __init__(self, inner: Any, create: Any, what: str) -> None:
+        self.inner = inner
+        self._create = create
+        self._what = what
+        self._ready = False
+
+    def _ensure(self) -> None:
+        if not self._ready:
+            status = self._create()
+            if isinstance(status, int) and status >= 400 and status != 409:
+                raise RuntimeError(f"could not create {self._what} (HTTP {status})")
+            self._ready = True
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self.inner, name)
+        if not callable(target) or name.startswith("_") or name == "peek":
+            return target
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            self._ensure()
+            try:
+                return target(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - only "missing" errors are retried
+                if not any(m in str(exc) for m in _MISSING):
+                    raise
+                self._ready = False
+                self._ensure()
+                return target(*args, **kwargs)
+
+        return call
+
+
+def _ensured(driver: Any, use: str, b: Dict[str, Any]) -> Any:
+    """Wrap ``driver`` when the binding asks to create its queue (``create_queue``) or bucket (``create_bucket``)."""
+    wanted = flag(b.get("create_queue"), False) if use in ("azure_queue",) else flag(b.get("create_bucket"), False)
+    if not wanted:
+        return driver
+    if use == "azure_queue":
+        return Ensured(driver, lambda: driver.auth.call("PUT", driver._path())[0], f"queue {driver.queue}")
+    if use == "azure_blob":
+        container = driver.container
+        return Ensured(
+            driver,
+            lambda: driver.auth.call("PUT", "/" + container, {"restype": "container"})[0],
+            f"container {container}",
+        )
+    if use == "gcs":
+        import json as _json
+
+        from ._http import request as _request
+
+        def create_gcs() -> int:
+            url = f"{driver.endpoint}/storage/v1/b?project={b.get('project') or 'pskit'}"
+            headers = dict(driver.tokens.headers(), **{"content-type": "application/json"})
+            return _request("gcs", "POST", url, headers, _json.dumps({"name": driver.bucket}).encode(), driver.timeout)[0]
+
+        return Ensured(driver, create_gcs, f"bucket {driver.bucket}")
+    if use == "s3" or use in S3_PRESETS:
+        return Ensured(driver, lambda: driver.request("PUT")[0], f"bucket {driver.bucket}")
+    return driver
+
+
 # --------------------------------------------------------------------- factories
 
 
@@ -242,7 +316,7 @@ def make_queue_driver(binding: Optional[Dict[str, Any]], label: str = "") -> Opt
     if use == "azure_queue":
         from .azure import AzureQueue
 
-        return AzureQueue.from_binding(b, label)
+        return _ensured(AzureQueue.from_binding(b, label), use, b)  # type: ignore[no-any-return]
     if use == "pubsub":
         from .gcp import PubSubQueue
 
@@ -272,15 +346,15 @@ def make_storage_driver(binding: Optional[Dict[str, Any]], label: str = "") -> O
     where = f" (bucket {label})" if label else ""
     b = resolve_env(binding, f"bucket {label}" if label else "")
     if use == "s3" or use in S3_PRESETS:
-        return _s3(use, b, label)
+        return _ensured(_s3(use, b, label), use, b)  # type: ignore[no-any-return]
     if use == "azure_blob":
         from .azure import AzureBlobStorage
 
-        return AzureBlobStorage.from_binding(b, label)
+        return _ensured(AzureBlobStorage.from_binding(b, label), use, b)  # type: ignore[no-any-return]
     if use == "gcs":
         from .gcp import GcsStorage
 
-        return GcsStorage.from_binding(b, label)
+        return _ensured(GcsStorage.from_binding(b, label), use, b)  # type: ignore[no-any-return]
     if use == "custom":
         return _custom(b, STORAGE_METHODS, where)  # type: ignore[no-any-return]
     raise ValueError(f"unsupported storage driver {use!r}{where}; expected one of {', '.join(STORAGE_DRIVERS)}")
