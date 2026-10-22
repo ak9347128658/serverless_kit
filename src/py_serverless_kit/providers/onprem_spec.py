@@ -76,6 +76,9 @@ class DeploySpec:
     ssh_port: int = 22
     identity_file: str = ""
     known_hosts: str = "accept-new"
+    # SSH login without a key: a password read by sshpass from this file, or from $SSHPASS (auth: password).
+    password_file: str = ""
+    auth: str = ""
     remote_path: str = ""
     sudo: bool = False
     install: str = "process"
@@ -126,6 +129,8 @@ class DeploySpec:
                 "identity_file": self.identity_file,
                 "known_hosts": self.known_hosts,
                 "path": self.remote_path,
+                **({"password_file": self.password_file} if self.password_file else {}),
+                **({"auth": self.auth} if self.auth else {}),
             },
             "docker": {
                 "image": self.image,
@@ -332,6 +337,8 @@ def parse_deploy(
         ssh_port=_port(merged.get("port"), "options.deploy.port", 22),
         identity_file=os.path.expanduser(_str(merged, "identity_file", "identity", "pem")),
         known_hosts=_str(merged, "known_hosts", default="accept-new") or "accept-new",
+        password_file=os.path.expanduser(_str(merged, "password_file")),
+        auth=_str(merged, "auth").lower(),
         remote_path=_str(merged, "path", "remote_path"),
         image=_str(merged, "image"),
         container=_str(merged, "container", "name"),
@@ -548,21 +555,24 @@ def assign_pem(options: Dict[str, Any], path: str) -> str:
 
 
 def validate_identity(spec: DeploySpec) -> Optional[str]:
-    if spec.method == "ssh":
-        if not spec.identity_file:
-            return None
-        if not os.path.isfile(spec.identity_file):
-            return f"options.deploy.identity_file {spec.identity_file!r} does not exist yet (needed at apply)"
+    """A warning about the SSH login (key file, password file), or None.
+
+    No key means the SSH agent or the default key (``~/.ssh/id_*``); a password uses sshpass.
+    """
+    if spec.method != "ssh" and not targets_remote_docker(spec):
         return None
-    if targets_remote_docker(spec):
-        if not spec.identity_file:
-            return (
-                "remote Docker deploy needs options.deploy.pem (a .pem private key). "
-                "`pskit deploy` asks for the path when a terminal is attached"
-            )
-        if not os.path.isfile(spec.identity_file):
-            return f"options.deploy.pem {spec.identity_file!r} does not exist yet (needed at apply)"
+    if spec.auth and spec.auth not in ("key", "agent", "password"):
+        return f"options.deploy.auth must be key, agent or password, not {spec.auth!r}"
+    if spec.password_file and not os.path.isfile(spec.password_file):
+        return f"options.deploy.password_file {spec.password_file!r} does not exist yet (needed at apply)"
+    if spec.identity_file and not os.path.isfile(spec.identity_file):
+        name = "pem" if targets_remote_docker(spec) else "identity_file"
+        return f"options.deploy.{name} {spec.identity_file!r} does not exist yet (needed at apply)"
     return None
+
+
+def uses_password(spec: DeploySpec) -> bool:
+    return bool(spec.password_file) or spec.auth == "password"
 
 
 def unit_name(service: str, stage: str) -> str:

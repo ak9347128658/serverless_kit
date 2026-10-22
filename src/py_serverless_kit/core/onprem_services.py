@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import os
 import re
 import secrets
 import socket
@@ -31,7 +32,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 STATE_FILE = Path(".pskit") / "onprem-services.json"
 BACKUP_DIR = Path(".pskit") / "backups"
@@ -442,6 +443,8 @@ COMPANIONS: Dict[str, Dict[str, Any]] = {
         "for": ("postgres", "mysql", "mariadb"),
         "env": {"ADMINER_DEFAULT_SERVER": "{target}:{target_port}"},
         "login": "the database user and password (server is filled in)",
+        # Adminer has no login of its own: it always asks for the database login.
+        "auth_env": (),
     },
     "redis-commander": {
         "label": "Redis Commander",
@@ -460,6 +463,8 @@ COMPANIONS: Dict[str, Dict[str, Any]] = {
         },
         "login": "user admin, password in the env file",
         "password_login": True,
+        "auth_env": ("HTTP_USER", "HTTP_PASSWORD"),
+        "open_env": {},
     },
     "kafka-ui": {
         "label": "Kafka UI",
@@ -476,6 +481,8 @@ COMPANIONS: Dict[str, Dict[str, Any]] = {
         },
         "login": "user admin, password in the env file (sign-in page /auth)",
         "password_login": True,
+        "auth_env": ("AUTH_TYPE", "SPRING_SECURITY_USER_NAME", "SPRING_SECURITY_USER_PASSWORD"),
+        "open_env": {"AUTH_TYPE": "DISABLED"},
     },
     "mongo-express": {
         "label": "Mongo Express",
@@ -487,9 +494,13 @@ COMPANIONS: Dict[str, Dict[str, Any]] = {
             "ME_CONFIG_MONGODB_URL": "mongodb://{user}:{password}@{target}:{target_port}/?authSource=admin",
             "ME_CONFIG_BASICAUTH": "true",
             "ME_CONFIG_BASICAUTH_USERNAME": "{user}",
-            "ME_CONFIG_BASICAUTH_PASSWORD": "{password}",
+            "ME_CONFIG_BASICAUTH_PASSWORD": "{gui_password}",
         },
         "login": "the MongoDB user and password",
+        "auth_env": ("ME_CONFIG_BASICAUTH", "ME_CONFIG_BASICAUTH_USERNAME", "ME_CONFIG_BASICAUTH_PASSWORD"),
+        "open_env": {"ME_CONFIG_BASICAUTH": "false"},
+        # Signs in with the service's own password unless you choose one for the UI.
+        "service_password": True,
     },
 }
 
@@ -551,6 +562,7 @@ def catalog() -> List[Dict[str, Any]]:
                 "auth": name not in NO_AUTH,
                 "gui": [g["label"] for g in svc["gui"]],
                 "companion": next((c["label"] for c in COMPANIONS.values() if name in c["for"]), None),
+                "gui_logins": gui_login_choices(name),
                 "default_user": DEFAULT_USER.get(name, "pskit"),
                 "notes": svc["notes"],
             }
@@ -581,6 +593,10 @@ def default_target(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         identity = deploy.get("pem") or deploy.get("identity_file")
         if identity:
             target["identity_file"] = str(identity)
+        if deploy.get("password_file"):
+            target["password_file"] = str(Path(str(deploy["password_file"])).expanduser())
+        if deploy.get("auth"):
+            target["auth"] = str(deploy["auth"])
         return target
     return {"method": "local"}
 
@@ -606,16 +622,125 @@ def normalize_target(raw: Any, root: Path) -> Dict[str, Any]:
     if not 1 <= port <= 65535:
         raise ServiceError("target.port must be between 1 and 65535")
     target: Dict[str, Any] = {"method": "ssh", "host": host, "user": user, "port": port, "sudo": bool(raw.get("sudo"))}
+    auth = str(raw.get("auth") or "").strip().lower()
+    if auth not in ("", "key", "agent", "password"):
+        raise ServiceError("target.auth must be key, agent or password")
     identity = str(raw.get("identity_file") or raw.get("pem") or "").strip()
-    if identity:
+    if identity and auth in ("", "key"):
         path = Path(identity).expanduser()
         if not path.is_absolute():
             path = root / path
         target["identity_file"] = str(path)
+    if auth == "password" or raw.get("password") or raw.get("password_file"):
+        target["auth"] = "password"
+        password = str(raw.get("password") or "")
+        password_file = str(raw.get("password_file") or "").strip()
+        if password:
+            # Typed in the studio: kept in .pskit/ssh (out of git, owner-only), never in state or pskit.yml.
+            target["password_file"] = str(save_ssh_password(root, user, host, port, password))
+        elif password_file:
+            path = Path(password_file).expanduser()
+            target["password_file"] = str(path if path.is_absolute() else root / path)
+    elif auth == "agent":
+        target["auth"] = "agent"
     known = str(raw.get("known_hosts") or "").strip()
     if known:
         target["known_hosts"] = known
     return target
+
+
+def save_ssh_password(root: Path, user: str, host: str, port: int, password: str) -> Path:
+    if not password or "\n" in password or len(password) > 256:
+        raise ServiceError("the SSH password must be one line of at most 256 characters")
+    folder = root / ".pskit" / "ssh"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / (re.sub(r"[^A-Za-z0-9._-]", "_", f"{user}@{host}-{port}") + ".pass")
+    path.write_bytes(password.encode("utf-8"))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # pragma: no cover - Windows ACLs
+        pass
+    return path
+
+
+def ssh_options(target: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``ssh`` dict the deploy helpers take (key, password file, known hosts) for a service target."""
+    ssh: Dict[str, Any] = {
+        "host": target["host"],
+        "user": target["user"],
+        "port": target.get("port") or 22,
+        "identity_file": target.get("identity_file") or "",
+        "known_hosts": target.get("known_hosts") or "accept-new",
+    }
+    for name in ("password_file", "auth"):
+        if target.get(name):
+            ssh[name] = target[name]
+    return ssh
+
+
+def check_ssh_login(target: Dict[str, Any]) -> None:
+    """Fail early (with what to do) when the SSH login cannot work from this machine."""
+    if target.get("method") != "ssh":
+        return
+    from ..providers.onprem_remote import ssh_auth_problem
+
+    problem = ssh_auth_problem(ssh_options(target))
+    if problem:
+        raise ServiceError(problem)
+
+
+def install_ssh_key(
+    target: Dict[str, Any],
+    emit: Emit,
+    *,
+    key_path: Optional[str] = None,
+    password: str = "",
+    run: Optional[Callable[..., subprocess.CompletedProcess[bytes]]] = None,
+) -> Path:
+    """Create ``~/.ssh/pskit_ed25519`` (if missing) and add its public key to the server's authorized_keys.
+
+    Logs in with the password once: through sshpass when ``password`` is given, else ssh asks for it in the
+    terminal. Then checks that the key alone logs in. Returns the private key path.
+    """
+    import shutil
+    import tempfile
+
+    normalize_target({**target, "method": "ssh"}, Path.cwd())  # validates host / user / port
+    call = run or subprocess.run
+    key = Path(key_path).expanduser() if key_path else Path.home() / ".ssh" / "pskit_ed25519"
+    if not key.is_file():
+        key.parent.mkdir(parents=True, exist_ok=True)
+        emit(f"Creating {key}")
+        made = call(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "pskit", "-f", str(key)])  # noqa: S603
+        if made.returncode:
+            raise ServiceError("ssh-keygen failed; install the OpenSSH client")
+    public = Path(str(key) + ".pub")
+    if not public.is_file():
+        raise ServiceError(f"{public} is missing; recreate it with: ssh-keygen -y -f {key} > {public}")
+    opts = ["-p", str(target.get("port") or 22), "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "PubkeyAuthentication=no"]
+    dest = f"{target['user']}@{target['host']}"
+    command = ("umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && k=\"$(cat)\" && "
+               "(grep -qxF \"$k\" ~/.ssh/authorized_keys || printf '%s\\n' \"$k\" >> ~/.ssh/authorized_keys)")
+    emit(f"Installing {public.name} on {dest}" + ("" if password else " (enter the SSH password when asked)"))
+    if password:
+        if not shutil.which("sshpass"):
+            raise ServiceError("sending the password needs sshpass; leave the password out and type it when ssh asks")
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = Path(tmp) / "p"
+            secret.write_bytes(password.encode("utf-8"))
+            with open(public, "rb") as handle:
+                done = call(["sshpass", "-f", str(secret), "ssh", *opts, dest, command], stdin=handle)  # noqa: S603
+    else:
+        with open(public, "rb") as handle:
+            done = call(["ssh", *opts, dest, command], stdin=handle)  # noqa: S603
+    if done.returncode:
+        raise ServiceError(f"could not log in to {dest} with the password (ssh exit {done.returncode})")
+    check = call(["ssh", "-p", str(target.get("port") or 22), "-i", str(key), "-o", "IdentitiesOnly=yes",  # noqa: S603
+                  "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", dest, "true"])
+    if check.returncode:
+        raise ServiceError(f"the key was added, but {dest} still refuses it (PubkeyAuthentication off on the server?)")
+    return key
 
 
 def describe_target(target: Dict[str, Any]) -> str:
@@ -627,13 +752,7 @@ def describe_target(target: Dict[str, Any]) -> str:
 def _ssh_argv(target: Dict[str, Any], command: str) -> List[str]:
     from ..providers.onprem_remote import _ssh_base, _target
 
-    ssh = {
-        "host": target["host"],
-        "user": target["user"],
-        "port": target.get("port") or 22,
-        "identity_file": target.get("identity_file") or "",
-        "known_hosts": target.get("known_hosts") or "accept-new",
-    }
+    ssh = ssh_options(target)
     return _ssh_base(ssh) + [_target(ssh), command]
 
 
@@ -836,6 +955,17 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
         raise ServiceError("the Azurite account name must be 3-24 lowercase letters and digits")
     if service == "mongodb" and user == "admin":
         raise ServiceError("pick another user than admin for MongoDB")
+    if body.get("gui"):
+        gui_login = str(body.get("gui_login") or "password")
+        choices = gui_login_choices(service)
+        if gui_login not in GUI_LOGINS:
+            raise ServiceError("gui_login must be password or none")
+        if choices and gui_login not in choices:
+            raise ServiceError(f"the web UI of {spec['label']} always asks for a login")
+        gui_password = str(body.get("gui_password") or "")
+        if gui_password and (gui_login == "none" or not _PASSWORD_OK.match(gui_password)):
+            raise ServiceError("gui_password must be 8-128 characters of letters, digits and !#%*+,.:=?@^_~- "
+                               "(and only with gui_login: password)")
     project = str((raw or {}).get("service") or "")
     return {
         "user": user or DEFAULT_USER.get(service, "pskit"),
@@ -1128,6 +1258,8 @@ def create(
     req = check_request(body, root, raw)
     sh = _Runner(emit, run)
     target = req["target"]
+    if run is None:
+        check_ssh_login(target)
     emit(f"Creating {req['service']} as {req['key']!r} on {describe_target(target)}")
     if req["kind"] == "runtime":
         _install_runtime(req["service"], target, sh)
@@ -1191,7 +1323,8 @@ def create(
         emit(note)
     emit(f"{spec['label']} is ready at {req['address']}:{req['port']}")
     if body.get("gui") and companion_for(req["service"]):
-        entry["gui"] = add_gui(root, req["key"], emit, run=run)
+        entry["gui"] = add_gui(root, req["key"], emit, run=run, login=str(body.get("gui_login") or "password"),
+                               password=str(body.get("gui_password") or ""))
     return entry
 
 
@@ -1227,20 +1360,14 @@ def _install_runtime(name: str, target: Dict[str, Any], sh: _Runner) -> None:
     # A script file: multi-line SSH commands are re-quoted by Windows OpenSSH.
     import tempfile
 
-    from ..providers.onprem_remote import _ssh_options, _target
+    from ..providers.onprem_remote import scp_argv
 
-    ssh = {
-        "host": target["host"],
-        "user": target["user"],
-        "port": target.get("port") or 22,
-        "identity_file": target.get("identity_file") or "",
-        "known_hosts": target.get("known_hosts") or "accept-new",
-    }
+    ssh = ssh_options(target)
     with tempfile.TemporaryDirectory() as tmp:
         local = Path(tmp) / f"pskit-install-{name}.sh"
         local.write_bytes(script.encode("utf-8"))
         remote = f"/tmp/pskit-install-{name}.sh"  # noqa: S108 - removed right after
-        sh(["scp", *_ssh_options(ssh, port_flag="-P"), str(local), f"{_target(ssh)}:{remote}"])
+        sh(scp_argv(ssh, str(local), remote))
         sh(_ssh_argv(target, f"sh {remote}; code=$?; rm -f {remote}; exit $code"))
 
 
@@ -1405,6 +1532,7 @@ def status(root: Path, key: str, *, run: Optional[RunFn] = None, reveal: bool = 
     out["reachable_from_here"] = reachable(str(entry.get("address")), int(entry.get("port") or 0))
     out["gui"] = gui_links(entry)
     out["companion"] = companion_for(str(entry.get("service")))
+    out["gui_logins"] = gui_login_choices(str(entry.get("service")))
     spec = SERVICES.get(entry["service"]) or {}
     if parts[0] == "running" and spec.get("health"):
         health = _fill(spec["health"], _values({**entry, "key": key}))
@@ -1465,8 +1593,9 @@ def remove(
         gui = entry.get("gui")
         if isinstance(gui, dict):
             sh(docker_argv(entry["target"], ["rm", "-f", gui["container"]]), check=False)
-            sh(docker_argv(entry["target"], ["network", "rm", _network(entry)]), check=False, show=False)
         sh(docker_argv(entry["target"], ["rm", "-f", entry["container"]]), check=False)
+        # After the service container: a network with a connected container cannot be removed.
+        sh(docker_argv(entry["target"], ["network", "rm", _network(entry)]), check=False, show=False)
         if delete_data and entry.get("volume"):
             sh(docker_argv(entry["target"], ["volume", "rm", entry["volume"]]), check=False)
         elif entry.get("volume"):
@@ -1678,25 +1807,19 @@ def reachable(host: str, port: int) -> bool:
 
 def tunnel_argv(target: Dict[str, Any], local_port: int, remote_port: int) -> List[str]:
     """``ssh -N -L local:127.0.0.1:remote user@host``: the service's port on localhost here."""
-    from ..providers.onprem_remote import _ssh_options, _target
+    from ..providers.onprem_remote import _ssh_options, _sshpass, _target
 
     if target.get("method") != "ssh":
         raise ServiceError("the service runs on this machine; connect to 127.0.0.1 directly")
-    ssh = {
-        "host": target["host"],
-        "user": target["user"],
-        "port": target.get("port") or 22,
-        "identity_file": target.get("identity_file") or "",
-        "known_hosts": target.get("known_hosts") or "accept-new",
-    }
-    opts = [o for o in _ssh_options(ssh, port_flag="-p") if o != "BatchMode=yes"]
+    ssh = ssh_options(target)
+    opts = [o for o in _ssh_options(ssh, port_flag="-p") if o not in ("BatchMode=yes", "BatchMode=no")]
     # _ssh_options pairs every value with "-o"; drop the orphaned flag left by removing BatchMode.
     cleaned: List[str] = []
     for item in opts:
         if cleaned and cleaned[-1] == "-o" and item.startswith("-"):
             cleaned.pop()
         cleaned.append(item)
-    return ["ssh", "-N", "-L", f"{int(local_port)}:127.0.0.1:{int(remote_port)}", *cleaned, _target(ssh)]
+    return [*_sshpass(ssh), "ssh", "-N", "-L", f"{int(local_port)}:127.0.0.1:{int(remote_port)}", *cleaned, _target(ssh)]
 
 
 def local_env(entry: Dict[str, Any], local_port: int) -> Dict[str, str]:
@@ -1738,8 +1861,50 @@ def _network(entry: Dict[str, Any]) -> str:
     return f"{entry['container']}-net"
 
 
-def add_gui(root: Path, key: str, emit: Emit, *, port: Optional[int] = None, run: Optional[RunFn] = None) -> Dict[str, Any]:
-    """Start the companion web UI of service ``key`` (Adminer, Redis Insight, Kafka UI, Mongo Express)."""
+def _free_gui_port(root: Path, key: str, entry: Dict[str, Any], comp: Dict[str, Any]) -> int:
+    """The companion's default port, or the next one no other service on the same server already uses."""
+    same = describe_target(entry.get("target") or {})
+    used = set()
+    for other_key, other in load_state(root)["services"].items():
+        if other_key == key or describe_target(other.get("target") or {}) != same:
+            continue
+        spec = SERVICES.get(str(other.get("service"))) or {}
+        used.add(int(other.get("port") or 0))
+        used.update(host_port(other, int(extra)) for extra in spec.get("extra_ports") or [])
+        if isinstance(other.get("gui"), dict):
+            used.add(int(other["gui"].get("port") or 0))
+    candidate = int(comp["default_port"])
+    while candidate in used:
+        candidate += 1
+    return candidate
+
+
+GUI_LOGINS = ("password", "none")
+
+
+def gui_login_choices(service: str) -> List[str]:
+    """How the web UI of ``service`` can sign in: ``password`` and, when the UI allows it, ``none``."""
+    name = companion_for(service)
+    if name and COMPANIONS[name].get("auth_env"):
+        return list(GUI_LOGINS)
+    return ["password"] if name else []
+
+
+def add_gui(
+    root: Path,
+    key: str,
+    emit: Emit,
+    *,
+    port: Optional[int] = None,
+    run: Optional[RunFn] = None,
+    login: str = "password",
+    password: str = "",
+) -> Dict[str, Any]:
+    """Start the companion web UI of service ``key`` (Adminer, Redis Commander, Kafka UI, Mongo Express).
+
+    ``login``: ``password`` (generated, or ``password`` when given) or ``none`` (no sign-in: keep the UI on
+    127.0.0.1, a private network or behind a tunnel).
+    """
     entry = _entry(root, key)
     name = companion_for(str(entry.get("service")))
     if name is None:
@@ -1748,27 +1913,49 @@ def add_gui(root: Path, key: str, emit: Emit, *, port: Optional[int] = None, run
             f"{entry.get('service')} has " + (f"a built-in web UI ({', '.join(builtin)})" if builtin else "no web UI pskit can add")
         )
     comp = COMPANIONS[name]
-    host_port = int(port or comp["default_port"])
+    host_port = int(port or _free_gui_port(root, key, entry, comp))
     if not 1 <= host_port <= 65535:
         raise ServiceError("port must be between 1 and 65535")
+    login = str(login or "password")
+    if login not in GUI_LOGINS:
+        raise ServiceError("login must be password or none")
+    if login == "none" and not comp.get("auth_env"):
+        raise ServiceError(f"{comp['label']} always asks for a login ({comp['login']})")
+    if password and not comp.get("auth_env"):
+        raise ServiceError(f"{comp['label']} has no password of its own; it signs in with {comp['login']}")
+    if password and not _PASSWORD_OK.match(password):
+        raise ServiceError("the web UI password must be 8-128 characters of letters, digits and !#%*+,.:=?@^_~-")
     sh = _Runner(emit, run)
     target = entry["target"]
     container = f"{entry['container']}-ui"
     network = _network(entry)
     spec = SERVICES[entry["service"]]
     env_values = dict(entry.get("env") or {})
-    password = next(
+    service_password = next(
         (v for k, v in env_values.items() if k.endswith(("_PASSWORD", "_SECRET_KEY")) and not k.endswith("_GUI_PASSWORD")),
         "",
     )
-    gui_password = secrets.token_urlsafe(12) if "{gui_password}" in json.dumps(comp["env"]) else ""
+    env_templates = dict(comp["env"])
+    if login == "none":
+        for name_ in comp.get("auth_env") or ():
+            env_templates.pop(name_, None)
+        env_templates.update(comp.get("open_env") or {})
+    uses_gui_password = "{gui_password}" in json.dumps(env_templates)
+    if not uses_gui_password:
+        gui_password = ""
+    elif password:
+        gui_password = password
+    elif comp.get("service_password"):
+        gui_password = ""  # filled with the service's password below; nothing new to store
+    else:
+        gui_password = secrets.token_urlsafe(12)
     values = {
         "target": entry["container"],
         "target_port": str(spec["port"]),
         "user": str(entry.get("user") or ""),
-        "password": password,
+        "password": service_password,
         "name": key,
-        "gui_password": gui_password,
+        "gui_password": gui_password or (service_password if comp.get("service_password") else ""),
     }
     sh(docker_argv(target, ["network", "create", network]), check=False, show=False)
     sh(docker_argv(target, ["network", "connect", network, entry["container"]]), check=False, show=False)
@@ -1776,18 +1963,26 @@ def add_gui(root: Path, key: str, emit: Emit, *, port: Optional[int] = None, run
     sh(docker_argv(target, ["pull", comp["image"]]))
     argv = ["run", "-d", "--name", container, "--restart", "unless-stopped", "--network", network,
             "--label", f"pskit.gui-for={key}", "-p", f"{entry.get('bind') or '127.0.0.1'}:{host_port}:{comp['port']}"]
-    for env_name, template in comp["env"].items():
+    for env_name, template in env_templates.items():
         argv += ["-e", f"{env_name}={_fill(template, values)}"]
     argv.append(comp["image"])
     sh(docker_argv(target, argv))
+    login_text = _fill(comp["login"], values)
+    if login == "none":
+        login_text = "no login"
+    elif password and comp.get("service_password"):
+        login_text = f"user `{values['user']}`, the web UI password (env file)"
     gui = {"name": name, "label": comp["label"], "container": container, "image": comp["image"], "port": host_port,
-           "login": _fill(comp["login"], values)}
+           "login": login_text, "login_mode": login}
+    if login == "none" and entry.get("bind") != "127.0.0.1":
+        emit(f"warning: {comp['label']} has no login and listens on {entry.get('bind')}: anyone who reaches port "
+             f"{host_port} can use it. Limit the port to your IP in the firewall, or use a tunnel.")
     if gui_password:
         var = _var_prefix(key) + "_GUI_PASSWORD"
         update_env_file(root / str(entry.get("env_file") or DEFAULT_ENV_FILE), {var: gui_password})
         gui["password_env"] = var
-        if comp.get("password_login"):
-            gui["login"] = comp["login"].replace("the env file", var)
+        if comp.get("password_login") or comp.get("service_password"):
+            gui["login"] = login_text.replace("the env file", var).replace("(env file)", f"({var})")
         entry.setdefault("env", {})[var] = gui_password
     entry["gui"] = gui
     state = load_state(root)
@@ -1815,6 +2010,242 @@ def remove_gui(root: Path, key: str, emit: Emit, *, run: Optional[RunFn] = None)
     save_state(root, state)
 
 
+_PRIVATE = re.compile(r"^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.)")
+
+# The UI's HTTP status from the server itself (curl, else wget).
+_PROBE = (
+    "u={url}; if command -v curl >/dev/null 2>&1; then curl -s -o /dev/null -m 5 -w '%{{http_code}}' \"$u\" || true; "
+    "elif command -v wget >/dev/null 2>&1; then wget -S -q -O /dev/null -T 5 \"$u\" 2>&1 | "
+    "awk '/^ *HTTP\\//{{c=$2}} END{{print c}}'; else echo unknown; fi"
+)
+
+# key=value lines: which cloud (instance metadata), host firewalls, the server's addresses.
+_SERVER_FACTS = (
+    "md=http://169.254.169.254; cloud=; "
+    "if command -v curl >/dev/null 2>&1; then "
+    "[ \"$(curl -s -o /dev/null -m 2 -w '%{http_code}' -H Metadata:true \"$md/metadata/instance?api-version=2021-02-01\")\" = 200 ] "
+    "&& cloud=azure "
+    "&& echo azure_rg=$(curl -s -m 2 -H Metadata:true \"$md/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text\") "
+    "&& echo azure_vm=$(curl -s -m 2 -H Metadata:true \"$md/metadata/instance/compute/name?api-version=2021-02-01&format=text\"); "
+    "[ -z \"$cloud\" ] && [ \"$(curl -s -o /dev/null -m 2 -w '%{http_code}' -X PUT "
+    "-H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \"$md/latest/api/token\")\" = 200 ] && cloud=aws; "
+    "[ -z \"$cloud\" ] && [ \"$(curl -s -o /dev/null -m 2 -w '%{http_code}' -H Metadata-Flavor:Google "
+    "http://metadata.google.internal/computeMetadata/v1/)\" = 200 ] && cloud=gcp; "
+    "fi; echo cloud=$cloud; "
+    "echo ufw=$( (ufw status 2>/dev/null || sudo -n ufw status 2>/dev/null) | head -1 | awk '{print $2}'); "
+    "echo firewalld=$(systemctl is-active firewalld 2>/dev/null); "
+    "echo ips=$(hostname -I 2>/dev/null)"
+)
+
+
+def _probe_here(url: str) -> str:
+    """``http NNN``, ``timeout``, ``refused`` or ``error: ...`` for a URL opened from this machine."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=6) as resp:  # noqa: S310 - the user's own service
+            return f"http {resp.status}"
+    except urllib.error.HTTPError as exc:
+        return f"http {exc.code}"
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, socket.timeout) or "timed out" in str(reason):
+            return "timeout"
+        if isinstance(reason, ConnectionRefusedError) or "refused" in str(reason).lower():
+            return "refused"
+        return f"error: {reason}"
+    except (socket.timeout, TimeoutError):
+        return "timeout"
+    except Exception as exc:  # noqa: BLE001 - reported to the user
+        return f"error: {exc}"
+
+
+def _port_mappings(text: str) -> Dict[int, List[Tuple[str, int]]]:
+    """``docker port`` output -> {container port: [(host ip, host port)]}."""
+    out: Dict[int, List[Tuple[str, int]]] = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*(\d+)/tcp\s*->\s*\[?([0-9a-fA-F:.]*)\]?:(\d+)\s*$", line)
+        if m:
+            out.setdefault(int(m.group(1)), []).append((m.group(2), int(m.group(3))))
+    return out
+
+
+def _firewall_fix(facts: Dict[str, str], port: int, host: str) -> List[str]:
+    cloud = facts.get("cloud")
+    fixes: List[str] = []
+    if cloud == "azure":
+        rg, vm = facts.get("azure_rg") or "<resource-group>", facts.get("azure_vm") or "<vm-name>"
+        fixes += [
+            f"Azure: add an inbound rule for TCP {port} to the network security group, e.g. "
+            f"`az vm open-port -g {rg} -n {vm} --port {port} --priority {1000 + port % 3000}`.",
+            "Azure applies EVERY NSG on the path: one on the subnet and one on the network interface both need the "
+            "rule (VM > Networking lists both). The rule's Source must include your IP (Any to test), its priority "
+            "number must be lower than any Deny rule's, the destination port the one above, the protocol TCP.",
+        ]
+    elif cloud == "aws":
+        fixes.append(f"AWS: add an inbound rule for TCP {port} (source: your IP) to the instance's security group; "
+                     "check the subnet's network ACL too.")
+    elif cloud == "gcp":
+        fixes.append(f"GCP: `gcloud compute firewall-rules create pskit-{port} --allow tcp:{port} "
+                     "--source-ranges <your-ip>/32` (and the instance's network tags, if the rule uses target tags).")
+    else:
+        fixes.append(f"Open TCP {port} in the firewall in front of {host} (security group / NSG, router, appliance).")
+    if facts.get("ufw") == "active":
+        fixes.append(f"ufw is active on the server: `sudo ufw allow {port}/tcp`.")
+    if facts.get("firewalld") == "active":
+        fixes.append(f"firewalld is active on the server: `sudo firewall-cmd --add-port={port}/tcp --permanent "
+                     "&& sudo firewall-cmd --reload`.")
+    fixes.append("Your own network can block outgoing ports too (office VPN, proxy): test from another network, or "
+                 f"`Test-NetConnection {host} -Port {port}` (Windows) / `nc -vz {host} {port}`.")
+    return fixes
+
+
+def gui_check(
+    root: Path,
+    key: str,
+    emit: Emit,
+    *,
+    run: Optional[RunFn] = None,
+    probe: Optional[Callable[[str], str]] = None,
+) -> Dict[str, Any]:
+    """Why a web UI does (not) open: container, port mapping, the server itself, this machine, firewalls.
+
+    Every web UI of service ``key`` is checked on the server (over SSH) and from this machine; each gets a
+    verdict and the fix. Nothing is changed.
+    """
+    entry = _entry(root, key)
+    links = gui_links(entry)
+    if not links:
+        hint = (f"add one with `pskit resources onprem gui {key}`" if companion_for(str(entry.get("service")))
+                else "see its guide")
+        raise ServiceError(f"{key} has no web UI; {hint}")
+    target = entry["target"]
+    remote = target.get("method") == "ssh"
+    if remote and run is None:
+        check_ssh_login(target)
+    sh = _Runner(emit, run)
+    probe_here = probe or _probe_here
+    facts: Dict[str, str] = {}
+    if remote:
+        _code, text = sh.run_fn(_ssh_argv(target, _SERVER_FACTS), None)
+        for line in text.splitlines():
+            if "=" in line:
+                name, _, value = line.partition("=")
+                facts[name.strip()] = value.strip()
+    gui_entry = entry.get("gui") if isinstance(entry.get("gui"), dict) else {}
+    comp = COMPANIONS.get(str(gui_entry.get("name"))) if gui_entry else None
+    spec = SERVICES.get(str(entry.get("service"))) or {}
+    results = [_check_link(link, entry, key, comp, spec, facts, sh, probe_here, emit) for link in links]
+    for item in results:
+        emit(f"{item['label']}: {item['verdict']}")
+        for fix in item.get("fix") or []:
+            emit(f"  - {fix}")
+    return {"key": key, "server": facts, "links": results, "ok": all(r.get("ok") for r in results)}
+
+
+def _check_link(
+    link: Dict[str, Any],
+    entry: Dict[str, Any],
+    key: str,
+    comp: Optional[Dict[str, Any]],
+    spec: Dict[str, Any],
+    facts: Dict[str, str],
+    sh: _Runner,
+    probe_here: Callable[[str], str],
+    emit: Emit,
+) -> Dict[str, Any]:
+    target = entry["target"]
+    remote = target.get("method") == "ssh"
+    address = str(entry.get("address") or "127.0.0.1")
+    companion = link["kind"] == "companion"
+    container = str(link.get("container") or entry["container"])
+    if companion and comp:
+        container_port = int(comp["port"])
+    else:
+        gui: Dict[str, Any] = next((g for g in spec.get("gui") or [] if host_port(entry, int(g["port"])) == link["port"]), {})
+        container_port = int(gui.get("port") or link["port"])
+    path = urlsplit(link["url"]).path or "/"
+    item: Dict[str, Any] = {"label": link["label"], "url": link["url"], "port": link["port"], "container": container}
+    fixes: List[str] = []
+    item["fix"] = fixes
+    logs_hint = f"`pskit resources onprem logs {key}`" + (f" / `docker logs {container}`" if companion else "")
+    emit(f"== {link['label']}: {link['url']}")
+
+    code, status = sh.run_fn(docker_argv(target, ["inspect", "-f", "{{.State.Status}}", container]), None)
+    lines = status.strip().splitlines()
+    item["container_status"] = lines[-1].strip() if code == 0 and lines else "missing"
+    emit(f"  container {container}: {item['container_status']}")
+    if item["container_status"] != "running":
+        item["verdict"] = "the container is not running"
+        fixes.append(f"See why: {logs_hint}; then start it again "
+                     + (f"with `pskit resources onprem gui {key}`." if companion else "(Remove keeping the data, then Create)."))
+        return item
+
+    _code, ports_text = sh.run_fn(docker_argv(target, ["port", container]), None)
+    mapped = _port_mappings(ports_text).get(container_port, [])
+    item["published"] = [f"{ip or '0.0.0.0'}:{port}" for ip, port in mapped]  # noqa: S104
+    emit(f"  published: {', '.join(item['published']) or 'not published'} (container port {container_port})")
+    if not mapped:
+        item["verdict"] = f"container port {container_port} is not published on the server"
+        fixes.append("The container was created without this port (older pskit, or another tool). Recreate it: Remove "
+                     "(keep data), then Create with the same key" + (", or add the web UI again." if companion else "."))
+        return item
+    public = [port for ip, port in mapped if ip not in ("127.0.0.1", "::1")]
+    port = public[0] if public else mapped[0][1]
+    if port != link["port"]:
+        fixes.append(f"The UI is published on port {port}, not {link['port']}: open http://{address}:{port}{path}")
+
+    local_url = f"http://127.0.0.1:{port}{path}"
+    if remote:
+        _code, answer = sh.run_fn(_ssh_argv(target, _PROBE.format(url=_shq(local_url))), None)
+        last = (answer.strip().splitlines() or [""])[-1].strip()
+        server = "unknown" if last == "unknown" else (f"http {last}" if last.isdigit() and last != "000" else "no answer")
+    else:
+        server = probe_here(local_url)
+        server = server if server.startswith("http") else "no answer"
+    item["on_server"] = server
+    emit(f"  on the server ({local_url}): {server}")
+    if server == "no answer":
+        item["verdict"] = "the UI does not answer on the server itself"
+        fixes.append(f"The app inside the container is not serving (still starting, or failed): {logs_hint}. "
+                     "Give it a minute after creating, then check again.")
+        return item
+
+    if not public and remote:
+        item["verdict"] = "published on 127.0.0.1 only: other machines cannot connect"
+        fixes.append(f"Open it through SSH: `pskit resources onprem tunnel {key} --remote-port {port}`, then browse "
+                     f"http://127.0.0.1:{port}{path}")
+        fixes.append("Or recreate the service with Bind 0.0.0.0 (Remove keeping the data, Create with the same key).")
+        return item
+
+    url = f"http://{address if public else '127.0.0.1'}:{port}{path}"
+    here = probe_here(url)
+    item["from_here"] = here
+    emit(f"  from this machine ({url}): {here}")
+    if here.startswith("http"):
+        item["verdict"] = "reachable"
+        item["ok"] = True
+        fixes.append(f"Open {url} (http://, not https://). Login: {link['login']}.")
+        if not public:
+            fixes.append("It listens on 127.0.0.1: only this machine can open it (recreate with Bind 0.0.0.0 to share it).")
+        return item
+    if remote and _PRIVATE.match(address) and address != target.get("host"):
+        fixes.append(f"The links use {address}, a private address. From outside that network use the server's public "
+                     f"address ({target.get('host')}), or recreate the service with Address set to it.")
+    if here == "refused":
+        item["verdict"] = "the connection was refused (a host firewall rejects it, or the address is not this server)"
+    elif here == "timeout":
+        item["verdict"] = "no answer from outside: a firewall drops the connection"
+    else:
+        item["verdict"] = f"cannot connect from this machine ({here})"
+    fixes.extend(_firewall_fix(facts, port, address))
+    if remote:
+        fixes.append(f"Works right away without opening any port: `pskit resources onprem tunnel {key} "
+                     f"--remote-port {port}`, then http://127.0.0.1:{port}{path}")
+    return item
+
+
 def gui_markdown(entry: Dict[str, Any], key: str) -> str:
     """The "Web UI" section of a guide: URLs, logins, tunnel, or how to add one."""
     links = gui_links(entry)
@@ -1824,11 +2255,19 @@ def gui_markdown(entry: Dict[str, Any], key: str) -> str:
             f"| {g['label']} ({g['kind']}) | {g['url']} | {g['login']} |\n" for g in links))
         remote = entry.get("target", {}).get("method") == "ssh"
         first = links[0]
+        ports = ", ".join(str(g["port"]) for g in links)
         md.append(
             "The UI listens on the same interface as the service (`" + str(entry.get("bind")) + "`). "
-            + ("When its port is closed in the server's firewall, open it through SSH and browse "
+            + (f"From another machine, the server's firewall must allow TCP **{ports}** (the UI's port, not only "
+               f"the service's {entry.get('port')}). Or skip the firewall: open it through SSH and browse "
                f"`http://127.0.0.1:{first['port']}`:\n\n```bash\npskit resources onprem tunnel {key} "
                f"--remote-port {first['port']}\n```\n" if remote else "Open the link on this machine.\n")
+        )
+        md.append(
+            "**It does not open?** Check it: the container, the published port, the answer on the server and from "
+            "this machine, then the fix (cloud firewall / NSG, bind address, tunnel):\n\n"
+            f"```bash\npskit resources onprem gui {key} --check\n```\n\n"
+            "In the studio: *On-prem services > Details > Check web UI*. Use `http://`, not `https://`.\n"
         )
     if not isinstance(entry.get("gui"), dict):
         name = companion_for(str(entry.get("service")))
@@ -1837,7 +2276,9 @@ def gui_markdown(entry: Dict[str, Any], key: str) -> str:
             md.append(
                 f"{'Add' if not links else 'Also available'}: **{comp['label']}**, started next to the service "
                 f"(*On-prem services > Details > Add web UI*, or `pskit resources onprem gui {key}`); "
-                f"login: {comp['login']}.\n"
+                f"login: {comp['login']}"
+                + (f", or without a password: `pskit resources onprem gui {key} --login none` (keep it private)"
+                   if comp.get("auth_env") else "") + ".\n"
             )
         elif not links:
             hint = {

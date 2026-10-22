@@ -725,6 +725,12 @@ def _save_raw(path: Path, raw: dict) -> None:
     ok(f"Updated {path.name} (comments are not kept)")
 
 
+def _env_value(name: str) -> str:
+    if name not in os.environ:
+        raise click.ClickException(f"environment variable {name} is not set")
+    return os.environ[name]
+
+
 def _service_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     from ..core.onprem_services import ServiceError
 
@@ -758,7 +764,10 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--address", default=None, help="Address functions use to reach it (default: SSH host / 127.0.0.1).")
 @click.option("--bind", default=None, help="Interface the port listens on (default: 0.0.0.0 over SSH, else 127.0.0.1).")
 @click.option("--ssh", "ssh", default=None, help="user@host[:port] of the server. Default: options.deploy, else here.")
-@click.option("--pem", default=None, help="Private key for --ssh.")
+@click.option("--pem", default=None, help="Private key for --ssh (empty: the SSH agent or your default key).")
+@click.option("--ssh-password-file", default=None, help="SSH with a password read from this file (uses sshpass).")
+@click.option("--ssh-password-env", default=None,
+              help="SSH with a password from this environment variable (uses sshpass; never stored).")
 @click.option("--sudo", is_flag=True, help="Run docker / installs with sudo -n on the server.")
 @click.option("--local", "local", is_flag=True, help="Create it on this machine even if the functions deploy over SSH.")
 @click.option("--user", "login", default=None, help="User to create (default: pskit; Redis / Valkey: default).")
@@ -766,6 +775,9 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--password-env", default=None, help="Read the password from this environment variable.")
 @click.option("-a", "--attach", multiple=True, help="Add a trigger on this function (queue / storage). Repeatable.")
 @click.option("--gui", is_flag=True, help="Also start its web UI (Adminer, Redis Commander, Kafka UI, Mongo Express).")
+@click.option("--gui-login", type=click.Choice(["password", "none"]), default=None,
+              help="Web UI sign-in: password (default) or none (keep it on 127.0.0.1, a private network or a tunnel).")
+@click.option("--gui-password-env", default=None, help="Your own web UI password, from this environment variable.")
 @click.option("--save", is_flag=True, help="Write the resource (and triggers) into pskit.yml.")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
 @click.option("--json", "as_json", is_flag=True, help="Print the created entry as JSON.")
@@ -779,6 +791,8 @@ def resources_onprem_create(  # noqa: PLR0913
     bind: Optional[str],
     ssh: Optional[str],
     pem: Optional[str],
+    ssh_password_file: Optional[str],
+    ssh_password_env: Optional[str],
     sudo: bool,
     local: bool,
     login: Optional[str],
@@ -786,6 +800,8 @@ def resources_onprem_create(  # noqa: PLR0913
     password_env: Optional[str],
     attach: tuple,
     gui: bool,
+    gui_login: Optional[str],
+    gui_password_env: Optional[str],
     save: bool,
     config_path: Optional[str],
     as_json: bool,
@@ -803,10 +819,15 @@ def resources_onprem_create(  # noqa: PLR0913
         target = {"method": "ssh", "user": user or "root", "host": host, "port": int(ssh_port or 22), "sudo": sudo}
         if pem:
             target["identity_file"] = pem
+        if ssh_password_file:
+            target["password_file"] = ssh_password_file
+        elif ssh_password_env:
+            target["password"] = _env_value(ssh_password_env)
+    elif ssh_password_file or ssh_password_env or pem:
+        raise click.ClickException("--pem / --ssh-password-* go with --ssh user@host")
     if password_env:
-        if password_env not in os.environ:
-            raise click.ClickException(f"environment variable {password_env} is not set")
-        password = os.environ[password_env]
+        password = _env_value(password_env)
+    gui_password = _env_value(gui_password_env) if gui_password_env else None
     body = {
         "key": key,
         "service": service,
@@ -820,6 +841,8 @@ def resources_onprem_create(  # noqa: PLR0913
         "attach": list(attach),
         "target": target,
         "gui": gui or None,
+        "gui_login": gui_login if gui else None,
+        "gui_password": gui_password if gui else None,
     }
     entry = _service_call(svc.create, root, {k: v for k, v in body.items() if v is not None}, raw, echo)
     if as_json:
@@ -925,10 +948,27 @@ def resources_onprem_tunnel(
 @resources_onprem.command("gui", short_help="Start (or --remove) the web UI of a service.")
 @click.argument("key")
 @click.option("--port", type=int, default=None, help="Port for the UI (default: Adminer 8089, Redis Commander 8082, ...).")
+@click.option("--login", "gui_login", type=click.Choice(["password", "none"]), default="password", show_default=True,
+              help="Sign-in of the companion UI; none = no login (keep it private).")
+@click.option("--password-env", default=None, help="Your own UI password from this environment variable (default: generated).")
+@click.option("--check", is_flag=True, help="Find out why a web UI does not open (container, ports, server, firewall).")
 @click.option("--remove", is_flag=True, help="Stop and delete the companion web UI.")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
-def resources_onprem_gui(key: str, port: Optional[int], remove: bool, config_path: Optional[str]) -> None:
+def resources_onprem_gui(  # noqa: PLR0913
+    key: str,
+    port: Optional[int],
+    gui_login: str,
+    password_env: Optional[str],
+    check: bool,
+    remove: bool,
+    config_path: Optional[str],
+) -> None:
     """Web UIs of service KEY: built in (RabbitMQ, MinIO, ...) or a companion pskit starts next to it.
+
+    \b
+    pskit resources onprem gui cache                     # start Redis Commander (generated password)
+    pskit resources onprem gui cache --login none        # no sign-in: keep it on 127.0.0.1 or a tunnel
+    pskit resources onprem gui cache --check             # it does not open? find out why
 
     
     Companions: Adminer (PostgreSQL / MySQL / MariaDB), Redis Commander (Redis, Valkey, KeyDB, Dragonfly),
@@ -941,9 +981,17 @@ def resources_onprem_gui(key: str, port: Optional[int], remove: bool, config_pat
         _service_call(svc.remove_gui, root, key, echo)
         ok(f"Removed the web UI of {key}")
         return
+    if check:
+        result = _service_call(svc.gui_check, root, key, echo)
+        if result["ok"]:
+            ok("Every web UI answers from this machine.")
+            return
+        raise SystemExit(1)
     entry = _service_call(svc._entry, root, key)
-    if svc.companion_for(str(entry.get("service"))) and not isinstance(entry.get("gui"), dict):
-        _service_call(svc.add_gui, root, key, echo, port=port)
+    password = _env_value(password_env) if password_env else ""
+    wants_change = port is not None or gui_login != "password" or bool(password)
+    if svc.companion_for(str(entry.get("service"))) and (not isinstance(entry.get("gui"), dict) or wants_change):
+        _service_call(svc.add_gui, root, key, echo, port=port, login=gui_login, password=password)
         entry = _service_call(svc._entry, root, key)
     links = svc.gui_links(entry)
     if not links:
@@ -951,7 +999,31 @@ def resources_onprem_gui(key: str, port: Optional[int], remove: bool, config_pat
     for link in links:
         echo(f"  {link['label']:<24} {link['url']:<32} login: {link['login']}")
     if entry.get("target", {}).get("method") == "ssh":
-        info(f"Firewalled? pskit resources onprem tunnel {key} --remote-port {links[0]['port']}")
+        info(f"Does not open? pskit resources onprem gui {key} --check  "
+             f"(or skip the firewall: pskit resources onprem tunnel {key} --remote-port {links[0]['port']})")
+
+
+@resources_onprem.command("ssh-key", short_help="Install an SSH key on a server that takes a password (once).")
+@click.argument("destination")
+@click.option("--key", "key_path", default=None, help="Key to install (default: ~/.ssh/pskit_ed25519, created if missing).")
+@click.option("--password-env", default=None, help="Send the password from this variable (needs sshpass); default: asked.")
+def resources_onprem_ssh_key(destination: str, key_path: Optional[str], password_env: Optional[str]) -> None:
+    """Log in to DESTINATION (user@host[:port]) with its password once and install a key, then use the key.
+
+    \b
+    pskit resources onprem ssh-key azureuser@13.72.87.80
+    pskit resources onprem create jobs --service elasticmq --ssh azureuser@13.72.87.80 --pem ~/.ssh/pskit_ed25519
+
+    Works on Windows too (no sshpass needed: ssh asks the password in this terminal).
+    """
+    from ..core import onprem_services as svc
+
+    user, _, rest = destination.rpartition("@")
+    host, _, ssh_port = rest.partition(":")
+    target = {"method": "ssh", "user": user or "root", "host": host, "port": int(ssh_port or 22)}
+    password = _env_value(password_env) if password_env else ""
+    path = _service_call(svc.install_ssh_key, target, echo, key_path=key_path, password=password)
+    ok(f"Key login works. Use --pem {path} (studio: Private key), or in pskit.yml: provider.options.deploy.pem: {path}")
 
 
 @resources_onprem.command("logs", short_help="The service container's recent output.")
@@ -1081,12 +1153,12 @@ def client_tunnel(project, local_port: Optional[int]) -> None:  # noqa: ANN001
 def _ask_onprem_pem(project: Any) -> None:
     """Ask for the server ``.pem`` when a remote deploy has none yet.
 
-    Docker on a server requires a key. SSH also asks when a terminal is
-    attached; an empty answer keeps the SSH agent or the default key.
+    Asked only when a terminal is attached; an empty answer keeps the SSH agent
+    or the default key. A password login (``password_file`` / ``auth: password``) asks nothing.
     """
     if project.config.provider.name != "onprem":
         return
-    from ..providers.onprem_spec import assign_pem, parse_deploy, targets_remote_docker
+    from ..providers.onprem_spec import assign_pem, parse_deploy, targets_remote_docker, uses_password
 
     cfg = project.config
     try:
@@ -1103,29 +1175,20 @@ def _ask_onprem_pem(project: Any) -> None:
     remote_ssh = spec.method == "ssh"
     if not remote_docker and not remote_ssh:
         return
-    if spec.identity_file and os.path.isfile(spec.identity_file):
+    if (spec.identity_file and os.path.isfile(spec.identity_file)) or uses_password(spec) or spec.auth == "agent":
         return
     who = f"{spec.ssh_user}@{spec.ssh_host}" if spec.ssh_user else spec.ssh_host
     if not sys.stdin.isatty():
-        if remote_docker:
-            raise click.ClickException(
-                "on-premises Docker deploy needs a .pem private key for "
-                f"{who}. Set options.deploy.pem in pskit.yml (or PSKIT_SSH_KEY) and run pskit deploy again."
-            )
         if spec.identity_file:
             raise click.ClickException(f"SSH private key not found: {spec.identity_file}")
         return
     if remote_docker:
         echo(f"On-premises Docker deploy builds an image on this machine and copies it to {who}.")
         echo("If Docker is not installed on that server, it is installed before the image is loaded.")
-        entered = click.prompt(
-            "Path to the SSH private key (.pem)",
-            type=click.Path(exists=True, dir_okay=False, readable=True),
-        )
-        assign_pem(cfg.provider.options, str(entered))
-        return
-    echo(f"On-premises SSH deploy copies one archive to {who} and starts the host.")
-    echo("Enter a .pem path, or press Enter to use the SSH agent or the default key.")
+    else:
+        echo(f"On-premises SSH deploy copies one archive to {who} and starts the host.")
+    echo("Enter a .pem path, or press Enter to use the SSH agent or the default key "
+         "(password login: options.deploy.password_file or auth: password with SSHPASS).")
     entered = click.prompt("Path to the SSH private key (.pem)", default="", show_default=False)
     text = str(entered).strip()
     if not text:

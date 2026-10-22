@@ -482,7 +482,7 @@ pskit logs --delete worker --yes    # clear one function's entries
 |---|---|---|---|
 | `local` (default) | detached process on this machine | Python (the interpreter that runs `pskit`) | — |
 | `ssh` or `scp` | one `release.tar.gz` extracted on the server, then a process or a systemd unit. Apply runs `systemctl restart` and waits for `/__pskit/health` | SSH. Python only if `python: system`. Passwordless `sudo` when `install: systemd` and `sudo: true` | OpenSSH (`ssh`, `scp`). Optional `.pem` |
-| `docker` | image built on this machine, then `docker load` + `docker run` on the server. Apply waits until the container answers `/__pskit/health` | SSH. Docker is installed at apply when it is missing (`install_docker: true`, the default). Passwordless `sudo` when the daemon must be installed or the user cannot talk to it | Docker CLI, OpenSSH, and a `.pem` |
+| `docker` | image built on this machine, then `docker load` + `docker run` on the server. Apply waits until the container answers `/__pskit/health` | SSH. Docker is installed at apply when it is missing (`install_docker: true`, the default). Passwordless `sudo` when the daemon must be installed or the user cannot talk to it | Docker CLI, OpenSSH. Optional `.pem` |
 
 When the server has **no Python**, use `python: bundle` (a portable CPython from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) is fetched at apply and copied with the app) or `method: docker` (the image is `FROM python:<minor>-slim`). From Windows, a Linux bundle is copied out of the downloaded archive and is not unpacked into the project (those trees contain test paths longer than `MAX_PATH`). Air-gapped: `python_home` (copy a tree you already have) or `python_url` + `python_sha256` (internal mirror of an `install_only` tarball).
 
@@ -493,7 +493,8 @@ deploy:
   host: 10.0.1.12                 # or deploy: ssh://pskit@10.0.1.12/opt/pskit/orders
   user: pskit
   port: 22
-  pem: ${env:PSKIT_SSH_KEY}       # or identity_file. pskit deploy asks when a terminal is attached
+  pem: ${env:PSKIT_SSH_KEY}       # or identity_file. Empty: the SSH agent / default key (deploy asks in a terminal)
+  # password_file: ~/.ssh/server.pass   # password login through sshpass (or auth: password + $SSHPASS)
   known_hosts: accept-new         # accept-new | ignore | path to a known_hosts file
   path: /opt/pskit/orders
   python: bundle                  # auto | system | bundle
@@ -502,15 +503,15 @@ deploy:
   install: systemd                # process | systemd (linux only)
   sudo: true                      # needed to write /etc/systemd/system
 
-# Docker on a server. The image is built here, copied with the .pem, and run there.
-# `pskit deploy` asks for the .pem when `pem` is empty. Docker is installed on the
-# server first when `docker` is not already on PATH (apt/dnf/yum/apk).
+# Docker on a server. The image is built here, copied over SSH, and run there.
+# No `pem`: the SSH agent / default key (`pskit deploy` offers to enter a path in a terminal).
+# Docker is installed on the server first when `docker` is not already on PATH (apt/dnf/yum/apk).
 deploy:
   method: docker
   host: 10.0.1.12
   user: pskit
   port: 22
-  pem: ${env:PSKIT_SSH_KEY}          # or identity_file; path to the .pem
+  pem: ${env:PSKIT_SSH_KEY}          # or identity_file; or password_file (sshpass); or nothing (agent)
   image: pskit/orders:dev
   install_docker: true               # default for a remote host
   sudo: true                         # default; needed to install and start dockerd
@@ -526,7 +527,14 @@ deploy:
 
 SSH and `scp` write `pskit-run.sh` plus `release.tar.gz` (the staged bundle, `onprem_ctl.py`, `pskit_host.json`, the unit when `install: systemd`, and `python/` when `python: bundle`). With `sudo: true`, apply runs `sudo -n mkdir` on `path` and `chown`s that directory to the SSH user (`azureuser` cannot create `/opt/pskit` itself), then copies the files. Apply does not delete `data_dir`. `install: systemd` runs `systemctl restart`. `install: process` runs `onprem_ctl.py start`. Either way the deploy fails if `http://127.0.0.1:<port>/__pskit/health` does not answer, and the failure includes `systemctl status` and `journalctl` when a unit was used.
 
-Remote Docker (`method: docker` plus `host`, or `docker_host: ssh://user@host`) builds `pskit-<service>-<stage>` locally, saves it to a tar, and `scp`s that tar to `pskit-images/<container>/` in the SSH user's home. A script on the server installs Docker when it is missing (apt, dnf, yum, or apk), waits until `docker info` succeeds, runs `docker load` and `docker run`, and deletes the tar. The deploy fails if the container does not answer `/__pskit/health`, and the failure includes `docker logs`. The SSH user needs passwordless `sudo` (`sudo -n`) when Docker must be installed or when the user cannot talk to the daemon (`sudo` defaults to true). The `.pem` must be accepted by `ssh -o BatchMode=yes` (no passphrase prompt). On Windows, if OpenSSH says the key is unprotected, restrict it with `icacls`. Set `install_docker: false` to refuse a server that does not already have Docker. A server whose package manager is not apt, dnf, yum, or apk is reported and left unchanged.
+Remote Docker (`method: docker` plus `host`, or `docker_host: ssh://user@host`) builds `pskit-<service>-<stage>` locally, saves it to a tar, and `scp`s that tar to `pskit-images/<container>/` in the SSH user's home. A script on the server installs Docker when it is missing (apt, dnf, yum, or apk), waits until `docker info` succeeds, runs `docker load` and `docker run`, and deletes the tar. The deploy fails if the container does not answer `/__pskit/health`, and the failure includes `docker logs`. The SSH user needs passwordless `sudo` (`sudo -n`) when Docker must be installed or when the user cannot talk to the daemon (`sudo` defaults to true). A key must be accepted by `ssh -o BatchMode=yes` (no passphrase prompt; load a protected key into the agent instead).
+
+SSH login options, for `ssh`, `scp` and remote `docker`: `pem` / `identity_file` (a key file); nothing (the SSH agent,
+`~/.ssh/id_*` and `~/.ssh/config`, or `auth: agent`); or a password through **sshpass** with `password_file: <file>`
+or `auth: password` plus the `SSHPASS` environment variable. The password never appears on a command line, in
+`pskit_host.json` or in Terraform state. sshpass is not available on Windows: run
+`pskit resources onprem ssh-key user@host` once (it asks the password, installs `~/.ssh/pskit_ed25519`) and set `pem`
+to that key. On Windows, if OpenSSH says the key is unprotected, restrict it with `icacls`. Set `install_docker: false` to refuse a server that does not already have Docker. A server whose package manager is not apt, dnf, yum, or apk is reported and left unchanged.
 
 **Node.js / TypeScript services** (`provider.runtime: nodejs18 | nodejs20 | nodejs22 | nodejs24`): the host is still the Python process above (HTTP, schedules, queues, storage, topics, workflow executions and logs work the same). Each function runs in its own long-lived `node pskit_runtime/worker.js` process with that function's environment, started on its first invocation. Handler `console`/`ctx.logger` output appears in `pskit logs` and the dashboard as `function` entries (plain `console` output as `stdout`). Embedded workflows are still run by the host's executor; only the task functions run in Node.js. Where `node` comes from:
 

@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-10-22
+
+### Added
+- **Web UI check**: `pskit resources onprem gui KEY --check` and studio *Details > Check web UI* test every web UI of a service: the container, the published port, the HTTP answer on the server itself (over SSH) and from this machine. Each UI gets a verdict and the fix: not running, port not published, bound to `127.0.0.1`, app not answering, firewall dropping (timeout) or rejecting (refused). On Azure / AWS / GCP the cloud is read from the instance metadata, with the exact `az vm open-port` command (resource group and VM name filled in), the subnet + NIC NSG note, the security group / firewall-rule steps, ufw / firewalld status, and the tunnel that works without opening anything. Nothing is changed.
+- **Web UI login choice**: companion UIs start *with password* (generated, or your own with `--gui-password-env` / the studio field) or *without password* (`--gui-login none`; Redis Commander, Kafka UI, Mongo Express). Adminer always asks for the database login. A UI without login on `0.0.0.0` prints a warning. `pskit resources onprem gui KEY --login none|password --password-env VAR` switches an existing UI.
+- **SSH login without a key file**: service targets and on-prem deploys log in with a key file, with the SSH agent / default key (no `pem`; also `auth: agent`), or with a password through sshpass (`password_file`, or `auth: password` with `SSHPASS`; studio *Log in with: Password*, saved in `.pskit/ssh/`, owner-only). The password never appears on a command line, in state, `pskit_host.json` or Terraform state.
+- `pskit resources onprem ssh-key user@host[:port]`: logs in with the password once (ssh asks in the terminal, so it works on Windows without sshpass), installs `~/.ssh/pskit_ed25519` and checks that the key logs in.
+- Guides: *Web UIs > With or without a password*, *The UI does not open* (the usual reasons an inbound rule "does not work"), *Try the web UIs in local Docker first*, and *SSH login: key, agent or password*; every How to use guide's Web UI section names the UI's port to open and the check command.
+
+### Changed
+- Remote Docker deploys no longer require a `.pem`: without one, OpenSSH uses the agent / default key (`pskit deploy` still offers to enter a path in a terminal). A `pem` that points to a missing file is still an error.
+
+### Fixed
+- A second companion web UI of the same kind on one server reused the default port and failed (`port is already allocated`); it now takes the next free port.
+
 ## [1.3.5] - 2026-10-22
 
 ### Added

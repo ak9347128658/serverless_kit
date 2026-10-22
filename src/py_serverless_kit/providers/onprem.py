@@ -679,7 +679,9 @@ class OnPremProvider(Provider):
             ident = Path(spec.identity_file)
             if not ident.is_absolute():
                 spec.identity_file = str((ctx.root / ident).resolve())
-        host = str(options.get("host") or "127.0.0.1")
+        if spec.password_file and not Path(spec.password_file).is_absolute():
+            spec.password_file = str((ctx.root / spec.password_file).resolve())
+        host =str(options.get("host") or "127.0.0.1")
         port = int(options.get("port") or 8080)
         if spec.method == "docker" and host in ("127.0.0.1", "localhost"):
             host = "0.0.0.0"  # noqa: S104 - container must listen on the published interface

@@ -108,7 +108,11 @@ The **Test** page (or **Test** on a function row) sends events to a function:
 - **On-prem services**: one-click Dragonfly, KeyDB, Apache Kafka, LavinMQ, Azurite, LocalStack, fake-gcs-server and
   RustFS next to the earlier services; *Also start the web UI* in the create form and *Details > Add / Remove web UI*
   (Adminer, Redis Commander, Kafka UI, Mongo Express). Every guide has a **Web UI** section with the URL, login and
-  tunnel command.
+  tunnel command. The create form's **Web UI login** chooses *With password* (generated or yours) or *Without
+  password*; **Details > Check web UI** finds out why a UI does not open (container, port, server, this machine,
+  Azure NSG / AWS security group / GCP firewall, ufw) and prints the fix. *SSH server* targets log in with a key
+  file, the SSH agent / default key, or a password (sshpass; on Windows install a key once with
+  `pskit resources onprem ssh-key user@host`).
 - **Resources → Guides → General → Existing cloud code**: what works when you bring Lambda ARNs, boto3 Lambda / SQS
   code or S3 / Azure / GCS SDK code, on every provider ([compatibility](resource-guides/compatibility.md)). On-prem
   queue guides show the boto3 SQS code against the host.

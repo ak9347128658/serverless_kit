@@ -266,17 +266,56 @@ def test_apply_docker_remote_skips_install_when_disabled(tmp_path: Path):
     assert "Docker is not installed on the server" in script
 
 
-def test_apply_docker_remote_requires_pem(tmp_path: Path):
+def test_apply_docker_remote_without_pem_uses_the_agent(tmp_path: Path):
     root = tmp_path / "onprem_app"
     root.mkdir()
     spec = _remote_spec(tmp_path / "missing.pem")
     spec["deploy"]["ssh"]["identity_file"] = ""
+    proc = _Proc()
+    apply_docker(root, spec, run=proc)
+    ssh_calls = [c for c in proc.calls if c[0] in ("ssh", "scp")]
+    assert ssh_calls and all("-i" not in c and "BatchMode=yes" in c for c in ssh_calls)
+
+
+def test_missing_pem_file_is_an_error(tmp_path: Path):
+    root = tmp_path / "onprem_app"
+    root.mkdir()
     try:
-        apply_docker(root, spec, run=_Proc())
+        apply_docker(root, _remote_spec(tmp_path / "missing.pem"), run=_Proc())
     except DeployError as exc:
-        assert ".pem" in str(exc)
+        assert "missing.pem" in str(exc)
     else:
         raise AssertionError("expected DeployError")
+
+
+def test_password_login_goes_through_sshpass(tmp_path: Path, monkeypatch):
+    from py_serverless_kit.providers import onprem_remote
+
+    root = tmp_path / "onprem_app"
+    root.mkdir()
+    secret = tmp_path / "server.pass"
+    secret.write_text("s3cret", "utf-8")
+    spec = _remote_spec(tmp_path / "missing.pem")
+    spec["deploy"]["ssh"].update({"identity_file": "", "password_file": str(secret)})
+    monkeypatch.setattr(onprem_remote.shutil, "which", lambda name: "/usr/bin/" + name)
+    proc = _Proc()
+    apply_docker(root, spec, run=proc)
+    remote = [c for c in proc.calls if c[0] == "sshpass"]
+    assert remote and all(c[1:3] == ["-f", str(secret)] and c[3] in ("ssh", "scp") for c in remote)
+    assert all("BatchMode=no" in c and "PubkeyAuthentication=no" in c for c in remote)
+    assert not any(c[0] in ("ssh", "scp") for c in proc.calls)
+    assert all("s3cret" not in " ".join(c) for c in proc.calls)
+
+
+def test_password_login_needs_sshpass(tmp_path: Path, monkeypatch):
+    from py_serverless_kit.providers import onprem_remote
+
+    monkeypatch.setattr(onprem_remote.shutil, "which", lambda name: None)
+    monkeypatch.setenv("SSHPASS", "x")
+    problem = onprem_remote.ssh_auth_problem({"host": "h", "user": "u", "auth": "password"})
+    assert problem and "sshpass" in problem and "ssh-key" in problem
+    monkeypatch.delenv("SSHPASS")
+    assert "SSHPASS" in (onprem_remote.ssh_auth_problem({"host": "h", "user": "u", "auth": "password"}) or "")
 
 
 def test_destroy_docker_remote_does_not_install(tmp_path: Path):

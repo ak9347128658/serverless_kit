@@ -100,7 +100,7 @@ def test_ask_onprem_pem_for_ssh_keeps_the_agent_when_blank(tmp_path, monkeypatch
     assert "pem" not in project.config.provider.options["deploy"]
 
 
-def test_remote_docker_deploy_asks_for_pem_off_a_terminal(tmp_path, monkeypatch):
+def test_remote_docker_deploy_with_a_missing_pem_fails_off_a_terminal(tmp_path, monkeypatch):
     root = tmp_path / "svc"
     root.mkdir()
     (root / "pskit.yml").write_text(
@@ -114,6 +114,7 @@ def test_remote_docker_deploy_asks_for_pem_off_a_terminal(tmp_path, monkeypatch)
         "      method: docker\n"
         "      host: 10.0.1.12\n"
         "      user: pskit\n"
+        "      pem: missing.pem\n"
         "functions:\n"
         "  hello:\n"
         "    handler: app.handlers.hello\n"
@@ -124,7 +125,7 @@ def test_remote_docker_deploy_asks_for_pem_off_a_terminal(tmp_path, monkeypatch)
     monkeypatch.chdir(root)
     result = CliRunner().invoke(cli, ["deploy"])
     assert result.exit_code != 0
-    assert ".pem" in result.output
+    assert "missing.pem" in result.output
 
 
 def test_validate_and_providers(project_dir):

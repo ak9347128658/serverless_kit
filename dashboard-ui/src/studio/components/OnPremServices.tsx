@@ -215,6 +215,12 @@ function CreateDrawer({
   const [showPassword, setShowPassword] = useState(false);
   const [bind, setBind] = useState("");
   const [withGui, setWithGui] = useState(true);
+  const [guiLogin, setGuiLogin] = useState<"password" | "none">("password");
+  const [guiPassword, setGuiPassword] = useState("");
+  const [sshAuth, setSshAuth] = useState<"key" | "agent" | "password">(
+    state.default_target.auth || (state.default_target.password_file ? "password" : state.default_target.identity_file ? "key" : "agent"),
+  );
+  const [sshPassword, setSshPassword] = useState("");
   const [attach, setAttach] = useState<string[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -249,12 +255,25 @@ function CreateDrawer({
     password && !/^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$/.test(password) ? "8-128 characters: letters, digits and !#%*+,.:=?@^_~-" : null;
   const loginError = login && !/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(login) ? "3-64 characters, starting with a letter" : null;
   const keyError = !NAME_RE.test(key) ? "letters, digits, - and _; start with a letter" : taken.includes(key) ? "already used" : null;
-  const sshError = target.method === "ssh" && !(ssh.host || "").trim() ? "the server's host name or IP" : null;
+  const sshError =
+    target.method === "ssh" && !(ssh.host || "").trim()
+      ? "the server's host name or IP"
+      : target.method === "ssh" && sshAuth === "key" && !(ssh.identity_file || "").trim()
+        ? "the path of the private key, or pick SSH agent / default key"
+        : target.method === "ssh" && sshAuth === "password" && !sshPassword && !ssh.password_file
+          ? "the SSH password"
+          : null;
+  const guiPasswordError =
+    guiPassword && !/^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$/.test(guiPassword) ? "8-128 characters: letters, digits and !#%*+,.:=?@^_~-" : null;
 
   const submit = async () => {
-    if (!item || keyError || sshError || passwordError || loginError) return;
+    if (!item || keyError || sshError || passwordError || loginError || guiPasswordError) return;
     setSubmitError(null);
-    const body: JsonObject = { key, service: item.id, target: (target.method === "ssh" ? { ...ssh, method: "ssh" } : { method: "local" }) as unknown as JsonObject };
+    const sshTarget: OnPremTarget = { ...ssh, method: "ssh", auth: sshAuth };
+    if (sshAuth !== "key") delete sshTarget.identity_file;
+    if (sshAuth === "password" && sshPassword) sshTarget.password = sshPassword;
+    if (sshAuth !== "password") delete sshTarget.password_file;
+    const body: JsonObject = { key, service: item.id, target: (target.method === "ssh" ? sshTarget : { method: "local" }) as unknown as JsonObject };
     if (role) body.role = role;
     if (port) body.port = port;
     if (address.trim()) body.address = address.trim();
@@ -262,7 +281,11 @@ function CreateDrawer({
     if (login.trim()) body.user = login.trim();
     if (password) body.password = password;
     if (bind) body.bind = bind;
-    if (item.companion && withGui) body.gui = true;
+    if (item.companion && withGui) {
+      body.gui = true;
+      body.gui_login = guiLogin;
+      if (guiLogin === "password" && guiPassword) body.gui_password = guiPassword;
+    }
     if (TRIGGER_ROLES.includes(role)) body.attach = attach;
     try {
       setJobId((await api.onpremCreate(body)).job_id);
@@ -282,7 +305,7 @@ function CreateDrawer({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={!!keyError || !!sshError || !!passwordError || !!loginError || running || job.status === "succeeded"}
+            disabled={!!keyError || !!sshError || !!passwordError || !!loginError || !!guiPasswordError || running || job.status === "succeeded"}
             onClick={() => void submit()}
           >
             {running ? "Creating…" : job.status === "succeeded" ? "Created" : item.kind === "runtime" ? "Install" : "Create"}
@@ -363,9 +386,37 @@ function CreateDrawer({
               <FormRow label="SSH port">
                 <NumberInput integer min={1} max={65535} value={ssh.port} onChange={(v) => setSsh((s) => ({ ...s, port: v }))} />
               </FormRow>
-              <FormRow label="Private key (.pem)" help="Empty: the SSH agent or your default key.">
-                <TextInput mono value={ssh.identity_file || ""} placeholder="~/.ssh/server.pem" onChange={(v) => setSsh((s) => ({ ...s, identity_file: v }))} />
+              <FormRow label="Log in with">
+                <Segmented
+                  label="Log in with"
+                  value={sshAuth}
+                  onChange={(v) => setSshAuth(v as "key" | "agent" | "password")}
+                  options={[
+                    { value: "key", label: "Key file (.pem)" },
+                    { value: "agent", label: "SSH agent / default key" },
+                    { value: "password", label: "Password" },
+                  ]}
+                />
               </FormRow>
+              {sshAuth === "key" && (
+                <FormRow label="Private key (.pem)" help="The key file you log in with (AWS .pem, Azure .pem, id_ed25519, ...).">
+                  <TextInput mono value={ssh.identity_file || ""} placeholder="~/.ssh/server.pem" onChange={(v) => setSsh((s) => ({ ...s, identity_file: v }))} />
+                </FormRow>
+              )}
+              {sshAuth === "agent" && (
+                <p className="muted small">
+                  No file: OpenSSH uses your SSH agent, <code className="mono">~/.ssh/id_*</code> and <code className="mono">~/.ssh/config</code>, exactly
+                  like <code className="mono">ssh {ssh.user || "user"}@{ssh.host || "host"}</code> in a terminal.
+                </p>
+              )}
+              {sshAuth === "password" && (
+                <FormRow
+                  label="SSH password"
+                  help="Saved in .pskit/ssh/ (out of git, owner-only) and sent with sshpass, which must be installed here (Linux / macOS). On Windows, install a key once instead: pskit resources onprem ssh-key user@host, then pick Key file."
+                >
+                  <TextInput mono type="password" value={sshPassword} placeholder={ssh.password_file ? "saved: " + ssh.password_file : ""} onChange={setSshPassword} />
+                </FormRow>
+              )}
               <Toggle checked={!!ssh.sudo} onChange={(b) => setSsh((s) => ({ ...s, sudo: b }))} label="Use sudo (the SSH user is not root and not in the docker group)" />
             </div>
           )}
@@ -424,6 +475,41 @@ function CreateDrawer({
                     <span className="muted small">{(item.gui || []).join(", ")}</span>
                   )}
                 </FormRow>
+              )}
+              {item.companion && withGui && (item.gui_logins || []).includes("none") && (
+                <div className="driver-box card card-pad">
+                  <FormRow label="Web UI login" help="A password protects the UI on an open port. No login is fine on 127.0.0.1, a private network or behind an SSH tunnel.">
+                    <Segmented
+                      label="Web UI login"
+                      value={guiLogin}
+                      onChange={(v) => setGuiLogin(v as "password" | "none")}
+                      options={[
+                        { value: "password", label: "With password" },
+                        { value: "none", label: "Without password" },
+                      ]}
+                    />
+                  </FormRow>
+                  {guiLogin === "password" ? (
+                    <FormRow label="Web UI password" error={guiPasswordError} help="Empty: generated (shown in How to use and the env file).">
+                      <div className="row-gap">
+                        <TextInput mono type={showPassword ? "text" : "password"} value={guiPassword} placeholder="generated" onChange={setGuiPassword} invalid={!!guiPasswordError} />
+                        <button type="button" className="btn btn-sm" onClick={() => setGuiPassword(generatePassword())}>
+                          Generate
+                        </button>
+                      </div>
+                    </FormRow>
+                  ) : (
+                    (bind || (target.method === "ssh" ? "0.0.0.0" : "127.0.0.1")) !== "127.0.0.1" && (
+                      <div className="hint-box">
+                        Anyone who can reach the UI's port can use it, and the UI holds the service's credentials. Open the port only to your IP, or keep it closed and use{" "}
+                        <code className="mono">pskit resources onprem tunnel {key || "<key>"} --remote-port &lt;ui port&gt;</code>.
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+              {item.companion && withGui && !(item.gui_logins || []).includes("none") && (
+                <p className="muted small">{item.companion} has no login of its own: it asks for the service's user and password.</p>
               )}
               {TRIGGER_ROLES.includes(role) && (
                 <FormRow label="Trigger functions" help="Adds a queue / storage event on resource: key to each selected function.">
@@ -522,9 +608,12 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
   }, [job.status]);
   const links = Array.isArray(info?.gui) ? info.gui : [];
   const hasCompanion = links.some((g) => g.kind === "companion");
-  const startGui = async (remove: boolean) => {
+  const [addLogin, setAddLogin] = useState<"password" | "none">("password");
+  const startGui = async (action: "add" | "remove" | "check") => {
     try {
-      setGuiJob((await (remove ? api.onpremGuiRemove(serviceKey) : api.onpremGui(serviceKey))).job_id);
+      const started =
+        action === "remove" ? api.onpremGuiRemove(serviceKey) : action === "check" ? api.onpremGuiCheck(serviceKey) : api.onpremGui(serviceKey, { login: addLogin });
+      setGuiJob((await started).job_id);
     } catch (exc) {
       setError(errorMessage(exc));
     }
@@ -562,7 +651,7 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
             </FormRow>
           )}
           {(links.length > 0 || info.companion) && (
-            <FormRow label="Web UI" help="Firewalled port? pskit resources onprem tunnel <key> --remote-port <ui port>, then open 127.0.0.1.">
+            <FormRow label="Web UI" help="Does not open? Check web UI tests the container, the port, the server and this machine, and names the fix (firewall / NSG, bind, tunnel).">
               <div className="stack-xs">
                 {links.map((g) => (
                   <div key={g.url} className="row-gap wrap">
@@ -573,19 +662,36 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
                     <span className="muted small">login: {g.login}</span>
                   </div>
                 ))}
-                {info.companion && (
-                  <div className="row-gap">
-                    {!hasCompanion ? (
-                      <button type="button" className="btn btn-sm" disabled={job.status === "running"} onClick={() => void startGui(false)}>
-                        Add web UI
-                      </button>
+                <div className="row-gap wrap">
+                  {links.length > 0 && (
+                    <button type="button" className="btn btn-sm" disabled={job.status === "running"} onClick={() => void startGui("check")}>
+                      Check web UI
+                    </button>
+                  )}
+                  {info.companion &&
+                    (!hasCompanion ? (
+                      <>
+                        {(info.gui_logins || []).includes("none") && (
+                          <Segmented
+                            label="Login"
+                            value={addLogin}
+                            onChange={(v) => setAddLogin(v as "password" | "none")}
+                            options={[
+                              { value: "password", label: "With password" },
+                              { value: "none", label: "Without password" },
+                            ]}
+                          />
+                        )}
+                        <button type="button" className="btn btn-sm" disabled={job.status === "running"} onClick={() => void startGui("add")}>
+                          Add web UI
+                        </button>
+                      </>
                     ) : (
-                      <button type="button" className="btn btn-sm btn-danger" disabled={job.status === "running"} onClick={() => void startGui(true)}>
+                      <button type="button" className="btn btn-sm btn-danger" disabled={job.status === "running"} onClick={() => void startGui("remove")}>
                         Remove web UI
                       </button>
-                    )}
-                  </div>
-                )}
+                    ))}
+                </div>
                 {guiJob && <JobConsole job={job} />}
               </div>
             </FormRow>

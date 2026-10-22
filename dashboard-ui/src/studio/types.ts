@@ -316,6 +316,7 @@ export interface OnPremCatalogItem {
   default_user?: string;
   gui?: string[];
   companion?: string | null;
+  gui_logins?: string[];
   notes: string;
 }
 
@@ -349,6 +350,10 @@ export interface OnPremTarget {
   port?: number;
   identity_file?: string;
   sudo?: boolean;
+  /** key: the .pem below; agent: the SSH agent / default key; password: sshpass (studio saves it in .pskit/ssh). */
+  auth?: "key" | "agent" | "password";
+  password?: string;
+  password_file?: string;
 }
 
 export interface OnPremService {
@@ -380,6 +385,7 @@ export interface OnPremService {
   reachable_from_here?: boolean;
   gui?: { label: string; url: string; port: number; login: string; kind: string; container?: string }[] | Record<string, unknown>;
   companion?: string | null;
+  gui_logins?: string[];
 }
 
 export interface OnPremServicesState {

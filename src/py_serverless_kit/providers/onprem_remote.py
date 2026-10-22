@@ -93,7 +93,7 @@ def apply_ssh(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) 
     """
     deploy = spec["deploy"]
     ssh = deploy["ssh"]
-    _check_identity(ssh, required=False)
+    _check_identity(ssh)
     _ensure_python(root, spec)
     _ensure_node(root, spec)
     if not (root / "pskit-run.sh").is_file():
@@ -151,7 +151,7 @@ def apply_docker_remote(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn
     docker = deploy["docker"]
     ssh = deploy["ssh"]
     image = str(docker["image"])
-    _check_identity(ssh, required=True)
+    _check_identity(ssh)
     _run(["docker", "build", "-t", image, "."], cwd=root, run=run)
     tar_path = root / "image.tar"
     try:
@@ -946,23 +946,56 @@ def _prepare_remote_dir(
     _ssh(ssh, command, run=run, check=check)
 
 
-def _check_identity(ssh: Dict[str, Any], *, required: bool) -> None:
+def _check_identity(ssh: Dict[str, Any], *, required: bool = False) -> None:
+    """Check the SSH login before a deploy: a key file, a password (``sshpass``), or the agent/default key.
+
+    ``required`` is kept for callers; an empty key now means the SSH agent or ``~/.ssh/id_*``.
+    """
+    problem = ssh_auth_problem(ssh)
+    if problem:
+        raise DeployError(problem)
+
+
+def uses_password(ssh: Dict[str, Any]) -> bool:
+    return bool(ssh.get("password_file")) or str(ssh.get("auth") or "") == "password"
+
+
+def ssh_auth_problem(ssh: Dict[str, Any]) -> Optional[str]:
+    """Why this SSH login cannot work from here, or None."""
     identity = str(ssh.get("identity_file") or "")
-    if not identity:
-        if required:
-            raise DeployError(
-                "remote deploy needs a .pem private key. "
-                "Set options.deploy.pem, or run `pskit deploy` in a terminal and enter the path."
-            )
-        return
-    if not os.path.isfile(identity):
-        raise DeployError(f"SSH private key not found: {identity}")
+    if identity and not os.path.isfile(identity):
+        return f"SSH private key not found: {identity}"
+    if not uses_password(ssh):
+        return None
+    password_file = str(ssh.get("password_file") or "")
+    if password_file and not os.path.isfile(password_file):
+        return f"SSH password file not found: {password_file}"
+    if not password_file and not os.environ.get("SSHPASS"):
+        return "SSH password login: set the SSHPASS environment variable, or options.deploy.password_file"
+    if not shutil.which("sshpass"):
+        return (
+            "SSH password login uses sshpass, which is not installed on this machine "
+            "(Linux: apt install sshpass / dnf install sshpass; macOS: brew install hudochenkov/sshpass/sshpass). "
+            "On Windows, or to stop using the password: run `pskit resources onprem ssh-key user@host` once "
+            "(it asks the password one time and installs a key), then use that key."
+        )
+    return None
+
+
+def _sshpass(ssh: Dict[str, Any]) -> List[str]:
+    """``sshpass`` in front of ssh/scp when the server takes a password (never on the command line)."""
+    if not uses_password(ssh):
+        return []
+    password_file = str(ssh.get("password_file") or "")
+    return ["sshpass", "-f", password_file] if password_file else ["sshpass", "-e"]
 
 
 def _ssh_options(ssh: Dict[str, Any], *, port_flag: str) -> List[str]:
+    password = uses_password(ssh)
     argv = [
         "-o",
-        "BatchMode=yes",
+        # sshpass answers the password prompt, which BatchMode would switch off.
+        "BatchMode=no" if password else "BatchMode=yes",
         "-o",
         "ConnectTimeout=20",
         "-o",
@@ -971,7 +1004,10 @@ def _ssh_options(ssh: Dict[str, Any], *, port_flag: str) -> List[str]:
         str(ssh.get("port") or 22),
     ]
     identity = str(ssh.get("identity_file") or "")
-    if identity:
+    if password:
+        argv.extend(["-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "PubkeyAuthentication=no",
+                     "-o", "NumberOfPasswordPrompts=1"])
+    elif identity:
         # Do not offer other keys. A wrong default key makes the server close the connection.
         argv.extend(["-i", identity, "-o", "IdentitiesOnly=yes"])
     known = str(ssh.get("known_hosts") or "accept-new")
@@ -986,7 +1022,11 @@ def _ssh_options(ssh: Dict[str, Any], *, port_flag: str) -> List[str]:
 
 
 def _ssh_base(ssh: Dict[str, Any]) -> List[str]:
-    return ["ssh", *_ssh_options(ssh, port_flag="-p")]
+    return [*_sshpass(ssh), "ssh", *_ssh_options(ssh, port_flag="-p")]
+
+
+def scp_argv(ssh: Dict[str, Any], src: str, dest: str) -> List[str]:
+    return [*_sshpass(ssh), "scp", *_ssh_options(ssh, port_flag="-P"), src, f"{_target(ssh)}:{dest}"]
 
 
 def _target(ssh: Dict[str, Any]) -> str:
@@ -999,8 +1039,7 @@ def _ssh(ssh: Dict[str, Any], command: str, *, run: Optional[RunFn], check: bool
 
 
 def _scp(ssh: Dict[str, Any], src: Path, dest: str, *, run: Optional[RunFn], check: bool = True) -> None:
-    argv = ["scp", *_ssh_options(ssh, port_flag="-P"), str(src), f"{_target(ssh)}:{dest}"]
-    _run(argv, run=run, check=check)
+    _run(scp_argv(ssh, str(src), dest), run=run, check=check)
 
 
 def _shq(value: str) -> str:
@@ -1027,6 +1066,11 @@ def _run(
 
 
 def _annotate_ssh_error(argv: Sequence[str], err: str) -> str:
+    if argv and argv[0] == "sshpass":
+        if "permission denied" in err.lower():
+            return err + "\nThe server rejected the SSH password: check the user, the password, and that the server allows "
+            "PasswordAuthentication (many cloud images only accept keys)."
+        return err
     if not argv or argv[0] not in ("ssh", "scp"):
         return err
     lowered = err.lower()

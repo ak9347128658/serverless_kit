@@ -461,7 +461,7 @@ def make_handler(app: Studio) -> type:
                     return 200, svc.service_usage(root, rest[0], reveal=_param(params, "reveal") in ("1", "true"))
                 if len(rest) == 2 and rest[1] == "logs" and method == "GET":
                     return 200, {"text": svc.logs(root, rest[0], tail=max(10, min(2000, _int(params, "tail", 200))))}
-                if len(rest) == 2 and rest[1] in ("gui", "gui-remove") and method == "POST":
+                if len(rest) == 2 and rest[1] in ("gui", "gui-remove", "gui-check") and method == "POST":
                     key, action = rest
                     body = _obj(self._body())
                     svc._entry(root, key)
@@ -469,12 +469,15 @@ def make_handler(app: Studio) -> type:
                     def run_gui(job: Any) -> int:
                         if action == "gui":
                             port = body.get("port")
-                            svc.add_gui(root, key, job.emit, port=int(port) if port else None)
+                            svc.add_gui(root, key, job.emit, port=int(port) if port else None,
+                                        login=str(body.get("login") or "password"), password=str(body.get("password") or ""))
+                        elif action == "gui-check":
+                            return 0 if svc.gui_check(root, key, job.emit)["ok"] else 1
                         else:
                             svc.remove_gui(root, key, job.emit)
                         return 0
 
-                    label = f"{'Start' if action == 'gui' else 'Remove'} web UI of {key}"
+                    label = {"gui": "Start", "gui-remove": "Remove", "gui-check": "Check"}[action] + f" web UI of {key}"
                     return 202, {"job_id": app.jobs.run_callable("onprem-service", run_gui, label=label).id}
                 if len(rest) == 2 and rest[1] in ("backup", "remove") and method == "POST":
                     key, action = rest

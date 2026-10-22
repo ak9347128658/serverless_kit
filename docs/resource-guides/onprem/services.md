@@ -39,7 +39,8 @@ with the main port: a second RabbitMQ on port 5682 gets its UI on 15682.
 
 1. **Resources → On-prem services → + Create service**.
 2. Pick a service. For Redis / Valkey choose **Queue** (list), **Stream** (consumer group) or **Cache**.
-3. **Where**: *This machine*, or *SSH server* with host, user, port, `.pem` and *use sudo*. When
+3. **Where**: *This machine*, or *SSH server* with host, user, port, *Log in with* (key file, SSH agent / default
+   key, or password, see [SSH login](#ssh-login-key-agent-or-password)) and *use sudo*. When
    `provider.options.deploy` already targets a server, it is filled in.
 4. Tick the functions to **trigger** (queues, streams and buckets). Each gets `queue: {resource: <key>}` or
    `storage: {resource: <key>}`.
@@ -86,6 +87,8 @@ Docker network with it, listening on the same interface as the service:
 | Kafka (Redpanda), Apache Kafka | Kafka UI | 8088 | `admin` + a generated password (sign-in page `/auth`) |
 | MongoDB | Mongo Express | 8081 | the MongoDB user and password |
 
+A second UI of the same kind on one server takes the next free port (8083, 8084, ...); *Details* shows the real one.
+
 Start it with *Also start the web UI* when creating, *Details > Add web UI*, or the CLI:
 
 ```bash
@@ -96,6 +99,150 @@ pskit resources onprem tunnel orders-db --remote-port 8089     # firewalled: bro
 ```
 
 Azurite has no web UI: attach **Azure Storage Explorer** (desktop) with the connection string from the env file.
+
+### With or without a password
+
+The create form's **Web UI login** (and *Details > Add web UI*) chooses how the companion UI signs in:
+
+| Choice | Redis Commander, Kafka UI | Mongo Express | Adminer |
+|---|---|---|---|
+| **With password** (default) | user `admin`, a generated password, or yours | the MongoDB login, or `<user>` + yours | the database login (always) |
+| **Without password** | open (`HTTP_USER` unset, `AUTH_TYPE=DISABLED`) | open (`ME_CONFIG_BASICAUTH=false`) | not offered |
+
+Your own or a generated password goes to the env file as `PSKIT_<KEY>_GUI_PASSWORD` and shows in *How to use*.
+
+```bash
+export CACHE_UI_PASSWORD='Ui.pass-2026'
+pskit resources onprem create cache --service redis --role cache --gui --gui-password-env CACHE_UI_PASSWORD
+pskit resources onprem create cache --service redis --role cache --gui --gui-login none --bind 127.0.0.1
+pskit resources onprem gui cache --login none            # switch an existing UI (it is recreated)
+```
+
+Without a password, anyone who reaches the port can use the UI, and the UI holds the service's credentials. Use it on
+`127.0.0.1`, on a private network, with the port open only to your IP, or keep the port closed and use the tunnel.
+pskit prints a warning when a UI without login listens on `0.0.0.0`.
+
+Built-in UIs keep their own sign-in: RabbitMQ, LavinMQ, MinIO and RustFS use the service's user and password;
+ElasticMQ, NATS monitoring and Mailpit have none.
+
+### The UI does not open
+
+Run the check. It changes nothing, and tests every UI of the service, from the server itself (over SSH) and from your
+machine:
+
+```bash
+pskit resources onprem gui jobs --check          # studio: Details > Check web UI
+```
+
+```text
+== Queue browser: http://13.72.87.80:9325/
+  container pskit-shop-jobs: running
+  published: 0.0.0.0:9325 (container port 9325)
+  on the server (http://127.0.0.1:9325/): http 200
+  from this machine (http://13.72.87.80:9325/): timeout
+Queue browser: no answer from outside: a firewall drops the connection
+  - Azure: add an inbound rule for TCP 9325 to the network security group, e.g. `az vm open-port -g my-rg -n my-vm --port 9325 ...`
+  - Azure applies EVERY NSG on the path: one on the subnet and one on the network interface both need the rule ...
+  - Works right away without opening any port: `pskit resources onprem tunnel jobs --remote-port 9325`
+```
+
+| Verdict | Meaning and fix |
+|---|---|
+| the container is not running | `pskit resources onprem logs <key>`; start the UI again with `gui <key>` |
+| container port N is not published | the container was made without that port (older pskit): remove keeping the data and create again |
+| does not answer on the server itself | the app is still starting or failed: its logs |
+| published on 127.0.0.1 only | created with *Listen on: this machine*: use the tunnel, or recreate with `0.0.0.0` |
+| a firewall drops the connection (timeout) | open the **UI's port** (not only the service's) in the cloud firewall; see below |
+| the connection was refused | a host firewall (ufw / firewalld) rejects it, or the address is not this server |
+| reachable | open the URL with `http://` (not `https://`) |
+
+"I allowed inbound and it still does not open" is almost always one of these:
+
+- The rule opens the service's port (9324, 6379, ...) but not the **UI's** port (9325, 8082, 15672, ...). The check
+  prints the exact port.
+- **Azure** applies every network security group on the path: the one on the **subnet** and the one on the **network
+  interface** both need the rule (VM > Networking shows both). The rule's source must include your public IP (use
+  *Any* to test), and its priority number must be lower than any Deny rule's. The check reads the resource group and
+  VM name from the instance metadata and prints the `az vm open-port` command.
+- **AWS**: the instance's security group, and the subnet's network ACL. **GCP**: a firewall rule, and the instance's
+  network tags if the rule uses target tags.
+- ufw or firewalld on the server (the check reports them); Docker-published ports usually bypass ufw.
+- Your own network (company VPN, proxy) blocks outgoing non-web ports: try from another network, or
+  `Test-NetConnection <host> -Port <port>` (PowerShell) / `nc -vz <host> <port>`.
+- The address in the links is a private IP: set *Advanced > Address* to the public one, or use the tunnel.
+
+The tunnel always works over SSH (port 22), with no firewall change:
+
+```bash
+pskit resources onprem tunnel jobs --remote-port 9325      # then browse http://127.0.0.1:9325
+```
+
+### Try the web UIs in local Docker first
+
+Everything works the same on your own machine with Docker Desktop (or Docker Engine), with no server and no
+firewall. Pick *Where: This machine* in the studio, or `--local`:
+
+```bash
+pskit resources onprem create cache --service redis --role cache --local --gui                      # Redis Commander
+pskit resources onprem create docs  --service mongodb --local --gui --gui-login none                # Mongo Express, open
+pskit resources onprem create events --service kafka --local --gui                                  # Kafka UI
+pskit resources onprem create jobs  --service elasticmq --local                                     # built-in queue browser
+pskit resources onprem create mq    --service rabbitmq --local                                      # management UI
+pskit resources onprem gui cache                  # prints each URL and login
+pskit resources onprem gui cache --check          # container, port and HTTP answer
+pskit resources onprem usage cache                # the env file password, the URL, code examples
+```
+
+Then open the printed links, for example:
+
+| UI | URL | Login |
+|---|---|---|
+| Redis Commander | http://127.0.0.1:8082 | `admin` / `PSKIT_CACHE_GUI_PASSWORD` in `.env.onprem` |
+| Mongo Express (no login) | http://127.0.0.1:8081 | none |
+| Kafka UI | http://127.0.0.1:8088/auth | `admin` / `PSKIT_EVENTS_GUI_PASSWORD` |
+| ElasticMQ queue browser | http://127.0.0.1:9325 | none |
+| RabbitMQ management | http://127.0.0.1:15672 | the service user / `PSKIT_MQ_PASSWORD` |
+
+Local services listen on `127.0.0.1`, so only your machine can open them. `docker ps` lists them (named
+`pskit-<project>-<key>` and `...-ui`). Clean up with *Remove* (or `pskit resources onprem remove <key> --delete-data`).
+
+## SSH login: key, agent or password
+
+The *SSH server* target (and `provider.options.deploy` for the functions) logs in one of three ways:
+
+| *Log in with* | Studio | CLI | `pskit.yml` (`provider.options.deploy`) |
+|---|---|---|---|
+| **Key file** | path of the `.pem` / private key | `--pem ~/.ssh/server.pem` | `pem: ~/.ssh/server.pem` |
+| **SSH agent / default key** | nothing to fill in | leave `--pem` out | leave `pem` out, or `auth: agent` |
+| **Password** | the password (saved in `.pskit/ssh/`, owner-only, out of git) | `--ssh-password-env VAR` or `--ssh-password-file FILE` | `password_file: ~/.ssh/server.pass`, or `auth: password` with `SSHPASS` set |
+
+*SSH agent / default key* is what `ssh user@host` does in a terminal: the agent, `~/.ssh/id_ed25519` /
+`id_rsa`, and `~/.ssh/config` (`Host` aliases, `IdentityFile`, jump hosts).
+
+Password logins go through **sshpass**, so the password never appears on a command line or in the state. Install it
+on the machine that runs pskit: `sudo apt install sshpass`, `sudo dnf install sshpass`, or
+`brew install hudochenkov/sshpass/sshpass`. The server must allow `PasswordAuthentication` (many cloud images allow
+keys only).
+
+**On Windows** (no sshpass), or to stop typing passwords: install a key once. pskit creates
+`~/.ssh/pskit_ed25519`, logs in with the password one time (ssh asks for it in the terminal), adds the key to
+`authorized_keys`, and checks that the key works:
+
+```bash
+pskit resources onprem ssh-key azureuser@13.72.87.80          # [:2222] for another port
+pskit resources onprem create jobs --service elasticmq --ssh azureuser@13.72.87.80 --pem ~/.ssh/pskit_ed25519
+```
+
+```yaml
+provider:
+  name: onprem
+  options:
+    deploy:
+      method: ssh
+      host: 13.72.87.80
+      user: azureuser
+      pem: ~/.ssh/pskit_ed25519            # or: password_file: ~/.ssh/server.pass  (sshpass)
+```
 
 ## Use it from any program
 
@@ -280,3 +427,7 @@ Data directories are copied while the service runs. For Kafka and NATS, stop pro
 | `is not reachable from this machine; check the firewall` | the service runs; open the port from the functions' server |
 | `sqs: ... QueueDoesNotExist` (ElasticMQ) | ElasticMQ forgets queues on restart; redeploy so the sqs driver gets `create_queue` (the default for non-AWS endpoints since 1.3.1) |
 | `environment variable PSKIT_..._URL ... is not set on the host` | `provider.options.env_file` is missing or the file was deleted; recreate the service or add the line |
+| the web UI does not open | `pskit resources onprem gui <key> --check` (studio: *Details > Check web UI*), see [The UI does not open](#the-ui-does-not-open) |
+| `SSH password login uses sshpass, which is not installed` | install sshpass, or `pskit resources onprem ssh-key user@host` once and use the key |
+| `The server rejected the SSH password` | wrong user / password, or the server only accepts keys (`PasswordAuthentication no`) |
+| `Permission denied (publickey)` | pick the right key file, or *SSH agent / default key*, or install a key with `ssh-key` |

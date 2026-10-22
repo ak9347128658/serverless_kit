@@ -194,7 +194,9 @@ export const api = {
   onpremCreate: (body: JsonObject) => request<{ job_id: string }>("POST", "/api/onprem-services", body),
   onpremStatus: (key: string, reveal = false) =>
     request<OnPremService>("GET", `/api/onprem-services/${encodeURIComponent(key)}`, undefined, { query: { reveal: reveal ? "1" : undefined } }),
-  onpremGui: (key: string, port?: number) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui`, { port }),
+  onpremGui: (key: string, opts: { port?: number; login?: "password" | "none"; password?: string } = {}) =>
+    request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui`, opts),
+  onpremGuiCheck: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui-check`, {}),
   onpremGuiRemove: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui-remove`, {}),
   onpremLogs: (key: string) => request<{ text: string }>("GET", `/api/onprem-services/${encodeURIComponent(key)}/logs`),
   onpremBackup: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/backup`, {}),

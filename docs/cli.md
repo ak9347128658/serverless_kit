@@ -207,6 +207,9 @@ to `pskit.yml`. Step by step: [resource-guides/onprem/services.md](resource-guid
 pskit resources onprem catalog
 pskit resources onprem create jobs --service redis --attach worker --save
 pskit resources onprem create events --service kafka --ssh ubuntu@10.0.0.7 --pem key.pem --sudo --save
+pskit resources onprem create cache --service redis --role cache --ssh ubuntu@10.0.0.7 --gui --gui-login none   # agent / default key
+pskit resources onprem ssh-key azureuser@13.72.87.80          # password server: install a key once
+pskit resources onprem gui jobs --check                       # why does the web UI not open?
 pskit resources onprem status jobs --reveal
 pskit resources onprem backup jobs
 pskit resources onprem remove jobs --delete-data --save
@@ -217,13 +220,16 @@ pskit resources onprem remove jobs --delete-data --save
 | `catalog [--json]` | services (redis, valkey, kafka, nats, rabbitmq, elasticmq, minio, postgres, mysql, mariadb, mongodb, memcached, mailpit) and runtimes (python, docker) |
 | `create KEY --service S` | start it (or install the runtime) and record it in `.pskit/onprem-services.json` |
 | `--role` | what the resource is used as: `queue`, `stream` (Redis / Valkey stream), `cache`, `database`, `storage`, `custom` |
-| `--ssh user@host[:port] --pem FILE --sudo` | create it on that server (default: `provider.options.deploy` when it targets one, else this machine); `--local` forces this machine |
-| `--gui` | also start the companion web UI (Adminer, Redis Commander, Kafka UI, Mongo Express) |
+| `--ssh user@host[:port] --pem FILE --sudo` | create it on that server (default: `provider.options.deploy` when it targets one, else this machine); `--local` forces this machine. Without `--pem`: the SSH agent / default key |
+| `--ssh-password-env VAR`, `--ssh-password-file FILE` | log in with a password instead of a key (through `sshpass`; never on a command line) |
+| `--gui`, `--gui-login password\|none`, `--gui-password-env VAR` | also start the companion web UI (Adminer, Redis Commander, Kafka UI, Mongo Express), with a generated password, your own, or none |
 | `--user`, `--password`, `--password-env VAR` | credentials to create (default user `pskit`, Redis `default`; default password generated) |
 | `--port`, `--address`, `--bind`, `--image` | published port, address functions use, interface to listen on, Docker image |
 | `-a, --attach FN` | add a `queue` / `storage` trigger on resource KEY to FN (repeatable) |
 | `--save` | write the resource, `provider.options.env_file` and triggers into `pskit.yml` (comments are not kept) |
-| `gui KEY [--port N] [--remove]` | start or remove the companion web UI, and list every web UI of the service with its login |
+| `gui KEY [--port N] [--login password\|none] [--password-env VAR] [--remove]` | start (or recreate / remove) the companion web UI, and list every web UI of the service with its login |
+| `gui KEY --check` | why a web UI does not open: container, published port, answer on the server and from here, cloud firewall / NSG (Azure, AWS, GCP), ufw / firewalld; exits 1 when one is unreachable |
+| `ssh-key user@host[:port] [--key FILE]` | log in with the password once and install `~/.ssh/pskit_ed25519` on the server (works on Windows), then use it as `--pem` |
 | `tunnel KEY [--local-port N] [--remote-port N]` | forward the service's port to `127.0.0.1` over SSH (firewalled ports) and print the variables to use |
 | `usage KEY [--reveal]` | connect from any program: address, credentials, Python / Node.js client code, terminal tools, security |
 | `list`, `status KEY [--reveal]`, `logs KEY` | what exists, its state / health / credentials, the container log |

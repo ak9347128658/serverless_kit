@@ -290,7 +290,8 @@ def test_docker_writes_dockerfile(make_project, render):
     assert "onprem_ctl.py" in docker
     assert spec["endpoint"] == "http://10.0.1.12:9090"
     warnings = [str(i) for i in project.validate() if i.level == "warning"]
-    assert any("pem" in warning for warning in warnings)
+    # No .pem: the SSH agent or the default key is used, so it is no longer a warning.
+    assert not any("pem" in warning for warning in warnings)
 
 
 REMOTE_DOCKER = """
