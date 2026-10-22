@@ -356,7 +356,7 @@ def dockerfile_text(runtime: str, port: int, node_runtime: str = "") -> str:
             " && rm -rf /var/lib/apt/lists/*\n"
             "WORKDIR /opt/pskit\n"
             "COPY staging/ /opt/pskit/app/\n"
-            "COPY pskit_host.json onprem_ctl.py /opt/pskit/\n"
+            "COPY pskit_host.json onprem_ctl.py host.env* /opt/pskit/\n"
             "ENV PYTHONUNBUFFERED=1\n"
             f"EXPOSE {port}\n"
             'CMD ["python3", "onprem_ctl.py", "foreground"]\n'
@@ -366,7 +366,7 @@ def dockerfile_text(runtime: str, port: int, node_runtime: str = "") -> str:
         f"FROM {base}\n"
         "WORKDIR /opt/pskit\n"
         "COPY staging/ /opt/pskit/app/\n"
-        "COPY pskit_host.json onprem_ctl.py /opt/pskit/\n"
+        "COPY pskit_host.json onprem_ctl.py host.env* /opt/pskit/\n"
         "ENV PYTHONUNBUFFERED=1\n"
         f"EXPOSE {port}\n"
         'CMD ["python", "onprem_ctl.py", "foreground"]\n'
@@ -451,7 +451,7 @@ def _pack_release(root: Path, dest: Path) -> None:
     if dest.exists():
         dest.unlink()
     with tarfile.open(dest, "w:gz") as tar:
-        for name in ("pskit_host.json", "onprem_ctl.py", "pskit-run.sh", "pskit.service"):
+        for name in ("pskit_host.json", "onprem_ctl.py", "pskit-run.sh", "pskit.service", "host.env"):
             path = root / name
             if path.is_file():
                 tar.add(str(path), arcname=name, filter=_tar_filter)

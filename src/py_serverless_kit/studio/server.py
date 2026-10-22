@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .._version import __version__
 from ..dashboard.server import _allowed_hosts, is_loopback
-from . import devenv, files, project, system
+from . import devenv, files, guides, project, system
 from .discover import discover
 from .jobs import JobManager
 from .project import StudioError
@@ -313,6 +313,13 @@ def make_handler(app: Studio) -> type:
                 provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
                 stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
                 return 200, system.cloud_resources(root, provider, stage)
+            if parts and parts[0] == "resource-guides" and method == "GET":
+                if len(parts) == 1:
+                    return 200, guides.index()
+                if len(parts) == 3:
+                    return 200, guides.page(parts[1], parts[2])
+            if parts and parts[0] == "onprem-services":
+                return self._onprem_services(method, parts[1:], params)
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":
@@ -400,6 +407,67 @@ def make_handler(app: Studio) -> type:
                 state.update(stopped)
                 return 200, state
             raise StudioError(404 if method == "GET" else 405, "unknown API endpoint")
+
+        def _onprem_services(self, method: str, rest: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
+            """Docker services for on-prem functions: create, inspect, back up, remove (long steps as jobs)."""
+            from ..core import onprem_services as svc
+
+            root = app.root
+            try:
+                if not rest and method == "GET":
+                    raw = app.raw_config()
+                    return 200, {
+                        "catalog": svc.catalog(),
+                        "services": svc.list_services(root),
+                        "default_target": svc.default_target(raw),
+                        "env_file": svc.env_file_of(raw),
+                    }
+                if not rest and method == "POST":
+                    body = _obj(self._body())
+                    raw = app.raw_config()
+                    svc.check_request(body, root, raw)  # fail fast with a 400, not a failed job
+                    label = f"Create {body.get('service')} {body.get('key')}"
+
+                    def create(job: Any) -> int:
+                        svc.create(root, body, raw, job.emit)
+                        return 0
+
+                    return 202, {"job_id": app.jobs.run_callable("onprem-service", create, label=label).id}
+                if rest in (["apply"], ["unapply"]) and method == "POST":
+                    body = _obj(self._body())
+                    draft = body.get("raw")
+                    if not isinstance(draft, dict):
+                        raise StudioError(400, "raw must be the project as an object")
+                    key = str(body.get("key") or "")
+                    if rest == ["unapply"]:
+                        return 200, {"raw": svc.remove_from_raw(draft, key)}
+                    entry = svc.load_state(root)["services"].get(key)
+                    if not isinstance(entry, dict):
+                        raise StudioError(404, f"no on-prem service {key!r}")
+                    attach = body.get("attach")
+                    return 200, {"raw": svc.apply_to_raw(draft, entry, attach if isinstance(attach, list) else None)}
+                if len(rest) == 1 and method == "GET":
+                    reveal = _param(params, "reveal") in ("1", "true")
+                    return 200, svc.status(root, rest[0], reveal=reveal)
+                if len(rest) == 2 and rest[1] == "logs" and method == "GET":
+                    return 200, {"text": svc.logs(root, rest[0], tail=max(10, min(2000, _int(params, "tail", 200))))}
+                if len(rest) == 2 and rest[1] in ("backup", "remove") and method == "POST":
+                    key, action = rest
+                    body = _obj(self._body())
+                    svc.public_entry(svc._entry(root, key))  # 400 for an unknown key before starting a job
+
+                    def run(job: Any) -> int:
+                        if action == "backup":
+                            svc.backup(root, key, job.emit)
+                        else:
+                            svc.remove(root, key, job.emit, delete_data=bool(body.get("delete_data")))
+                        return 0
+
+                    job = app.jobs.run_callable("onprem-service", run, label=f"{action.capitalize()} {key}")
+                    return 202, {"job_id": job.id}
+            except svc.ServiceError as exc:
+                raise StudioError(400, str(exc)) from None
+            raise StudioError(404 if method == "GET" else 405, "unknown on-prem service endpoint")
 
     return Handler
 

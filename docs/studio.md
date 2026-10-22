@@ -85,6 +85,14 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   bucket or publishes to a topic, for managed resources (after deploy) and external ones (right away), with the same
   How-to-test tabs as the Test page. For database, cache and custom resources it shows the `PSKIT_RESOURCE_*`
   variables the bound functions get and a Python / Node.js snippet that reads them.
+- **Resources → On-prem services → + Create service** starts Redis / Valkey (queue, stream or cache), Kafka
+  (Redpanda), NATS JetStream, RabbitMQ, an SQS-compatible queue, MinIO, PostgreSQL, MySQL, MariaDB, MongoDB, Memcached or
+  Mailpit with Docker, on this machine or any SSH server, or installs Python / Docker on a server. When it is ready the
+  resource, `provider.options.env_file` and triggers on the functions you ticked are added to the draft. Each service
+  has **Details** (state, health, credentials, container log), **Backup** and **Remove**. See
+  [resource-guides/onprem/services.md](resource-guides/onprem/services.md).
+- **Resources → Guides** (and the *How to set up* links in the resource form) shows the step-by-step
+  [resource guides](resource-guides/README.md) for every cloud inside the studio.
 - **Resources → In the cloud** lists the buckets, queues and topics pskit created for the provider and stage in the top
   bar, deployed or kept. Select some (or **Delete all kept**) and delete them with their data (`pskit resources delete`,
   behind a typed confirmation). Deleting a managed resource from the Resources table only removes it from `pskit.yml`;

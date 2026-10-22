@@ -14,6 +14,10 @@ import type {
   ResourceTestGuide,
   CloudResourceRow,
   DevEnvStatus,
+  GuideIndex,
+  GuidePage,
+  OnPremService,
+  OnPremServicesState,
   ValidateResult,
   VsCodeState,
 } from "./types";
@@ -184,6 +188,20 @@ export const api = {
   env: () => request<DevEnvStatus>("GET", "/api/env"),
   envSetup: (body: { python?: string; recreate?: boolean; language?: string }) => request<{ job_id: string }>("POST", "/api/env/setup", body),
   vscodeStop: () => request<VsCodeState>("POST", "/api/vscode/stop", {}),
+  onpremServices: () => request<OnPremServicesState>("GET", "/api/onprem-services"),
+  onpremCreate: (body: JsonObject) => request<{ job_id: string }>("POST", "/api/onprem-services", body),
+  onpremStatus: (key: string, reveal = false) =>
+    request<OnPremService>("GET", `/api/onprem-services/${encodeURIComponent(key)}`, undefined, { query: { reveal: reveal ? "1" : undefined } }),
+  onpremLogs: (key: string) => request<{ text: string }>("GET", `/api/onprem-services/${encodeURIComponent(key)}/logs`),
+  onpremBackup: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/backup`, {}),
+  onpremRemove: (key: string, deleteData: boolean) =>
+    request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/remove`, { delete_data: deleteData }),
+  onpremApply: (raw: JsonObject, key: string, attach?: string[]) =>
+    request<{ raw: JsonObject }>("POST", "/api/onprem-services/apply", { raw, key, attach }),
+  onpremUnapply: (raw: JsonObject, key: string) => request<{ raw: JsonObject }>("POST", "/api/onprem-services/unapply", { raw, key }),
+  guides: () => request<GuideIndex>("GET", "/api/resource-guides"),
+  guide: (cloud: string, page: string) =>
+    request<GuidePage>("GET", `/api/resource-guides/${encodeURIComponent(cloud)}/${encodeURIComponent(page)}`),
 };
 
 export function errorMessage(exc: unknown): string {

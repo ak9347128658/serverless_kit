@@ -22,9 +22,18 @@ path you already have instead.
   ``DELETE /__pskit/logs[?function=]`` clears them. ``GET /__pskit/stats``
   returns per-function invocation counters.
 
-Queue, storage and topic events may carry a ``driver`` binding (from a
-``resources:`` entry). ``directory`` moves that queue/bucket to its own path;
-``redis`` (queues) and ``s3`` (storage) use the drivers in ``runtime/drivers``.
+* ``POST /__pskit/queues/<name>/lease`` (``{"batch", "visibility"}``), ``.../ack`` and
+  ``.../nack`` (``{"receipts": [...]}``) let a host elsewhere consume a built-in queue
+  with at-least-once leases (the ``pskit_host`` driver).
+* ``GET /__pskit/resources`` lists ``resources:`` with their backend and queue depth.
+
+Queue, storage and topic resources may carry a ``driver`` binding. ``directory``
+moves that queue/bucket to its own path; the others use ``runtime/drivers``.
+Bindings come from ``resources`` (so a queue only published to, or used as a
+dead-letter queue, still uses its driver) and from the events that consume them.
+
+``host.env`` next to ``pskit_host.json`` (from ``provider.options.env_file``) is
+loaded at start for variables the process environment does not already set.
 """
 
 from __future__ import annotations
@@ -62,6 +71,43 @@ from .workflow import install_executor, wants_wait
 
 _BROKER: Optional[Broker] = None
 _MAX_BODY = 64 * 1024 * 1024
+# Copied from provider.options.env_file next to pskit_host.json; never in Terraform state.
+ENV_FILE = "host.env"
+
+
+def parse_env_text(text: str) -> Dict[str, str]:
+    """``KEY=VALUE`` lines (dotenv style): ``#`` comments, optional ``export``, quoted values."""
+    out: Dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        if key and (key[0].isalpha() or key[0] == "_") and all(c.isalnum() or c == "_" for c in key):
+            out[key] = value
+    return out
+
+
+def load_env_file(path: Path) -> List[str]:
+    """Set variables from ``path`` that the process environment does not already define."""
+    try:
+        text = path.read_text("utf-8")
+    except OSError:
+        return []
+    added = []
+    for key, value in parse_env_text(text).items():
+        if key not in os.environ:
+            os.environ[key] = value
+            added.append(key)
+    return added
 
 
 def install_broker(broker: Optional[Broker]) -> None:
@@ -163,7 +209,17 @@ class Broker:
         self._bucket_paths: Dict[str, Path] = {}
         self._queue_drivers: Dict[str, Any] = {}
         self._storage_drivers: Dict[str, Any] = {}
+        # Resources first: a driver-backed queue that no event consumes (only published
+        # to, or used as a dead-letter queue) must still go through its driver.
+        self._bind_resources(spec.get("resources") or {})
         self._bind_drivers(spec.get("functions") or {})
+
+    def _bind_resources(self, resources: Dict[str, Any]) -> None:
+        for res in resources.values():
+            binding = res.get("driver") if isinstance(res, dict) else None
+            kind = res.get("type") if isinstance(res, dict) else None
+            if isinstance(binding, dict) and kind in ("queue", "storage", "topic") and res.get("name"):
+                self._bind(binding, str(res["name"]), str(kind))
 
     def _bind_drivers(self, functions: Dict[str, Any]) -> None:
         for fn in functions.values():
@@ -246,6 +302,18 @@ class Broker:
                         notes.extend(self._ensure_named(self.bucket_dir(ev["bucket"]), ev, "bucket"))
                 elif kind == "topic":
                     notes.extend(self._ensure_named(self.topic_dir(ev["name"]) / "pending", ev, "topic"))
+        # Managed resources no event uses (published to from handlers) exist from the start too.
+        for res in (self.spec.get("resources") or {}).values():
+            if not isinstance(res, dict) or res.get("external") or not res.get("name"):
+                continue
+            name = str(res["name"])
+            kind = res.get("type")
+            if kind == "queue" and name not in self._queue_drivers:
+                notes.extend(self._ensure_named(self.queue_dir(name), {}, "queue"))
+            elif kind == "storage" and name not in self._storage_drivers:
+                notes.extend(self._ensure_named(self.bucket_dir(name), {}, "bucket"))
+            elif kind == "topic":
+                notes.extend(self._ensure_named(self.topic_dir(name) / "pending", {}, "topic"))
         return notes
 
     def _ensure_named(self, path: Path, ev: Dict[str, Any], kind: str) -> List[str]:
@@ -363,6 +431,57 @@ class Broker:
                 else:
                     current["visible_at"] = now
                     _write_json(path, current)
+
+    # Leases for a consumer on another host (the `pskit_host` driver). Only file-backed
+    # queues: a driver queue already has its own service to lease from.
+    def lease_queue(self, name: str, batch: int, visibility: float, now: float) -> List[Dict[str, Any]]:
+        if name in self._queue_drivers:
+            raise ValueError(f"queue {name} uses a driver; consume it from that service directly")
+        ev = {"name": name, "batch_size": max(1, min(int(batch), 100)), "visibility_timeout": max(1.0, visibility)}
+        out = []
+        for msg in self.claim_queue(ev, now):
+            out.append(
+                {
+                    "id": msg.get("id"),
+                    "body": msg.get("body"),
+                    "attributes": msg.get("attributes") or {},
+                    # Deliveries so far, counting this one (the file stores failures).
+                    "receives": int(msg.get("receives") or 0) + 1,
+                    "enqueued_at": msg.get("enqueued_at"),
+                    "receipt": Path(msg["path"]).name,
+                }
+            )
+        return out
+
+    def _leased_path(self, name: str, receipt: str) -> Path:
+        text = str(receipt)
+        if not text.endswith(".json") or "/" in text or "\\" in text or text.startswith("."):
+            raise ValueError(f"invalid receipt {receipt!r}")
+        return self.queue_dir(name) / "messages" / text
+
+    def ack_queue(self, name: str, receipts: Iterable[str]) -> int:
+        done = 0
+        with self._lock:
+            for receipt in receipts:
+                path = self._leased_path(name, receipt)
+                if path.is_file():
+                    path.unlink()
+                    done += 1
+        return done
+
+    def nack_queue(self, name: str, receipts: Iterable[str], now: float) -> int:
+        done = 0
+        with self._lock:
+            for receipt in receipts:
+                path = self._leased_path(name, receipt)
+                current = _read_json(path, None)
+                if not isinstance(current, dict):
+                    continue
+                current["receives"] = int(current.get("receives") or 0) + 1
+                current["visible_at"] = now
+                _write_json(path, current)
+                done += 1
+        return done
 
     def _next_seq(self, queue: Path) -> int:
         seq_path = queue / "seq"
@@ -518,6 +637,9 @@ class Host:
         self.spec = json.loads((self.root / "pskit_host.json").read_text("utf-8"))
         self.spec["root"] = str(self.root)
         self.app_dir = self.root / "app"
+        # Secrets for `<name>_env` driver options and handlers (provider.options.env_file),
+        # loaded before the broker builds drivers.
+        load_env_file(self.root / ENV_FILE)
         # `custom` drivers import classes from the app while the broker is built, and may
         # resolve relative paths against the host root.
         self._prepare_imports()
@@ -1236,8 +1358,14 @@ class Host:
                     return self._json(200, host.stats())
                 if parts and parts[0] == "executions":
                     return self._executions(parts[1:], query)
+                if parts == ["resources"]:
+                    if self.command != "GET":
+                        return self._json(405, {"error": "GET the resource list"})
+                    return self._json(200, host.resources())
                 if parts and parts[0] == "queues" and len(parts) == 2:
                     return self._queue(parts[1], raw)
+                if parts and parts[0] == "queues" and len(parts) == 3 and parts[2] in ("lease", "ack", "nack"):
+                    return self._lease(parts[1], parts[2], raw)
                 if parts and parts[0] == "topics" and len(parts) == 2:
                     return self._topic(parts[1], raw)
                 if parts and parts[0] == "storage" and len(parts) >= 3:
@@ -1302,6 +1430,24 @@ class Host:
                 payload = json.loads(raw.decode("utf-8") or "null")
                 ids = [host.broker.submit_queue(name, message, attrs) for message, attrs in _messages_of(payload)]
                 return self._json(202, {"queued": ids})
+
+            def _lease(self, name: str, action: str, raw: bytes) -> None:
+                if self.command != "POST":
+                    return self._json(405, {"error": f"POST to {action}"})
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
+                now = time.time()
+                if action == "lease":
+                    batch = int(body.get("batch") or 1)
+                    visibility = float(body.get("visibility") or 30)
+                    return self._json(200, {"messages": host.broker.lease_queue(name, batch, visibility, now)})
+                receipts = body.get("receipts") or []
+                if not isinstance(receipts, list):
+                    raise ValueError("receipts must be a list")
+                if action == "ack":
+                    return self._json(200, {"acked": host.broker.ack_queue(name, receipts)})
+                return self._json(200, {"released": host.broker.nack_queue(name, receipts, now)})
 
             def _topic(self, name: str, raw: bytes) -> None:
                 if self.command != "POST":
@@ -1397,6 +1543,43 @@ class Host:
                 self._json(404, {"error": "Not Found", "routes": [f"{m} {p}" for m, p, _ in routes]})
 
         return Handler
+
+    def resources(self) -> Dict[str, Any]:
+        """Each ``resources:`` entry with its backend and, for queues, the current depth."""
+        consumers: Dict[str, List[str]] = {}
+        for fname, fn in (self.spec.get("functions") or {}).items():
+            for ev in fn.get("events") or []:
+                target = ev.get("bucket") if ev.get("type") == "storage" else ev.get("name")
+                if ev.get("type") in ("queue", "storage", "topic") and target:
+                    consumers.setdefault(f"{ev['type']}:{target}", []).append(fname)
+        items = []
+        for key, res in sorted((self.spec.get("resources") or {}).items()):
+            if not isinstance(res, dict):
+                continue
+            kind = str(res.get("type") or "")
+            name = str(res.get("name") or key)
+            raw_driver = res.get("driver")
+            driver: Dict[str, Any] = raw_driver if isinstance(raw_driver, dict) else {}
+            item: Dict[str, Any] = {
+                "key": key,
+                "type": kind,
+                "name": name,
+                "external": bool(res.get("external")),
+                "driver": str(driver.get("use") or ("builtin" if kind in ("queue", "storage", "topic") else "")),
+                "functions": list(res.get("functions") or []),
+                "consumers": consumers.get(f"{kind}:{name}", []),
+            }
+            if kind == "queue":
+                try:
+                    depth = self.broker.queue_depth(name)
+                    item["depth"] = depth if depth >= 0 else None
+                except Exception as exc:  # noqa: BLE001 - a remote queue may be down
+                    item["depth"] = None
+                    item["error"] = str(exc)
+            elif kind == "storage" and item["driver"] in ("builtin", "directory"):
+                item["path"] = str(self.broker.bucket_dir(name))
+            items.append(item)
+        return {"items": items}
 
     def health(self) -> Dict[str, Any]:
         manifest = getattr(self, "manifest", None)

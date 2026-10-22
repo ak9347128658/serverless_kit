@@ -287,3 +287,73 @@ export interface ResourceTestGuide {
   deployed: boolean;
   resources: ResourceTestItem[];
 }
+
+// ------------------------------------------------------------------ on-prem services
+export interface OnPremCatalogItem {
+  id: string;
+  label: string;
+  kind: "service" | "runtime";
+  image?: string;
+  port?: number;
+  extra_ports?: number[];
+  roles: string[];
+  backup?: boolean;
+  persistent?: boolean;
+  notes: string;
+}
+
+export interface OnPremTarget {
+  method: "local" | "ssh";
+  host?: string;
+  user?: string;
+  port?: number;
+  identity_file?: string;
+  sudo?: boolean;
+}
+
+export interface OnPremService {
+  key: string;
+  service: string;
+  kind: "service" | "runtime";
+  role?: string;
+  target: OnPremTarget;
+  target_label: string;
+  image?: string;
+  container?: string;
+  volume?: string;
+  port?: number;
+  address?: string;
+  attach?: string[];
+  env_file?: string;
+  env?: Record<string, string>;
+  resource?: JsonObject;
+  notes?: string[];
+  created_at?: string;
+  backups?: { path: string; size: number; at: string }[];
+  // status only
+  state?: string;
+  health?: string | null;
+  ready?: boolean;
+  started_at?: string;
+  error?: string;
+  version?: string[];
+}
+
+export interface OnPremServicesState {
+  catalog: OnPremCatalogItem[];
+  services: OnPremService[];
+  default_target: OnPremTarget;
+  env_file: string;
+}
+
+export interface GuideIndex {
+  available: boolean;
+  clouds: { id: string; title: string; pages: { id: string; title: string }[] }[];
+}
+
+export interface GuidePage {
+  cloud: string;
+  page: string;
+  title: string;
+  markdown: string;
+}

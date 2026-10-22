@@ -5,8 +5,9 @@ A ``resources:`` entry selects one with ``options.driver``. ``builtin`` and
 below return ``None`` for them. The others implement these interfaces
 (standard library only, Python 3.9+, vendored into every bundle):
 
-* queues: ``redis``, ``sqs`` (AWS), ``azure_queue``, ``pubsub`` (GCP), ``mns``
-  (Alibaba Cloud), ``cloudflare_queue`` and ``custom`` (a class of your own);
+* queues: ``redis``, ``redis_stream`` (a stream with a consumer group), ``sqs`` (AWS), ``azure_queue``, ``pubsub`` (GCP), ``mns``
+  (Alibaba Cloud), ``cloudflare_queue``, ``pskit_host`` (a built-in queue of another
+  on-premises host) and ``custom`` (a class of your own);
 * storage: ``s3`` (any S3-compatible store; presets ``aws``, ``oss``, ``cos``,
   ``obs``, ``oci``, ``ibm_cos``, ``spaces``, ``r2``, ``minio``), ``azure_blob``,
   ``gcs`` and ``custom``.
@@ -69,7 +70,7 @@ class StorageDriver(Protocol):
 
 _FILE_BACKED = ("", "builtin", "directory")
 
-QUEUE_DRIVERS = ("redis", "sqs", "azure_queue", "pubsub", "mns", "cloudflare_queue", "custom")
+QUEUE_DRIVERS = ("redis", "redis_stream", "sqs", "azure_queue", "pubsub", "mns", "cloudflare_queue", "pskit_host", "custom")
 # S3-compatible object stores. A preset fills in the endpoint, addressing style and
 # signing region; the user still supplies the bucket and the HMAC keys.
 S3_PRESETS = ("aws", "oss", "cos", "obs", "oci", "ibm_cos", "spaces", "r2", "minio")
@@ -230,6 +231,10 @@ def make_queue_driver(binding: Optional[Dict[str, Any]], label: str = "") -> Opt
         from .redis import RedisQueue
 
         return RedisQueue(str(b["url"]), str(b.get("key") or label or "pskit"))
+    if use == "redis_stream":
+        from .redis_stream import RedisStreamQueue
+
+        return RedisStreamQueue.from_binding(b, label)
     if use == "sqs":
         from .sqs import SqsQueue
 
@@ -250,6 +255,10 @@ def make_queue_driver(binding: Optional[Dict[str, Any]], label: str = "") -> Opt
         from .cloudflare import CloudflareQueue
 
         return CloudflareQueue.from_binding(b, label)
+    if use == "pskit_host":
+        from .pskit_host import PskitHostQueue
+
+        return PskitHostQueue.from_binding(b, label)
     if use == "custom":
         return CustomQueue(_custom(b, QUEUE_METHODS, where))
     raise ValueError(f"unsupported queue driver {use!r}{where}; expected one of {', '.join(QUEUE_DRIVERS)}")

@@ -13,6 +13,7 @@ Write a Python function once, describe its triggers in `pskit.yml`, and deploy i
 | [Workflows](workflows.md) | State machines: native AWS Step Functions / GCP Workflows, or the embedded engine anywhere |
 | [Workflow executions](workflow-executions.md) | Execution ids, async start, status/history/cancel from the CLI, dashboard and HTTP |
 | [Resources](resources.md) | `resources:`: managed or external storage, queues, topics, databases and other services; on-prem Redis and S3 drivers |
+| [Resource guides](resource-guides/README.md) | Step by step, per cloud and type: create a queue, bucket, topic, database, cache or other service in the console, find its details and add it to `pskit.yml` |
 | [Providers](providers.md) | Capability matrix plus one section per cloud: options, credentials, resources, limits |
 | [CLI reference](cli.md) | Every `pskit` command and flag |
 | [Local development](local-development.md) | `pskit dev`, `pskit invoke`, `.env`, testing with `LocalRunner` |

@@ -67,6 +67,7 @@ class Project:
     # ---------------------------------------------------------------- checks
     def validate(self) -> List[Issue]:
         issues = self.provider.validate(self.config)
+        issues.extend(self.provider.validate_files(self.config, self.root))
         for kind, names in self.config.disabled.items():
             for name in names:
                 issues.append(Issue("warning", "disabled (enabled: false): not deployed", f"{kind}.{name}"))

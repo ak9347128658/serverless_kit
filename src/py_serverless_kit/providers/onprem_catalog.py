@@ -133,6 +133,18 @@ QUEUE_DRIVERS: List[Dict[str, Any]] = [
         "Lists <key>, <key>:processing and <key>:claims; crash recovery included.",
     ),
     _driver(
+        "redis_stream",
+        "Redis / Valkey stream",
+        "self-hosted",
+        [
+            field("url", "URL", required=True, env_ok=True, placeholder="redis://127.0.0.1:6379/0"),
+            field("key", "Stream key", help="Defaults to the resource name."),
+            field("group", "Consumer group", default="pskit", help="Hosts sharing a group share the work."),
+            field("maxlen", "Max length", "number", help="Trim the stream to about this many entries (0 = never)."),
+        ],
+        "A stream with a consumer group (Redis 6.2+ / Valkey): native leases, delivery counts, several hosts.",
+    ),
+    _driver(
         "sqs",
         "Amazon SQS",
         "aws",
@@ -200,6 +212,17 @@ QUEUE_DRIVERS: List[Dict[str, Any]] = [
             _ENDPOINT,
         ],
         "HTTP pull consumer; queue depth is not available.",
+    ),
+    _driver(
+        "pskit_host",
+        "Another on-prem host",
+        "self-hosted",
+        [
+            field("endpoint", "Host URL", required=True, placeholder="http://10.0.0.6:8080"),
+            field("queue", "Queue", help="The queue's name on that host. Defaults to the resource name."),
+            _secret("token", "Admin token", help="That host's provider.options.admin_token, if it sets one."),
+        ],
+        "A built-in queue of another pskit on-premises host, leased through its admin API (at-least-once).",
     ),
     _driver(
         "custom",

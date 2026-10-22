@@ -45,8 +45,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..config.schema import ResourceConfig, ServiceConfig
 from ..runtime.cron import CronError, next_cron, resolve_zone
 from ..runtime.drivers import S3_PRESETS
+from ..runtime.onprem_host import ENV_FILE
 from .base import HTTP, QUEUE, SCHEDULE, STORAGE, TOPIC, Issue, Provider, RenderContext
-from .onprem_remote import dockerfile_text, launcher_text, node_bin_rel, systemd_unit_text
+from .onprem_remote import _extended_path, _rmtree, dockerfile_text, launcher_text, node_bin_rel, systemd_unit_text
 from .onprem_spec import (
     advertise_host,
     parse_deploy,
@@ -69,7 +70,19 @@ _TUNING = {
 }
 # Backends a `resources:` entry can select with options.driver (or connection.driver).
 DRIVERS = {
-    "queue": ("builtin", "directory", "redis", "sqs", "azure_queue", "pubsub", "mns", "cloudflare_queue", "custom"),
+    "queue": (
+        "builtin",
+        "directory",
+        "redis",
+        "redis_stream",
+        "sqs",
+        "azure_queue",
+        "pubsub",
+        "mns",
+        "cloudflare_queue",
+        "pskit_host",
+        "custom",
+    ),
     "storage": ("builtin", "directory", "s3", "azure_blob", "gcs", "custom") + S3_PRESETS,
     "topic": ("builtin", "directory"),
 }
@@ -261,7 +274,17 @@ class OnPremProvider(Provider):
     def extra_validation(self, config: ServiceConfig) -> List[Issue]:
         issues: List[Issue] = []
         options = config.provider.options
-        known = {"host", "port", "advertise", "data_dir", "services", "poll_seconds", "admin_token", "deploy"}
+        known = {
+            "host",
+            "port",
+            "advertise",
+            "data_dir",
+            "services",
+            "poll_seconds",
+            "admin_token",
+            "deploy",
+            "env_file",
+        }
         known |= set(_TUNING)
         for key, (kind, low) in _TUNING.items():
             if key not in options:
@@ -292,6 +315,9 @@ class OnPremProvider(Provider):
         token = options.get("admin_token")
         if token is not None and not isinstance(token, str):
             issues.append(Issue("error", "options.admin_token must be a string", "provider.options.admin_token"))
+        env_file = options.get("env_file")
+        if env_file is not None and (not isinstance(env_file, str) or not env_file.strip()):
+            issues.append(Issue("error", "options.env_file must be a file path", "provider.options.env_file"))
         try:
             spec = parse_deploy(
                 options,
@@ -452,6 +478,22 @@ class OnPremProvider(Provider):
             )
         return issues
 
+    def validate_files(self, config: ServiceConfig, root: Path) -> List[Issue]:
+        env_file = config.provider.options.get("env_file")
+        if isinstance(env_file, str) and env_file.strip() and not self._env_file_path(config, root).is_file():
+            return [
+                Issue(
+                    "warning",
+                    f"options.env_file {env_file} does not exist yet; the host starts without it",
+                    "provider.options.env_file",
+                )
+            ]
+        return []
+
+    def _env_file_path(self, config: ServiceConfig, root: Path) -> Path:
+        path = Path(str(config.provider.options.get("env_file") or ""))
+        return path if path.is_absolute() else root / path
+
     def _deploy(self, config: ServiceConfig) -> Any:
         return parse_deploy(
             config.provider.options,
@@ -573,13 +615,18 @@ class OnPremProvider(Provider):
             if not path:
                 raise ValueError(f"resource {key!r}: the directory driver needs `path`")
             return {"use": "directory", "path": self._resolve_path(str(path), root, spec)}
-        if use == "redis":
+        if use in ("redis", "redis_stream"):
             url = str(get("url"))
+            binding: Dict[str, Any] = {"use": use, "key": str(get("key", native))}
+            if use == "redis_stream":
+                for name in ("group", "consumer", "maxlen"):
+                    if get(name) not in (None, ""):
+                        binding[name] = get(name)
             if get("url_env"):
-                return {"use": "redis", "url_env": str(get("url_env")), "key": str(get("key", native))}
+                return {**binding, "url_env": str(get("url_env"))}
             if not url.lower().startswith(("redis://", "rediss://")):
-                raise ValueError(f"resource {key!r}: the redis driver needs `url: redis://host:6379/0` (or rediss://)")
-            return {"use": "redis", "url": url, "key": str(get("key", native))}
+                raise ValueError(f"resource {key!r}: the {use} driver needs `url: redis://host:6379/0` (or rediss://)")
+            return {**binding, "url": url}
         if use == "custom":
             return self._custom_driver(key, res, params)
         return _remote_driver(key, use, get, native)
@@ -636,6 +683,10 @@ class OnPremProvider(Provider):
                 body["type"] = ev.type
                 if ev.type == "queue" and body.get("visibility_timeout") is None:
                     body["visibility_timeout"] = max(30, 6 * cfg.timeout_of(fn))
+                dead = body.get("dead_letter")
+                if ev.type == "queue" and dead in cfg.resources and cfg.resources[dead].type == "queue":
+                    # `dead_letter: <resource key>` means that resource (its native name and driver).
+                    body["dead_letter"] = cfg.resources[dead].native_name(dead)
                 res_key = body.get("resource")
                 if res_key and res_key in resources and "driver" in resources[res_key]:
                     body["driver"] = resources[res_key]["driver"]
@@ -648,8 +699,15 @@ class OnPremProvider(Provider):
             }
         unit = unit_name(cfg.service, cfg.provider.stage)
         extra: Dict[str, Any] = {}
+        if options.get("env_file"):
+            env_path = self._env_file_path(cfg, ctx.root)
+            if env_path.is_file():
+                # Only the digest: a changed secret redeploys the host, and stays out of state.
+                extra["env_file_sha256"] = hashlib.sha256(env_path.read_bytes()).hexdigest()
         if cfg.language == "node":
-            extra = {"language": "node", "node_bin": node_bin_rel(spec.target_os) if spec.node == "bundle" else "node"}
+            extra.update(
+                {"language": "node", "node_bin": node_bin_rel(spec.target_os) if spec.node == "bundle" else "node"}
+            )
         return {
             **extra,
             "service": cfg.service,
@@ -673,15 +731,26 @@ class OnPremProvider(Provider):
         root = ctx.work_dir / APP_DIR
         staging = root / "staging"
         if staging.exists():
-            shutil.rmtree(staging)
+            _rmtree(staging)
         root.mkdir(parents=True, exist_ok=True)
         build = ctx.artifact.build_dir
         if build is not None and Path(build).is_dir():
-            shutil.copytree(build, staging)
+            if sys.platform == "win32":
+                # Vendored packages nest deeply; extended paths lift the 260-character limit.
+                shutil.copytree(_extended_path(Path(build)), _extended_path(staging))
+            else:
+                shutil.copytree(build, staging)
         else:  # pragma: no cover - the packager always sets build_dir
             staging.mkdir(parents=True)
         text = json.dumps(spec, indent=2, sort_keys=True) + "\n"
         _write(root / "pskit_host.json", text)
+        env_target = root / ENV_FILE
+        options = ctx.config.provider.options
+        env_source = self._env_file_path(ctx.config, ctx.root) if options.get("env_file") else None
+        if env_source is not None and env_source.is_file():
+            env_target.write_bytes(env_source.read_bytes())
+        elif env_target.exists():
+            env_target.unlink()
         _write(root / "onprem_ctl.py", _CTL)
         _write(root / "onprem_deploy.py", _DEPLOY)
         deploy = spec.get("deploy") or {}
@@ -924,6 +993,10 @@ def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> 
     if use == "cloudflare_queue":
         need("account_id", "queue_id", "api_token")
         return {"use": use, **pick("account_id", "queue_id", "api_token", "endpoint")}
+
+    if use == "pskit_host":
+        need("endpoint")
+        return {"use": use, "queue": str(value("queue") or native), **pick("endpoint", "token")}
 
     raise ValueError(f"{where}: unsupported driver {use!r}")
 

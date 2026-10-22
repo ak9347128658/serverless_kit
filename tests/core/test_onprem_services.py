@@ -1,0 +1,194 @@
+"""On-prem service provisioning: commands, state, env file and pskit.yml edits, without Docker."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import pytest
+import yaml
+
+from py_serverless_kit.config.loader import load_config
+from py_serverless_kit.core import onprem_services as svc
+from py_serverless_kit.providers.onprem import DRIVERS
+from py_serverless_kit.providers.onprem_catalog import DRIVER_CATALOG
+from py_serverless_kit.runtime.onprem_host import parse_env_text
+
+RAW = {
+    "service": "shop",
+    "provider": {"name": "onprem", "runtime": "python3.12"},
+    "package": {"source": "."},
+    "functions": {"api": {"handler": "app.handlers.api"}, "worker": {"handler": "app.handlers.work"}},
+}
+
+
+class FakeDocker:
+    """Answers the docker / ssh commands the provisioner runs, and records them."""
+
+    def __init__(self, fail: str = "") -> None:
+        self.calls: List[List[str]] = []
+        self.fail = fail
+
+    def __call__(self, argv: List[str], stdout: Optional[Path]) -> Tuple[int, str]:
+        self.calls.append(argv)
+        text = " ".join(argv)
+        if self.fail and self.fail in text:
+            return 1, "boom"
+        if "version" in argv and "--format" in argv:
+            return 0, "27.1.0"
+        if "inspect" in text:
+            detailed = "Health" in text
+            return 0, "running||2026-01-01T00:00:00Z|redis:7-alpine" if detailed else "running"
+        if "command -v docker" in text:
+            return 0, "present"
+        if stdout is not None:
+            stdout.write_bytes(b"DUMP")
+        return 0, ""
+
+
+def _create(tmp_path, fake, **body):
+    req = {"key": "jobs", "service": "redis", **body}
+    return svc.create(tmp_path, req, RAW, lambda _l: None, run=fake, wait_seconds=1)
+
+
+def test_catalog_and_driver_lists_agree():
+    ids = {item["id"] for item in svc.catalog()}
+    assert {"redis", "valkey", "kafka", "nats", "rabbitmq", "postgres", "minio", "python", "docker"} <= ids
+    for kind, drivers in DRIVER_CATALOG.items():
+        assert {d["name"] for d in drivers} == set(DRIVERS[kind]), kind
+    assert "redis_stream" in DRIVERS["queue"] and "pskit_host" in DRIVERS["queue"]
+    for name in svc.DRIVER_TEMPLATES.values():
+        assert (Path(svc.__file__).with_name("onprem_templates") / f"{name[0]}.py.txt").is_file()
+
+
+def test_create_redis_queue_locally_writes_state_and_env_file(tmp_path):
+    (tmp_path / ".gitignore").write_text(".pskit/\n", "utf-8")
+    fake = FakeDocker()
+    entry = _create(tmp_path, fake, port=6400, attach=["worker"])
+    run = next(c for c in fake.calls if c[:2] == ["docker", "run"])
+    assert "127.0.0.1:6400:6379" in run and "pskit-shop-jobs-data:/data" in run and run[-4] == "redis:7-alpine"
+    password = next(a for a in run if a.startswith("REDIS_PASSWORD=")).split("=", 1)[1]
+    assert entry["resource"] == {
+        "type": "queue",
+        "external": True,
+        "options": {"driver": "redis", "url_env": "PSKIT_JOBS_URL", "key": "jobs"},
+    }
+    env = parse_env_text((tmp_path / ".env.onprem").read_text("utf-8"))
+    assert env["PSKIT_JOBS_URL"] == f"redis://:{password}@127.0.0.1:6400/0"
+    assert ".env.onprem" in (tmp_path / ".gitignore").read_text("utf-8")
+    assert password not in json.dumps(svc.public_entry(entry))  # masked for the UI
+    assert svc.load_state(tmp_path)["services"]["jobs"]["container"] == "pskit-shop-jobs"
+
+    raw = svc.apply_to_raw(RAW, entry)
+    assert raw["resources"]["jobs"]["options"]["driver"] == "redis"
+    assert raw["provider"]["options"]["env_file"] == ".env.onprem"
+    assert raw["functions"]["worker"]["events"] == [{"queue": {"resource": "jobs"}}]
+    assert svc.apply_to_raw(raw, entry)["functions"]["worker"]["events"] == [{"queue": {"resource": "jobs"}}]
+    assert "events" not in raw["functions"]["api"]
+
+    # The edited file is a valid on-prem config.
+    (tmp_path / "pskit.yml").write_text(yaml.safe_dump(raw), "utf-8")
+    loaded = load_config(tmp_path / "pskit.yml")
+    assert loaded.config.resources["jobs"].options["driver"] == "redis"
+
+    cleaned = svc.remove_from_raw(raw, "jobs")
+    assert "jobs" not in cleaned["resources"] and cleaned["functions"]["worker"]["events"] == []
+
+
+def test_roles_and_services_produce_the_right_resources(tmp_path):
+    fake = FakeDocker()
+    stream = _create(tmp_path, fake, key="st", service="valkey", role="stream")
+    assert stream["resource"]["type"] == "queue" and stream["resource"]["options"]["driver"] == "redis_stream"
+    kafka = _create(tmp_path, fake, key="events", service="kafka", port=19092)
+    assert kafka["resource"]["options"]["class"] == "pskit_drivers.kafka_queue:KafkaQueue"
+    assert kafka["resource"]["options"]["bootstrap_servers"] == "127.0.0.1:19092"
+    run = [c for c in fake.calls if c[:2] == ["docker", "run"]][-1]
+    assert "internal://127.0.0.1:9093,external://127.0.0.1:19092" in run
+    assert any("rpk topic create events" in " ".join(c) for c in fake.calls)
+    nats = _create(tmp_path, fake, key="tasks", service="nats")
+    assert nats["resource"]["options"]["url_env"] == "PSKIT_TASKS_URL"
+    assert (tmp_path / "pskit_drivers" / "kafka_queue.py").is_file()
+    assert (tmp_path / "pskit_drivers" / "nats_queue.py").is_file()
+    reqs = (tmp_path / "requirements.txt").read_text("utf-8")
+    assert "kafka-python" in reqs and "nats-py" in reqs
+    _create(tmp_path, fake, key="more-events", service="kafka", port=19093)
+    assert (tmp_path / "requirements.txt").read_text("utf-8").count("kafka-python") == 1
+
+    db = _create(tmp_path, fake, key="orders-db", service="postgres")
+    assert db["resource"]["type"] == "database"
+    assert db["resource"]["connection"]["password_env"] == "PSKIT_ORDERS_DB_PASSWORD"
+    files = _create(tmp_path, fake, key="Media_Files", service="minio")
+    assert files["resource"]["name"] == "media-files" and files["resource"]["options"]["driver"] == "minio"
+
+
+def test_ssh_target_runs_docker_remotely_and_runtime_installs(tmp_path, monkeypatch):
+    fake = FakeDocker()
+    target = {"method": "ssh", "host": "10.0.0.5", "user": "ubuntu", "identity_file": "key.pem", "sudo": True}
+    entry = _create(tmp_path, fake, target=target)
+    run = next(c for c in fake.calls if c[0] == "ssh" and c[-1].startswith("sudo -n docker 'run'"))
+    assert run[0] == "ssh" and "ubuntu@10.0.0.5" in run and run[-1].startswith("sudo -n docker 'run'")
+    assert "'0.0.0.0:6379:6379'" in run[-1]
+    assert entry["address"] == "10.0.0.5" and entry["target"]["identity_file"] == str(tmp_path / "key.pem")
+
+    fake = FakeDocker()
+    svc.create(tmp_path, {"key": "py", "service": "python", "target": target}, RAW, lambda _l: None, run=fake)
+    assert fake.calls[0][0] == "scp" and "sh /tmp/pskit-install-python.sh" in fake.calls[1][-1]
+    with pytest.raises(svc.ServiceError, match="SSH server"):
+        svc.check_request({"key": "py2", "service": "python"}, tmp_path, RAW)
+
+
+def test_default_target_follows_the_ssh_deploy():
+    raw = {"provider": {"name": "onprem", "options": {"deploy": {"method": "ssh", "host": "h", "user": "u", "pem": "k"}}}}
+    assert svc.default_target(raw) == {"method": "ssh", "host": "h", "user": "u", "port": 22, "sudo": False, "identity_file": "k"}
+    assert svc.default_target(RAW) == {"method": "local"}
+
+
+def test_validation_errors(tmp_path):
+    for body, message in (
+        ({"key": "1x", "service": "redis"}, "key must"),
+        ({"key": "a", "service": "oracle"}, "service must"),
+        ({"key": "a", "service": "postgres", "role": "queue"}, "can be used as"),
+        ({"key": "a", "service": "redis", "port": 70000}, "port must"),
+        ({"key": "a", "service": "redis", "image": "-x"}, "image must"),
+        ({"key": "a", "service": "redis", "target": {"method": "ssh", "host": "-oProxy"}}, "target.host"),
+        ({"key": "a", "service": "redis", "attach": ["bad name"]}, "attach"),
+    ):
+        with pytest.raises(svc.ServiceError, match=message):
+            svc.check_request(body, tmp_path, RAW)
+
+
+def test_status_backup_remove(tmp_path):
+    fake = FakeDocker()
+    _create(tmp_path, fake)
+    info = svc.status(tmp_path, "jobs", run=fake)
+    assert info["state"] == "running" and info["ready"] is True
+    path = svc.backup(tmp_path, "jobs", lambda _l: None, run=fake)
+    assert path.read_bytes() == b"DUMP" and path.suffix == ".rdb"
+    assert svc.load_state(tmp_path)["services"]["jobs"]["backups"][0]["size"] == 4
+    svc.remove(tmp_path, "jobs", lambda _l: None, delete_data=True, run=fake)
+    assert ["docker", "volume", "rm", "pskit-shop-jobs-data"] in fake.calls
+    assert "PSKIT_JOBS_URL" not in (tmp_path / ".env.onprem").read_text("utf-8")
+    assert svc.list_services(tmp_path) == []
+    with pytest.raises(svc.ServiceError, match="no on-prem service"):
+        svc.status(tmp_path, "jobs", run=fake)
+
+
+def test_failed_docker_run_is_reported(tmp_path):
+    with pytest.raises(svc.ServiceError, match="boom"):
+        _create(tmp_path, FakeDocker(fail="run -d"))
+    assert svc.list_services(tmp_path) == []
+
+
+def test_apply_under_providers_onprem_when_another_cloud_is_main(tmp_path):
+    entry = _create(tmp_path, FakeDocker(), attach=["worker"])
+    raw = dict(RAW, provider={"name": "aws"}, functions={"worker": {"handler": "app.h.w", "events": [{"http": "GET /"}]}})
+    out = svc.apply_to_raw(raw, entry)
+    assert "resources" not in out
+    onprem = out["providers"]["onprem"]
+    assert onprem["resources"]["jobs"]["options"]["driver"] == "redis"
+    assert onprem["provider"]["options"]["env_file"] == ".env.onprem"
+    assert onprem["functions"]["worker"]["events"] == [{"http": "GET /"}, {"queue": {"resource": "jobs"}}]
+    assert out["functions"]["worker"]["events"] == [{"http": "GET /"}]  # aws untouched
+    back = svc.remove_from_raw(out, "jobs")
+    assert back["providers"]["onprem"]["functions"]["worker"]["events"] == [{"http": "GET /"}]

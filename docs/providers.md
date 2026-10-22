@@ -384,6 +384,8 @@ provider:
     data_dir: .pskit/onprem-data             # default .pskit/onprem-data/<service>-<stage> (local); <path>/data on SSH
     poll_seconds: 0.5
     admin_token: "${env:PSKIT_ADMIN_TOKEN, }"  # header x-pskit-token on /__pskit/* except health
+    env_file: .env.onprem      # KEY=VALUE secrets copied next to the host (host.env) and loaded at start;
+                               # read by <name>_env driver options and handlers, never written to Terraform state
     execution_retention: 500   # finished workflow executions kept under <data_dir>/executions
     workflow_workers: 8        # workflow runs executing at once; further starts wait for a worker
     log_buffer: 5000           # log entries kept in memory for /__pskit/logs (min 100)

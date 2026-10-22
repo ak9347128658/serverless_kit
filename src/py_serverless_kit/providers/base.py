@@ -343,6 +343,11 @@ class Provider(ABC):
     def extra_validation(self, config: ServiceConfig) -> List[Issue]:
         return []
 
+    def validate_files(self, config: ServiceConfig, root: Path) -> List[Issue]:
+        """Checks that need the project directory (files the config points at)."""
+        del config, root
+        return []
+
     # ------------------------------------------------------------ terraform
     def init_doc(self, ctx: RenderContext) -> TerraformDoc:
         doc = TerraformDoc()

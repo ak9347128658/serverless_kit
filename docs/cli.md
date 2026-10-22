@@ -182,6 +182,33 @@ pskit resources send uploads -d '{"key": "in/a.csv", "content": "a,b"}'   # obje
 pskit resources send events -d '{"message": {"id": 1}, "attributes": {"type": "order"}}'
 ```
 
+### `pskit resources onprem`
+
+Create the services on-premises functions use, as Docker containers on this machine or on an SSH server, and add them
+to `pskit.yml`. Step by step: [resource-guides/onprem/services.md](resource-guides/onprem/services.md).
+
+```bash
+pskit resources onprem catalog
+pskit resources onprem create jobs --service redis --attach worker --save
+pskit resources onprem create events --service kafka --ssh ubuntu@10.0.0.7 --pem key.pem --sudo --save
+pskit resources onprem status jobs --reveal
+pskit resources onprem backup jobs
+pskit resources onprem remove jobs --delete-data --save
+```
+
+| Command / flag | |
+|---|---|
+| `catalog [--json]` | services (redis, valkey, kafka, nats, rabbitmq, elasticmq, minio, postgres, mysql, mariadb, mongodb, memcached, mailpit) and runtimes (python, docker) |
+| `create KEY --service S` | start it (or install the runtime) and record it in `.pskit/onprem-services.json` |
+| `--role` | what the resource is used as: `queue`, `stream` (Redis / Valkey stream), `cache`, `database`, `storage`, `custom` |
+| `--ssh user@host[:port] --pem FILE --sudo` | create it on that server (default: `provider.options.deploy` when it targets one, else this machine); `--local` forces this machine |
+| `--port`, `--address`, `--bind`, `--image` | published port, address functions use, interface to listen on, Docker image |
+| `-a, --attach FN` | add a `queue` / `storage` trigger on resource KEY to FN (repeatable) |
+| `--save` | write the resource, `provider.options.env_file` and triggers into `pskit.yml` (comments are not kept) |
+| `list`, `status KEY [--reveal]`, `logs KEY` | what exists, its state / health / credentials, the container log |
+| `backup KEY [-o FILE]` | dump the data to `.pskit/backups/` |
+| `remove KEY [--delete-data] [--save]` | delete the container (and volume), and with `--save` the resource and its triggers |
+
 `send` works for managed resources once deployed and for external ones right away (they already exist). It uses the
 same senders and credentials as [`pskit trigger`](#pskit-trigger): AWS, GCP, Azure and on premises; elsewhere `--list`
 prints the cloud CLI command and console steps.

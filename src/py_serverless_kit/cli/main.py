@@ -117,10 +117,11 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  resources   list | send | delete
+  resources   list | send | delete | onprem
               pskit resources list -s dev
               pskit resources delete aws_s3_bucket.b_uploads -s dev
               pskit resources send jobs -d '{"order_id": 1}'
+              pskit resources onprem create jobs --service redis --attach worker --save
   workflow    run | show | start | executions | status | cancel
               pskit workflow run order -i '{"id": 1}' --history
               pskit workflow start order -i @input.json --wait
@@ -558,6 +559,222 @@ def resources_delete(project, addresses: tuple, all_kept: bool, yes: bool) -> No
         click.confirm(f"Permanently delete {len(targets)} resource(s) and their data: {', '.join(targets)}?", abort=True)
     deleted = Deployer(project, echo=echo).delete_resources(targets)
     ok(f"Deleted {len(deleted)} resource(s).")
+
+
+# ----------------------------------------------------------------------------- resources onprem
+@resources.group("onprem")
+def resources_onprem() -> None:
+    """Create services for on-premises functions with Docker, here or on an SSH server.
+
+    \b
+    Examples:
+      pskit resources onprem catalog
+      pskit resources onprem create jobs --service redis --attach worker --save
+      pskit resources onprem create orders-db --service postgres --ssh ubuntu@10.0.0.5 --pem key.pem --save
+      pskit resources onprem create py --service python --ssh ubuntu@10.0.0.5 --pem key.pem
+      pskit resources onprem status jobs
+      pskit resources onprem backup orders-db
+      pskit resources onprem remove jobs --delete-data --save
+    Credentials go to the on-prem env file (default .env.onprem), never into pskit.yml.
+    """
+
+
+def _raw_project(config_path: Optional[str]) -> tuple:
+    import yaml
+
+    from ..config.loader import DEFAULT_FILES
+
+    if config_path:
+        path = Path(config_path).resolve()
+    else:
+        found = [Path.cwd() / name for name in DEFAULT_FILES if (Path.cwd() / name).is_file()]
+        if not found:
+            raise click.ClickException("no pskit.yml here; run inside a project or pass -c")
+        path = found[0]
+    raw = yaml.safe_load(path.read_text("utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise click.ClickException(f"{path} is not a mapping")
+    return path.parent, path, raw
+
+
+def _save_raw(path: Path, raw: dict) -> None:
+    from ..studio.project import dump_yaml
+
+    path.write_bytes(dump_yaml(raw).encode("utf-8"))
+    ok(f"Updated {path.name} (comments are not kept)")
+
+
+def _service_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    from ..core.onprem_services import ServiceError
+
+    try:
+        return fn(*args, **kwargs)
+    except ServiceError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+@resources_onprem.command("catalog", short_help="Services and runtimes that can be created.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def resources_onprem_catalog(as_json: bool) -> None:
+    from ..core.onprem_services import catalog
+
+    items = catalog()
+    if as_json:
+        click.echo(json.dumps(items, indent=2))
+        return
+    echo(f"{'id':<11}{'use as':<16}{'port':<7}notes")
+    for item in items:
+        roles = ", ".join(item["roles"]) or "runtime"
+        echo(f"{item['id']:<11}{roles:<16}{str(item.get('port') or ''):<7}{item['notes']}")
+
+
+@resources_onprem.command("create", short_help="Start a service (or install a runtime) and add it as a resource.")
+@click.argument("key")
+@click.option("--service", "service", required=True, help="See `pskit resources onprem catalog`.")
+@click.option("--role", default=None, help="queue, cache, database, storage or custom (default: the first one).")
+@click.option("--port", type=int, default=None, help="Port published on the server (default: the service's).")
+@click.option("--image", default=None, help="Docker image (default: the catalog's).")
+@click.option("--address", default=None, help="Address functions use to reach it (default: SSH host / 127.0.0.1).")
+@click.option("--bind", default=None, help="Interface the port listens on (default: 0.0.0.0 over SSH, else 127.0.0.1).")
+@click.option("--ssh", "ssh", default=None, help="user@host[:port] of the server. Default: options.deploy, else here.")
+@click.option("--pem", default=None, help="Private key for --ssh.")
+@click.option("--sudo", is_flag=True, help="Run docker / installs with sudo -n on the server.")
+@click.option("--local", "local", is_flag=True, help="Create it on this machine even if the functions deploy over SSH.")
+@click.option("-a", "--attach", multiple=True, help="Add a trigger on this function (queue / storage). Repeatable.")
+@click.option("--save", is_flag=True, help="Write the resource (and triggers) into pskit.yml.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+@click.option("--json", "as_json", is_flag=True, help="Print the created entry as JSON.")
+def resources_onprem_create(  # noqa: PLR0913
+    key: str,
+    service: str,
+    role: Optional[str],
+    port: Optional[int],
+    image: Optional[str],
+    address: Optional[str],
+    bind: Optional[str],
+    ssh: Optional[str],
+    pem: Optional[str],
+    sudo: bool,
+    local: bool,
+    attach: tuple,
+    save: bool,
+    config_path: Optional[str],
+    as_json: bool,
+) -> None:
+    """Create KEY: a Docker container on this machine or an SSH server, ready for the on-prem host."""
+    from ..core import onprem_services as svc
+
+    root, path, raw = _raw_project(config_path)
+    target: Optional[dict] = None
+    if local:
+        target = {"method": "local"}
+    elif ssh:
+        user, _, rest = ssh.rpartition("@")
+        host, _, ssh_port = rest.partition(":")
+        target = {"method": "ssh", "user": user or "root", "host": host, "port": int(ssh_port or 22), "sudo": sudo}
+        if pem:
+            target["identity_file"] = pem
+    body = {
+        "key": key,
+        "service": service,
+        "role": role,
+        "port": port,
+        "image": image,
+        "address": address,
+        "bind": bind,
+        "attach": list(attach),
+        "target": target,
+    }
+    entry = _service_call(svc.create, root, {k: v for k, v in body.items() if v is not None}, raw, echo)
+    if as_json:
+        click.echo(json.dumps(svc.public_entry(entry), indent=2))
+    if entry.get("kind") == "runtime":
+        ok(f"{service} is installed on {svc.describe_target(entry['target'])}")
+        return
+    if save:
+        _save_raw(path, _service_call(svc.apply_to_raw, raw, entry))
+    elif not as_json:
+        info("Add this to pskit.yml (or rerun with --save):")
+        click.echo(svc.snippet(entry))
+    if entry["resource"]["type"] in ("queue", "storage", "topic"):
+        info(f"Test it: pskit deploy, then pskit resources send {key}")
+    else:
+        info(f'Read it in a handler: resource("{key}"); the password is in ctx.env[res["password_env"]]')
+
+
+@resources_onprem.command("list", short_help="Services created from this project.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+def resources_onprem_list(config_path: Optional[str], as_json: bool) -> None:
+    from ..core.onprem_services import list_services
+
+    root, _path, _raw = _raw_project(config_path)
+    items = list_services(root)
+    if as_json:
+        click.echo(json.dumps(items, indent=2))
+        return
+    if not items:
+        echo("No on-prem services yet. Create one: pskit resources onprem create <key> --service redis")
+        return
+    echo(f"{'key':<20}{'service':<11}{'as':<10}{'where':<28}endpoint")
+    for item in items:
+        where = item["target_label"]
+        endpoint = f"{item.get('address')}:{item.get('port')}" if item.get("port") else ""
+        echo(f"{item['key']:<20}{item['service']:<11}{item.get('role') or 'runtime':<10}{where[:27]:<28}{endpoint}")
+
+
+@resources_onprem.command("status", short_help="State, health and connection details of a service.")
+@click.argument("key")
+@click.option("--reveal", is_flag=True, help="Show passwords and URLs from the env file.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_status(key: str, reveal: bool, config_path: Optional[str]) -> None:
+    from ..core.onprem_services import status
+
+    root, _path, _raw = _raw_project(config_path)
+    click.echo(json.dumps(_service_call(status, root, key, reveal=reveal), indent=2))
+
+
+@resources_onprem.command("logs", short_help="The service container's recent output.")
+@click.argument("key")
+@click.option("-n", "--tail", default=200, show_default=True)
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_logs(key: str, tail: int, config_path: Optional[str]) -> None:
+    from ..core.onprem_services import logs
+
+    root, _path, _raw = _raw_project(config_path)
+    click.echo(_service_call(logs, root, key, tail=tail))
+
+
+@resources_onprem.command("backup", short_help="Dump a service's data to .pskit/backups.")
+@click.argument("key")
+@click.option("-o", "--output", default=None, help="File to write (default: .pskit/backups/<key>-<time>.<ext>).")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_backup(key: str, output: Optional[str], config_path: Optional[str]) -> None:
+    from ..core.onprem_services import backup
+
+    root, _path, _raw = _raw_project(config_path)
+    dest = Path(output).resolve() if output else None
+    saved = _service_call(backup, root, key, echo, dest=dest)
+    ok(f"Backup written to {saved}")
+
+
+@resources_onprem.command("remove", short_help="Stop and delete a service container.")
+@click.argument("key")
+@click.option("--delete-data", is_flag=True, help="Also delete its data volume.")
+@click.option("--save", is_flag=True, help="Also remove the resource and its triggers from pskit.yml.")
+@click.option("-y", "--yes", is_flag=True, help="Do not ask for confirmation.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_remove(key: str, delete_data: bool, save: bool, yes: bool, config_path: Optional[str]) -> None:
+    from ..core import onprem_services as svc
+
+    root, path, raw = _raw_project(config_path)
+    if not yes:
+        what = "the container and its data" if delete_data else "the container (data is kept)"
+        click.confirm(f"Delete {what} of {key}?", abort=True)
+    _service_call(svc.remove, root, key, echo, delete_data=delete_data)
+    if save:
+        _save_raw(path, svc.remove_from_raw(raw, key))
+    ok(f"Removed {key}")
 
 
 def _ask_onprem_pem(project: Any) -> None:

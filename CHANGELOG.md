@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-22
+
+### Added
+- **Resource guides** (`docs/resource-guides/`): step-by-step pages per provider and resource type (storage, queue, topic, database, cache, custom) for AWS, GCP, Azure, Alibaba, Tencent, Huawei, Oracle, IBM, DigitalOcean, Cloudflare and on premises: how to create the service in the console, where to find each value, the `pskit.yml` to attach it as an external resource, a handler snippet, how to test it and common errors.
+- **One-click on-prem services** (`pskit resources onprem create|list|status|logs|backup|remove|catalog`, studio *Resources → On-prem services*): start Redis, Valkey, Kafka (Redpanda), NATS JetStream, RabbitMQ, ElasticMQ (SQS API), MinIO, PostgreSQL, MySQL, MariaDB, MongoDB, Memcached or Mailpit as a Docker container on this machine or any SSH server (the functions' server or another one; Docker is installed there when missing), or install Python / Docker on a server. The resource, its triggers on the functions you pick and `provider.options.env_file` are added to `pskit.yml`; generated passwords go to `.env.onprem`. Kafka, NATS and RabbitMQ get a driver class in `pskit_drivers/` and their client library in `requirements.txt`. Backups stream into `.pskit/backups/`.
+- **`redis_stream` queue driver**: a Redis 6.2+ / Valkey stream with a consumer group (native leases and delivery counts, crash takeover with `XAUTOCLAIM`, several hosts per group). Offered as the *stream* role of Redis and Valkey.
+- **`pskit_host` queue driver**: functions on one on-prem host consume the built-in queue of another, through new lease endpoints `POST /__pskit/queues/<name>/lease|ack|nack` (at-least-once).
+- On premises: `provider.options.env_file` ships a `KEY=VALUE` file with the host (`host.env`) for local, SSH and Docker deploys and loads it at start, so `<name>_env` secrets need no systemd or container configuration and never reach Terraform state. `GET /__pskit/resources` lists resources with their backend, consumers and queue depth.
+- Studio: **Guides** shows the resource guides for every cloud in the app, with *How to set up* links from the resource form.
+
+### Fixed
+- On premises: a driver-backed queue or bucket that no trigger consumes (only published to with `submit_queue` / `put_object` / `pskit resources send`, or used as a `dead_letter`) silently went to a local folder; drivers are now bound from `resources:` too. `dead_letter` may name a resource key. Managed queues, buckets and topics no event uses are created when the host starts.
+- On premises (Windows): deploy failed with `WinError 206` when vendored packages made the staging path longer than 260 characters.
+- `examples/19-custom-drivers/app/kafka_queue.py` polled with a zero timeout, so the consumer never joined its group and received nothing.
+- `runtime_js/package.json` version now follows `__version__` (it was left at 1.2.0 in 1.2.1).
+
 ## [1.2.0] - 2026-10-21
 
 ### Added

@@ -31,11 +31,20 @@ from typing import Any, Dict, List, Optional, Set
 
 
 class KafkaQueue:
-    def __init__(self, bootstrap_servers: str, topic: str, group_id: str, **client_options: Any) -> None:
+    def __init__(
+        self,
+        bootstrap_servers: str,
+        topic: str,
+        group_id: str,
+        poll_timeout_ms: int = 500,
+        **client_options: Any,
+    ) -> None:
         from kafka import KafkaConsumer, KafkaProducer  # imported here so packaging works without the library
 
         servers = [s.strip() for s in bootstrap_servers.split(",") if s.strip()]
         self.topic = topic
+        # A zero timeout never completes the consumer-group join, so nothing is ever assigned.
+        self.poll_timeout_ms = max(1, int(poll_timeout_ms))
         self.consumer = KafkaConsumer(
             topic,
             bootstrap_servers=servers,
@@ -55,7 +64,7 @@ class KafkaQueue:
         return ident
 
     def claim(self, batch: int, visibility: float, now: float) -> List[Dict[str, Any]]:
-        polled = self.consumer.poll(timeout_ms=0, max_records=max(1, batch))
+        polled = self.consumer.poll(timeout_ms=self.poll_timeout_ms, max_records=max(1, batch))
         claimed: List[Dict[str, Any]] = []
         for records in polled.values():
             for record in records:

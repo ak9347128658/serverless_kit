@@ -46,6 +46,8 @@ def api(event, ctx):
 
 Full example: [`examples/18-resources`](../examples/18-resources).
 
+Step-by-step console guides (where to find each value, per cloud and type): [resource-guides](resource-guides/README.md), for example [an existing Azure Storage queue](resource-guides/azure/queue.md).
+
 ## Fields
 
 | Key | Default | Notes |
@@ -124,7 +126,7 @@ pskit does not ship a portable "send to queue" helper for the clouds: use the cl
 | aws | yes | yes (S3 bucket, SQS queue, SNS topic) | yes | yes (env only) |
 | gcp | yes | yes (bucket; Pub/Sub topic for queue and topic) | yes | yes |
 | azure | yes | yes (storage container, storage queue, Service Bus topic) | yes | yes |
-| onprem | yes | yes (builtin directories, created on first use) | yes, with [drivers](#on-premises-drivers) | yes |
+| onprem | yes | yes (builtin directories, created when the host starts) | yes, with [drivers](#on-premises-drivers) | yes |
 | alibaba, tencent, huawei, oracle, ibm, digitalocean, cloudflare | yes, where the event type is supported | validation error: create it outside pskit and set `external: true` | yes | yes |
 
 On AWS, standalone managed queues take their settings from the first event that uses the resource, otherwise from `options`: `fifo`, `visibility_timeout`, `dead_letter`, `max_receive`.
@@ -149,7 +151,14 @@ The host normally keeps queues, buckets and topics in directories (`builtin`). A
 
 Set `options.driver` (a string, or a mapping with `use` plus parameters). `connection.driver` works too. Parameters are read from the driver mapping, then `options`, then `connection`.
 
-**Secrets.** Any parameter can be given as `<name>_env: VARIABLE` instead of `<name>: value`. The host reads `VARIABLE` from its own environment when it starts, so the secret never lands in Terraform state or `pskit_host.json`. A variable that isn't set stops the host with an error naming it. `${env:...}`, by contrast, is resolved on the machine running `pskit deploy` and *is* written into the files.
+The driver applies wherever the resource's native name is used: triggers, `submit_queue` / `put_object` from handlers,
+`pskit resources send`, and `dead_letter` (which may name a resource key). A queue that is only published to still goes
+through its driver.
+
+To have pskit start the service for you (Redis, Valkey, Kafka, NATS, RabbitMQ, MinIO, databases, ...) on this machine
+or an SSH server, see [one-click services](resource-guides/onprem/services.md).
+
+**Secrets.** Any parameter can be given as `<name>_env: VARIABLE` instead of `<name>: value`. The host reads `VARIABLE` from its own environment when it starts, so the secret never lands in Terraform state or `pskit_host.json`. A variable that isn't set stops the host with an error naming it. `provider.options.env_file: .env.onprem` ships a `KEY=VALUE` file with the host (as `host.env`) and loads it at start, for local, SSH and Docker deploys alike; only its digest is recorded. `${env:...}`, by contrast, is resolved on the machine running `pskit deploy` and *is* written into the files.
 
 **Emulators and private endpoints.** Every HTTP driver accepts `endpoint: http(s)://...` (LocalStack, Azurite, the Pub/Sub emulator, fake-gcs-server, a VPC endpoint).
 
@@ -167,7 +176,8 @@ Set `options.driver` (a string, or a mapping with `use` plus parameters). `conne
 | IBM Cloud | `ibm_cos` | `custom` (IBM MQ, Event Streams / Kafka) |
 | DigitalOcean | `spaces` | no queue service: `redis` (Managed Redis / Valkey) or `custom` |
 | Cloudflare | `r2` | `cloudflare_queue` |
-| Self-hosted | `minio`, `s3` with `endpoint`, `directory` | `redis`, `directory`, `custom` (RabbitMQ, Kafka, NATS, ...) |
+| Self-hosted | `minio`, `s3` with `endpoint`, `directory` | `redis`, `redis_stream`, `directory`, `custom` (RabbitMQ, Kafka, NATS, ...) |
+| Another pskit on-prem host | | `pskit_host` (its built-in queues) |
 
 Topics only support `builtin` and `directory`.
 
@@ -176,6 +186,8 @@ Topics only support `builtin` and `directory`.
 | Driver | Parameters (`*` = required) |
 |---|---|
 | `redis` | `url`* (`redis://[user:pass@]host:6379/0`, `rediss://`), `key` (default: native name) |
+| `redis_stream` | `url`*, `key` (the stream, default native name), `group` (consumer group, default `pskit`), `consumer` (default host name + pid), `maxlen` (approximate trim). Redis 6.2+ or Valkey |
+| `pskit_host` | `endpoint`* (the other host's URL), `queue` (default: native name), `token` (its `admin_token`; use `token_env`) |
 | `sqs` | `queue_url`*, or `account_id`* + `region`* (+ `name`, default native name). `access_key` + `secret_key` (+ `session_token`); without them `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` on the host. `region` (default: from the URL), `wait_seconds` (long poll, 0-20, default 0), `message_group_id` (`.fifo` queues, default `pskit`), `endpoint` |
 | `azure_queue` | `connection_string`*, or `account`* / `endpoint`* with `account_key`* or `sas_token`*. `queue` (default: native name), `message_encoding` (`base64` default, like the Azure SDKs, or `text`). `UseDevelopmentStorage=true` targets Azurite |
 | `pubsub` | `subscription`* (default: native name; `projects/<p>/subscriptions/<s>` or a short name with `project`), `topic` (needed only to publish), auth: `access_token`, `token_command` (e.g. `[gcloud, auth, print-access-token]`, cached 45 min) or the GCE/GKE metadata server. `endpoint` + `emulator: true`, or `PUBSUB_EMULATOR_HOST` on the host, for the emulator. `return_immediately` (default `true`) |
@@ -187,6 +199,10 @@ How each one leases messages, so a crashed host never loses one (at-least-once):
 
 - **sqs, azure_queue, mns, cloudflare_queue, pubsub**: the service's own visibility timeout / lease / ack deadline is set to the event's `visibility_timeout`. A failed message is made visible again at once; one that has failed `max_receive` times goes to `dead_letter` and is deleted. `receives` comes from the service (`ApproximateReceiveCount`, `DequeueCount`, `attempts`, `deliveryAttempt`); Pub/Sub without a dead-letter policy doesn't report attempts, so the host counts them itself (reset on restart).
 - **redis**: see the layout below.
+- **redis_stream**: entries stay in the consumer group's pending list until settled; an entry idle for longer than
+  `visibility_timeout` is taken over with `XAUTOCLAIM`, and `receives` is the stream's delivery counter.
+- **pskit_host**: the other host hides a leased message for `visibility_timeout` and counts failures; unsettled leases
+  expire there.
 - Azure Storage Queue, MNS and Cloudflare Queues messages have no attributes; attributes given to `submit` are dropped.
 - Queue depth (`/__pskit/stats`, the dashboard) is `null` for Pub/Sub, Cloudflare Queues and custom classes without `depth()`.
 

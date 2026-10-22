@@ -504,3 +504,34 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .chip-link, .chip-x { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 2px; font: inherit; }
 .chip-x { opacity: 0.6; }
 @media (max-width: 820px) { .test-layout { flex-direction: column; } .test-fns { position: static; max-width: none; width: 100%; } }
+
+/* On-prem services and resource guides */
+.row-between { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.onprem-services { margin-top: 16px; }
+.onprem-services .table { margin-top: 8px; }
+.catalog-group { margin-bottom: 16px; }
+.catalog-group h4 { margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.catalog-card {
+  display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 10px 12px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  color: var(--text); cursor: pointer; font: inherit;
+}
+.catalog-card:hover, .catalog-card:focus-visible { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+.guide-nav { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.guide-nav select { max-width: 260px; }
+.markdown { line-height: 1.55; overflow-wrap: anywhere; }
+.markdown h2 { font-size: 1.3em; margin: 0.4em 0 0.6em; }
+.markdown h3 { font-size: 1.1em; margin: 1.2em 0 0.5em; }
+.markdown h4 { margin: 1em 0 0.4em; }
+.markdown code { font-family: var(--mono); font-size: 0.9em; background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
+.md-code {
+  font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 10px 12px; overflow-x: auto; white-space: pre; margin: 8px 0;
+}
+.markdown .md-code code { background: none; padding: 0; }
+.md-table-wrap { overflow-x: auto; margin: 8px 0; }
+.md-table { border-collapse: collapse; font-size: 13px; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+.md-table th { background: var(--panel-2); }
+.console-log { max-height: 320px; overflow: auto; }

@@ -1,0 +1,232 @@
+"""On-prem resources end to end: drivers bound from `resources:`, env files, and a queue on another host."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import threading
+import time
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+import pytest
+
+from py_serverless_kit.core.deployer import Deployer
+from py_serverless_kit.runtime.drivers.pskit_host import PskitHostQueue
+from py_serverless_kit.runtime.onprem_host import Host, activate_layout, load_env_file, parse_env_text
+
+from .test_drivers import redis_server  # noqa: F401 - pytest fixture
+
+HANDLERS = """
+import os
+from pathlib import Path
+
+from py_serverless_kit import BatchResult, Event, Context, resource
+from py_serverless_kit.runtime.onprem_host import submit_queue
+
+
+def publish(event: Event, ctx: Context):
+    return submit_queue(resource("outbox").native_name, {"n": event.data})
+
+
+def worker(event: Event, ctx: Context):
+    result = BatchResult()
+    out = Path(os.environ["OUT"])
+    for record in event.records:
+        if "fail" in record.text():
+            result.fail(record)
+        else:
+            out.write_text((out.read_text() if out.exists() else "") + record.text() + ";")
+    return result
+"""
+
+CONFIG = """
+service: res
+provider:
+  name: onprem
+  runtime: python3.12
+  options:
+    host: 127.0.0.1
+    port: 8097
+    data_dir: {data}
+    env_file: secrets.env
+  environment:
+    OUT: "{out}"
+resources:
+  outbox:                        # a Redis queue nothing consumes: only published to
+    type: queue
+    external: true
+    options: {{driver: redis, url_env: OUTBOX_URL, key: outbox}}
+  dlq:                           # dead-letter queue given by resource key, also Redis
+    type: queue
+    external: true
+    name: failed-jobs
+    options: {{driver: redis, url_env: OUTBOX_URL, key: failed}}
+  archive:                       # managed bucket no event uses
+    type: storage
+  remote-jobs:                   # the built-in queue of another on-prem host
+    type: queue
+    external: true
+    options: {{driver: pskit_host, endpoint: "{remote}", queue: jobs, token_env: REMOTE_TOKEN}}
+functions:
+  publish:
+    handler: app.handlers.publish
+  worker:
+    handler: app.handlers.worker
+    events:
+      - queue: {{resource: remote-jobs, batch_size: 5, max_receive: 2, dead_letter: dlq}}
+"""
+
+
+def _serve(host: Host):
+    httpd = host.make_server(0)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def _post(url: str, body, token: str = ""):
+    req = Request(url, data=json.dumps(body).encode("utf-8"), method="POST")
+    req.add_header("content-type", "application/json")
+    if token:
+        req.add_header("x-pskit-token", token)
+    with urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _remote_host(template: Path, dest: Path, data: Path) -> Host:
+    """A second host (B) that owns the built-in queue `jobs` and requires an admin token."""
+    shutil.copytree(template, dest)
+    spec = json.loads((dest / "pskit_host.json").read_text("utf-8"))
+    spec.update(
+        {
+            "service": "producer",
+            "data_dir": str(data),
+            "services": {"queue": {"use": "builtin", "path": str(data / "queues")}},
+            "admin_token": "t0ken",
+            "functions": {},
+            "resources": {"jobs": {"type": "queue", "external": False, "name": "jobs", "functions": []}},
+        }
+    )
+    (dest / "pskit_host.json").write_text(json.dumps(spec), "utf-8")
+    (dest / "host.env").unlink(missing_ok=True)
+    host = Host(dest)
+    host.open()
+    return host
+
+
+def test_env_file_parsing(tmp_path, monkeypatch):
+    text = "# c\nexport A=1\nB='two words'\nC=\"x\"\nD=v # note\nbad line\n1X=no\n"
+    assert parse_env_text(text) == {"A": "1", "B": "two words", "C": "x", "D": "v"}
+    monkeypatch.setenv("A", "kept")
+    monkeypatch.delenv("B", raising=False)
+    path = tmp_path / "host.env"
+    path.write_text(text, "utf-8")
+    added = load_env_file(path)
+    assert "A" not in added and "B" in added
+    import os
+
+    assert os.environ["A"] == "kept" and os.environ["B"] == "two words"
+    monkeypatch.delenv("B", raising=False)
+    monkeypatch.delenv("C", raising=False)
+    monkeypatch.delenv("D", raising=False)
+    assert load_env_file(tmp_path / "missing.env") == []
+
+
+def test_resource_drivers_env_file_and_remote_host_queue(make_project, tmp_path, redis_server, monkeypatch):  # noqa: F811
+    redis_url, redis_state = redis_server
+    for var in ("OUTBOX_URL", "REMOTE_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    # Host B first, so host A knows its URL.
+    out = tmp_path / "out.txt"
+    placeholder = "http://127.0.0.1:9"
+    text = CONFIG.format(data=(tmp_path / "data").as_posix(), out=out.as_posix(), remote=placeholder)
+    project = make_project(text, files={"app/handlers.py": HANDLERS})
+    (project.root / "secrets.env").write_text(f"OUTBOX_URL={redis_url}\nREMOTE_TOKEN=t0ken\n", "utf-8")
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    root = project.work_dir / "onprem_app"
+    activate_layout(root)
+    assert (root / "host.env").read_text("utf-8").startswith("OUTBOX_URL=")
+    spec = json.loads((root / "pskit_host.json").read_text("utf-8"))
+    assert "env_file_sha256" in spec and redis_url not in json.dumps(spec)  # the secret stays out of the spec
+    worker_ev = spec["functions"]["worker"]["events"][0]
+    assert worker_ev["dead_letter"] == "failed-jobs"  # resource key -> native name
+
+    remote = _remote_host(root, tmp_path / "hostb", tmp_path / "datab")
+    httpd_b, base_b = _serve(remote)
+    a = None
+    try:
+        spec["resources"]["remote-jobs"]["driver"]["endpoint"] = base_b
+        for ev in spec["functions"]["worker"]["events"]:
+            ev["driver"]["endpoint"] = base_b
+        (root / "pskit_host.json").write_text(json.dumps(spec), "utf-8")
+        a = Host(root)  # loads host.env, binds drivers from resources
+        a.open()
+
+        # Publish-only Redis queue: the handler's submit_queue goes to Redis, not a local folder.
+        from py_serverless_kit import Event
+
+        a.invoke("publish", Event(type="invoke", data=7))
+        assert len(redis_state.lists.get(b"outbox", [])) == 1
+        assert not (tmp_path / "data" / "queues" / "outbox").exists()
+        # A managed bucket nobody listens to exists from the start.
+        assert (tmp_path / "data" / "buckets" / "archive").is_dir()
+
+        # Messages published on host B are consumed by host A's worker.
+        _post(f"{base_b}/__pskit/queues/jobs", {"messages": ["ok-1", "fail-1"]}, token="t0ken")
+        a.pump_queues(time.time())
+        assert out.read_text() == "ok-1;"
+        assert remote.broker.queue_depth("jobs") == 1  # the failed one is visible again on B
+        a.pump_queues(time.time())  # second failure reaches max_receive -> Redis DLQ
+        assert remote.broker.queue_depth("jobs") == 0
+        assert len(redis_state.lists.get(b"failed", [])) == 1
+
+        listing = {item["key"]: item for item in a.resources()["items"]}
+        assert listing["remote-jobs"]["driver"] == "pskit_host" and listing["remote-jobs"]["consumers"] == ["worker"]
+        assert listing["outbox"]["depth"] == 1 and listing["archive"]["driver"] == "builtin"
+    finally:
+        httpd_b.shutdown()
+        httpd_b.server_close()
+        for host in (a, remote):
+            if host is not None and host.executor is not None:
+                host.executor.shutdown()
+            if host is not None:
+                host.logs.close()
+
+
+def test_lease_api_rejects_bad_receipts_and_needs_the_token(make_project, tmp_path):
+    project = make_project(
+        f"""
+        service: lease
+        provider:
+          name: onprem
+          options: {{data_dir: "{(tmp_path / 'd').as_posix()}", admin_token: abc}}
+        resources:
+          jobs: {{type: queue}}
+        functions:
+          noop: {{handler: app.handlers.hello}}
+        """
+    )
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    root = project.work_dir / "onprem_app"
+    activate_layout(root)
+    host = Host(root)
+    host.open()
+    httpd, base = _serve(host)
+    try:
+        q = PskitHostQueue(base, "jobs", token="abc")
+        q.submit("hello", {"k": "v"})
+        assert q.depth() == 1
+        claimed = q.claim(10, 30, time.time())
+        assert [m["body"] for m in claimed] == ["hello"] and claimed[0]["receives"] == 1
+        assert q.claim(10, 30, time.time()) == []  # leased: hidden from other consumers
+        q.settle(claimed, set(), 3, None, time.time())
+        assert q.depth() == 0
+        with pytest.raises(Exception, match="400"):
+            _post(f"{base}/__pskit/queues/jobs/ack", {"receipts": ["../../pskit_host.json"]}, token="abc")
+        with pytest.raises(Exception, match="401"):
+            PskitHostQueue(base, "jobs").depth()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        host.executor.shutdown()
+        host.logs.close()

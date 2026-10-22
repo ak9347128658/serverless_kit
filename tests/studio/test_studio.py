@@ -509,3 +509,53 @@ def test_cli_studio_help():
 
 def test_placeholder_page_is_packaged():
     assert (Path(proj.__file__).with_name("studio.html")).is_file()
+
+
+# --------------------------------------------------------------------------- on-prem services + guides
+def test_resource_guides_are_served(studio):
+    base, _root, _httpd = studio
+    status, index = call(base, "GET", "/api/resource-guides")
+    assert status == 200 and index["available"]
+    assert index["clouds"][0]["id"] == "onprem"
+    onprem = index["clouds"][0]
+    assert {"readme", "queue", "services"} <= {p["id"] for p in onprem["pages"]}
+    status, page = call(base, "GET", "/api/resource-guides/onprem/queue")
+    assert status == 200 and page["markdown"].startswith("# ")
+    assert call(base, "GET", "/api/resource-guides/index/readme")[0] == 200
+    assert call(base, "GET", "/api/resource-guides/onprem/..%2Fsecret")[0] == 400
+    assert call(base, "GET", "/api/resource-guides/onprem/nope")[0] == 404
+
+
+def test_onprem_services_api(studio):
+    from py_serverless_kit.core import onprem_services as svc
+
+    base, root, _httpd = studio
+    status, state = call(base, "GET", "/api/onprem-services")
+    assert status == 200 and state["services"] == [] and state["default_target"] == {"method": "local"}
+    assert any(item["id"] == "kafka" for item in state["catalog"])
+    status, out = call(base, "POST", "/api/onprem-services", {"key": "9bad", "service": "redis"})
+    assert status == 400 and "key must" in out["error"]
+    assert call(base, "GET", "/api/onprem-services/missing")[0] == 400
+
+    # A service recorded earlier (as `create` would) can be applied to and removed from a draft.
+    entry = {
+        "key": "jobs",
+        "service": "redis",
+        "kind": "service",
+        "role": "queue",
+        "target": {"method": "local"},
+        "env": {"PSKIT_JOBS_URL": "redis://:pw@127.0.0.1:6379/0"},
+        "env_file": ".env.onprem",
+        "resource": {"type": "queue", "external": True, "options": {"driver": "redis", "url_env": "PSKIT_JOBS_URL"}},
+    }
+    svc.save_state(root, {"services": {"jobs": entry}})
+    draft = proj.get_project(root)["raw"]
+    status, out = call(base, "POST", "/api/onprem-services/apply", {"raw": draft, "key": "jobs", "attach": ["step"]})
+    assert status == 200
+    onprem = out["raw"]["providers"]["onprem"]  # the main provider is aws: everything goes under providers.onprem
+    assert onprem["resources"]["jobs"]["options"]["driver"] == "redis"
+    assert {"queue": {"resource": "jobs"}} in onprem["functions"]["step"]["events"]
+    status, back = call(base, "POST", "/api/onprem-services/unapply", {"raw": out["raw"], "key": "jobs"})
+    assert status == 200 and "jobs" not in json.dumps(back["raw"]["providers"]["onprem"].get("resources", {}))
+    status, listed = call(base, "GET", "/api/onprem-services")
+    assert listed["services"][0]["env"]["PSKIT_JOBS_URL"] == "***"

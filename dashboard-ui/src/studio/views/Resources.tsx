@@ -3,6 +3,8 @@ import { Chip } from "../../components/Badge";
 import { DataTable, type Column } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { CloudResources } from "../components/CloudResources";
+import { OnPremServices } from "../components/OnPremServices";
+import { ResourceGuides, type GuideRef } from "../components/ResourceGuides";
 import { ResourceTester } from "../components/ResourceTester";
 import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FieldForm, FormRow, KeyValueEditor, Segmented, TextInput, Toggle } from "../components/Forms";
@@ -42,6 +44,8 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const rows: Row[] = Object.entries(resources).map(([name, res]) => ({ name, res: asObject(res) }));
   const editing = rest[0] === "new" ? "new" : rest[0] && rest[0] in resources ? rest[0] : null;
   const [testing, setTesting] = useState<string | null>(null);
+  const [guide, setGuide] = useState<GuideRef | null>(null);
+  const { providerName } = useStudio();
   const test = (key: string) => {
     setTesting(key);
     window.setTimeout(() => document.getElementById("resource-test")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
@@ -132,9 +136,14 @@ export function ResourcesView({ rest }: { rest: string[] }) {
         title="Resources"
         subtitle="Buckets, queues, topics, databases and any other service your functions use, once for every cloud."
         actions={
-          <a className="btn btn-primary" href={href("resources", "new")}>
-            + Add resource
-          </a>
+          <span className="row-gap">
+            <button type="button" className="btn" onClick={() => setGuide({ cloud: providerName || "index", page: "readme" })}>
+              Guides
+            </button>
+            <a className="btn btn-primary" href={href("resources", "new")}>
+              + Add resource
+            </a>
+          </span>
         }
       />
       <div className="card">
@@ -150,13 +159,17 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       <div id="resource-test">
         <ResourceTester key={testing || ""} selected={testing} onSelect={setTesting} />
       </div>
+      <OnPremServices onGuide={setGuide} />
       <CloudResources />
-      {editing && <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} />}
+      {editing && (
+        <ResourceDrawer key={editing} name={editing === "new" ? null : editing} onClose={() => navigate("resources")} onGuide={setGuide} />
+      )}
+      <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
     </div>
   );
 }
 
-function ResourceDrawer({ name: existing, onClose }: { name: string | null; onClose: () => void }) {
+function ResourceDrawer({ name: existing, onClose, onGuide }: { name: string | null; onClose: () => void; onGuide: (ref: GuideRef) => void }) {
   const studio = useStudio();
   const { draft, meta, providerName, replace, issuesAt, state } = studio;
   const toast = useToast();
@@ -268,6 +281,14 @@ function ResourceDrawer({ name: existing, onClose }: { name: string | null; onCl
             )}
           </div>
         </FormRow>
+        {driverList.length === 0 && (
+          <p className="muted small">
+            Step by step for each cloud:{" "}
+            <button type="button" className="btn btn-sm" onClick={() => onGuide({ cloud: providerName === "onprem" ? "onprem" : providerName, page: type })}>
+              {type} guide
+            </button>
+          </p>
+        )}
         <FormRow label="Connection" help="Values handed to handlers as PSKIT_RESOURCE_<KEY>_<NAME>. Use ${env} for secrets, never a literal password.">
           <KeyValueEditor value={asObject(res.connection)} keyPattern={/^[A-Za-z][A-Za-z0-9_]*$/} keyPlaceholder="host" onChange={(v) => set("connection", v)} addLabel="Add connection value" />
         </FormRow>
@@ -292,7 +313,12 @@ function ResourceDrawer({ name: existing, onClose }: { name: string | null; onCl
 
         {driverList.length > 0 && (
           <div className="driver-box card card-pad">
-            <h3>On-premises driver</h3>
+            <div className="row-between">
+              <h3>On-premises driver</h3>
+              <button type="button" className="btn btn-sm" onClick={() => onGuide({ cloud: "onprem", page: type })}>
+                How to set up a {type}
+              </button>
+            </div>
             <p className="muted small">
               {providerName === "onprem" ? (
                 <>
