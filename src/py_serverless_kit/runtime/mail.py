@@ -159,8 +159,9 @@ def summary(mail: Dict[str, Any], preview: int = 200) -> str:
     files = ", ".join(f"{a['filename'] or '(unnamed)'} {a['content_type']} {_kb(int(a['size']))}"
                       for a in mail.get("attachments") or [])
     body = " ".join(str(mail.get("text") or "").split())[:preview]
+    auth = (mail.get("authentication") or {}).get("summary")
     return (f"mail {mail.get('id')} from {(mail.get('from') or {}).get('address')} to {to} "
-            f"subject={mail.get('subject')!r} size={_kb(int(mail.get('size') or 0))} "
+            f"{f'[{auth}] ' if auth else ''}subject={mail.get('subject')!r} size={_kb(int(mail.get('size') or 0))} "
             f"attachments={len(mail.get('attachments') or [])}{f' [{files}]' if files else ''} body={body!r}")
 
 
@@ -183,6 +184,7 @@ def log_fields(mail: Dict[str, Any]) -> Dict[str, Any]:
         "remote_ip": (mail.get("envelope") or {}).get("remote_ip"),
         "authenticated_user": (mail.get("envelope") or {}).get("authenticated_user"),
         "tls": (mail.get("envelope") or {}).get("tls"),
+        "authentication": (mail.get("authentication") or {}).get("summary"),
     }
 
 

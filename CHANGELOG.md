@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-23
+
+### Added
+- **Receive mail for your domain in a few steps.** Studio *Resources → **+ Mail domain (SMTP)*** looks up the
+  domain's current mail (Microsoft 365, Google Workspace ...) and suggests a subdomain such as `inbound.kavion.ai`, with a
+  warning before moving the domain's own MX. You pick the machine (its IP), the mail server name, the port and the
+  security, tick the functions to run (or create `on-mail` with a ready handler file in Python or Node.js), and pskit
+  adds the `smtp` resource and triggers. It then lists the **DNS records** to add at the domain provider: A for the
+  mail server, MX, wildcard MX for subdomains, and SPF `-all` / DMARC `p=reject` for a receive-only domain. It
+  explains why receiving needs no DKIM record. **Check DNS** shows each record live / missing / different / keep
+  (DNS over HTTPS, plain DNS fallback), and an optional port 25 check. **DNS setup** on an smtp resource reopens it.
+  Backend: `core/mail_setup.py`, `POST /api/mail-setup`, `/api/mail-handler-stub`.
+- **SPF, DKIM and DMARC checks of received mail** (`runtime/mail_auth.py`, stdlib only: its own DNS client, RSA
+  verification). Results are in `event.data["authentication"]`, the logs and the Mailbox. `block_spoofed: true`
+  stops mail whose DMARC fails with `p=quarantine / reject`, or that claims to come from the server's own domain
+  without passing SPF or DKIM (status *blocked*). The `verify_senders` option turns the checks off. DKIM
+  verification is tested against signatures made by dkimpy (simple and relaxed, sha256 and sha1), and SPF against
+  live records.
+
 ## [1.5.0] - 2026-10-23
 
 ### Added

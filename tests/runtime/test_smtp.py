@@ -205,6 +205,7 @@ def test_mail_received_before_a_restart_is_delivered_on_start(tmp_path, monkeypa
             "functions": {"f": {"events": [{"type": "smtp", "name": "inbound"}]}}}
     delivery = MailDelivery(spec, tmp_path, lambda fn, ev: calls.append((fn, ev.data["subject"])),
                             lambda *_a, **_k: None)
+    delivery.lookup = lambda name, rtype: []
     ident = delivery.boxes["inbound"].save(_message("ann@example.com").as_bytes(),
                                            {"mail_from": "c@client.org", "rcpt_to": ["ann@example.com"]})
     try:
@@ -234,6 +235,7 @@ def support(event, ctx):
         "subject": mail["subject"],
         "files": [[a["filename"], a["size"]] for a in mail["attachments"]],
         "pdf": mail["attachments"][0]["content"] if mail["attachments"] else "",
+        "auth": mail["authentication"]["summary"],
     }), encoding="utf-8")
     print(f"support mail from {mail['from']['address']} subdomain {mail['recipient']['subdomain']}")
 
@@ -279,6 +281,7 @@ def test_mail_runs_the_matching_functions_and_is_logged(make_project, tmp_path):
     assert spec["smtp"]["inbound"]["domains"] == ["example.com"] and spec["smtp"]["inbound"]["port"] == smtp_port
     activate_layout(root)
     host = Host(root)
+    host.mail.lookup = lambda name, rtype: []  # no DNS in tests: SPF / DKIM / DMARC "none"
     host.open()
     host.mail.start()
     httpd = host.make_server(0)
@@ -294,6 +297,7 @@ def test_mail_runs_the_matching_functions_and_is_logged(make_project, tmp_path):
                                                                        if (out / "all.txt").is_file() else ""))
         got = json.loads((out / "support.json").read_text("utf-8"))
         assert got["type"] == "smtp" and got["recipient"]["subdomain"] == "support"
+        assert got["auth"] == "spf=none(client.org) dkim=none dmarc=none(p=none)"
         assert got["recipient"]["domain"] == "example.com" and got["from"] == "customer@client.org"
         assert got["matched"] == ["ann@support.example.com"]  # boss@example.com (cc) is not a support address
         assert got["files"] == [["invoice-42.pdf", 13], ["lines.csv", 8]]
@@ -376,3 +380,28 @@ functions:
     found = [(i.level, i.message) for i in users.validate() if "smtp" in i.where or "inbound" in i.where]
     assert any(level == "warning" and "clear text" in msg for level, msg in found)
     assert not any(level == "error" for level, _m in found)
+
+
+def test_block_spoofed_mail_from_our_own_domain(tmp_path):
+    calls = []
+    spec = {"smtp": {"inbound": {"port": _free_port(), "bind": "127.0.0.1", "domains": ["inbound.kavion.ai", "kavion.ai"],
+                                 "block_spoofed": True}},
+            "functions": {"f": {"events": [{"type": "smtp", "name": "inbound"}]}}}
+    delivery = MailDelivery(spec, tmp_path, lambda fn, ev: calls.append(ev.data["authentication"]["summary"]),
+                            lambda *_a, **_k: None)
+    spf = {("kavion.ai", "TXT"): ["v=spf1 ip4:40.107.0.0/16 -all"], ("partner.org", "TXT"): ["v=spf1 ip4:198.51.100.0/24 -all"]}
+    delivery.lookup = lambda name, rtype: spf.get((name, rtype), [])
+    box = delivery.boxes["inbound"]
+    forged = box.save(b"From: CEO <ceo@kavion.ai>\r\nSubject: wire money\r\n\r\nnow",
+                      {"mail_from": "ceo@kavion.ai", "rcpt_to": ["pay@inbound.kavion.ai"], "remote_ip": "203.0.113.9",
+                       "helo": "evil"})
+    genuine = box.save(b"From: Ann <ann@partner.org>\r\nSubject: invoice\r\n\r\nhi",
+                       {"mail_from": "ann@partner.org", "rcpt_to": ["pay@inbound.kavion.ai"],
+                        "remote_ip": "198.51.100.7", "helo": "mx.partner.org"})
+    meta = delivery.deliver("inbound", forged)
+    assert meta["status"] == "blocked" and "one of this server's domains" in meta["summary"]["blocked"] and not calls
+    assert meta["authentication"]["spf"]["result"] == "fail"
+    assert delivery.deliver("inbound", genuine)["status"] == "delivered"
+    assert calls == ["spf=pass(partner.org) dkim=none dmarc=none(p=none)"]
+    delivery.lookup = lambda name, rtype: (_ for _ in ()).throw(AssertionError("DNS asked again"))
+    assert delivery.deliver("inbound", genuine)["status"] == "delivered"  # results kept with the message

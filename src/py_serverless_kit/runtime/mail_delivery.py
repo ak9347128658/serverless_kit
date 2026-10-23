@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import mail as mailparse
-from . import smtp_server
+from . import mail_auth, smtp_server
 from .event import Event, EventType
 
 Reply = Tuple[int, Dict[str, str], bytes]
@@ -57,6 +57,7 @@ class MailDelivery:
         self.boxes = {name: smtp_server.Mailbox(Path(data_dir) / "smtp" / name) for name in self.configs}
         self.invoke = invoke
         self.log = log
+        self.lookup: mail_auth.QueryFn = mail_auth.query  # DNS for SPF / DKIM / DMARC (tests replace it)
         self.servers: Dict[str, smtp_server.SmtpServer] = {}
         self._queue: queue.Queue[Tuple[str, str]] = queue.Queue()
         self._worker: Optional[threading.Thread] = None
@@ -144,13 +145,34 @@ class MailDelivery:
                                        ident=ident, resource=name, received_at=str(meta.get("received_at") or ""),
                                        include_content=include_content)
 
+    def _authentication(self, name: str, ident: str, mail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """SPF / DKIM / DMARC, checked once per message (kept with it: redelivery asks DNS no more)."""
+        cfg = self.configs[name]
+        if cfg.get("verify_senders") is False:
+            return None
+        box = self.boxes[name]
+        meta = box.meta(ident)
+        if isinstance(meta.get("authentication"), dict):
+            return dict(meta["authentication"])
+        auth = mail_auth.authenticate(box.raw(ident), meta.get("envelope") or {}, mail["from"]["host"], self.lookup)
+        box.update(ident, authentication=auth)
+        return auth
+
     def deliver(self, name: str, ident: str) -> Dict[str, Any]:
         box = self.boxes[name]
         mail = self.parsed(name, ident)
+        auth = self._authentication(name, ident, mail)
+        if auth is not None:
+            mail["authentication"] = auth
         fields = mailparse.log_fields(mail)
         self._log("INFO", mailparse.summary(mail), fields=fields)
         deliveries: Dict[str, Any] = {}
         listeners = self.listeners.get(name) or []
+        blocked = mail_auth.spoofed(auth, mail["from"]["host"], self.configs[name].get("domains") or []) \
+            if auth is not None and self.configs[name].get("block_spoofed") else None
+        if blocked:
+            self._log("WARNING", f"mail {ident} blocked (block_spoofed): {blocked}", fields=fields)
+            listeners = []
         for fn_name, ev in listeners:
             matched = [r for r in mail["recipients"] if self._matches(ev, r)]
             if not matched:
@@ -165,7 +187,9 @@ class MailDelivery:
             except Exception as exc:  # noqa: BLE001 - recorded with the message; redeliver from the studio
                 deliveries[fn_name] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                 self._log("ERROR", f"mail {ident} -> {fn_name} failed: {type(exc).__name__}: {exc}", function=fn_name)
-        if not deliveries:
+        if blocked:
+            status = "blocked"
+        elif not deliveries:
             status = "unmatched"
             self._log("WARNING", f"mail {ident}: no function matches its recipients "
                                  f"{', '.join(fields['to'])}")
@@ -173,7 +197,8 @@ class MailDelivery:
             status = "delivered" if all(d["ok"] for d in deliveries.values()) else "failed"
         summary = {"from": fields["from"], "to": fields["to"], "subject": fields["subject"],
                    "subdomains": fields["subdomains"], "domains": fields["domains"],
-                   "attachments": len(fields["attachments"])}
+                   "attachments": len(fields["attachments"]), "auth": (auth or {}).get("summary", "not checked"),
+                   **({"blocked": blocked} if blocked else {})}
         return box.update(ident, status=status, deliveries=deliveries, summary=summary)
 
     # ------------------------------------------------------------------ admin API

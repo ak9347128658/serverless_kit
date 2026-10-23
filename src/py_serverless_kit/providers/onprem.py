@@ -1087,7 +1087,7 @@ def _without_foreign(extra: Any) -> Tuple[Dict[str, Any], List[str]]:
 
 
 _SMTP_KEYS = ("domains", "subdomains", "port", "bind", "hostname", "auth", "users", "max_size_mb", "tls_cert", "tls_key",
-              "require_tls", "allowed_senders", "allowed_ips")
+              "require_tls", "allowed_senders", "allowed_ips", "verify_senders", "block_spoofed")
 
 
 def smtp_config(options: Dict[str, Any]) -> Dict[str, Any]:
@@ -1140,4 +1140,6 @@ def smtp_config(options: Dict[str, Any]) -> Dict[str, Any]:
         "require_tls": bool(options.get("require_tls", False)),
         "allowed_senders": [str(x) for x in options.get("allowed_senders") or []],
         "allowed_ips": [str(x) for x in options.get("allowed_ips") or []],
+        "verify_senders": bool(options.get("verify_senders", True)),
+        "block_spoofed": bool(options.get("block_spoofed", False)),
     }

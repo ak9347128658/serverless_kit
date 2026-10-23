@@ -153,6 +153,16 @@ export function SmtpServerOptions({ resourceKey, value, onChange }: { resourceKe
         </div>
       </FormRow>
       {!!value.tls_cert && <Toggle checked={value.require_tls === true} onChange={(on) => set("require_tls", on || undefined)} label="Require STARTTLS before MAIL FROM" />}
+      <Toggle
+        checked={value.verify_senders !== false}
+        onChange={(on) => set("verify_senders", on ? undefined : false)}
+        label="Check every sender (SPF, DKIM, DMARC): results in event.data.authentication and the logs"
+      />
+      <Toggle
+        checked={value.block_spoofed === true}
+        onChange={(on) => set("block_spoofed", on || undefined)}
+        label="Block spoofed mail (DMARC fails with p=reject / quarantine, or From: one of these domains without SPF / DKIM passing)"
+      />
       <FormRow label="Allowed senders" help="Optional globs; empty = anyone. e.g. *@partner.com, alerts@*">
         <ListEditor value={asArray(value.allowed_senders).map((x) => str(x))} onChange={(v) => set("allowed_senders", v)} placeholder="*@partner.com" addLabel="Add sender" />
       </FormRow>

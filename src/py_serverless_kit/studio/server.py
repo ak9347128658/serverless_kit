@@ -328,6 +328,38 @@ def make_handler(app: Studio) -> type:
                 stage = str(body.get("stage") or raw_provider.get("stage") or "dev")
                 action = parts[0].split("-", 1)[1]
                 return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action, body)
+            if parts == ["mail-handler-stub"] and method == "POST":
+                from ..core.mail_setup import handler_stub
+
+                body = _obj(self._body())
+                language = "node" if body.get("language") == "node" else "python"
+                return 200, {"text": handler_stub(language, str(body.get("function") or "on-mail")[:63])}
+            if parts == ["mail-setup"] and method == "POST":
+                # DNS records to receive mail for a domain on this project's SMTP server, and their live state.
+                from ..core import mail_setup
+                from ..core.onprem_control import deployed_host
+                from ..core.onprem_servers import load_servers
+
+                body = _obj(self._body())
+                ip = str(body.get("ip") or "").strip()
+                saved = str(body.get("server") or "")
+                if not ip and saved:
+                    ip = mail_setup.server_ip(str((load_servers(Path(app.root)).get(saved) or {}).get("host") or ""))
+                if not ip:
+                    stage = str(body.get("stage") or (app.raw_config().get("provider") or {}).get("stage") or "dev")
+                    spec = (deployed_host(Path(app.root), stage) or {}).get("spec") or {}
+                    ssh_host = str(((spec.get("deploy") or {}).get("ssh") or {}).get("host") or "")
+                    ip = mail_setup.server_ip(ssh_host)
+                try:
+                    setup = mail_setup.plan(str(body.get("domain") or ""), str(body.get("subdomain") or ""),
+                                            str(body.get("mx") or ""), ip, bool(body.get("subdomains", True)),
+                                            bool(body.get("sends_mail")))
+                except mail_setup.SetupError as exc:
+                    raise StudioError(400, str(exc)) from None
+                if body.get("check"):
+                    port = body.get("port")
+                    return 200, mail_setup.check(setup, port=int(port) if body.get("port_check") and port else None)
+                return 200, setup
             if parts == ["env-file"]:
                 # The project's on-prem env file (provider.options.env_file): set or remove values, and say which
                 # names are set. Values are never sent back to the browser.

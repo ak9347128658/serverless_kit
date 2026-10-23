@@ -11,6 +11,7 @@ also written to the logs.
 
 ## Contents
 
+0. [Set up your domain in the studio (step by step: kavion.ai)](#set-up-your-domain-in-the-studio)
 1. [How it works](#how-it-works)
 2. [Quick start](#quick-start)
 3. [What the handler receives](#what-the-handler-receives)
@@ -20,10 +21,55 @@ also written to the logs.
 7. [Password (SMTP AUTH): on or off](#password-smtp-auth-on-or-off)
 8. [TLS (STARTTLS)](#tls-starttls)
 9. [Testing](#testing)
+9a. [Who really sent it: SPF, DKIM, DMARC](#who-really-sent-it-spf-dkim-dmarc)
 10. [Studio](#studio)
 11. [Security](#security)
 12. [Options reference](#options-reference)
 13. [Troubleshooting](#troubleshooting)
+
+## Set up your domain in the studio
+
+*Resources → **+ Mail domain (SMTP)*** does everything below in one form. The example uses `kavion.ai`, whose company
+mail is on Microsoft 365.
+
+1. **Your domain.** Type `kavion.ai` and click **Look up its DNS**. pskit shows where its mail goes today
+   (`kavion-ai.mail.protection.outlook.com`, Microsoft 365).
+2. **Receive mail at.** Keep **A subdomain** (`inbound`), so mail for `anything@inbound.kavion.ai` comes to pskit and
+   `@kavion.ai` stays at Microsoft 365. If you pick *The whole domain*, a red warning explains that changing
+   kavion.ai's MX moves **all** company mail to pskit. Leave *Also anything@<name>.inbound.kavion.ai* on to get
+   `support.inbound.kavion.ai`, `sales.inbound.kavion.ai` ..., each with its own `subdomain` in the event.
+3. **Mail server.** Pick the machine: where the stage is deployed, a saved server (its IP goes into the A record), or
+   type an IP. The mail server name defaults to `mx.kavion.ai`, and the port to 2525.
+4. **Security.** Leave *Check every sender* (SPF, DKIM, DMARC) and *Block spoofed mail* on. Leave the password **off**
+   for mail from the internet.
+5. **Run these functions.** Tick existing functions, or keep *New function* `on-mail`. pskit adds the function, its
+   `smtp` trigger and `inbox_handlers/on_mail.py` (or `.js`), a handler that already logs the sender, recipient,
+   subdomain, checks and attachments. Then **Add the mail server**, **Save**, and **Deploy**.
+6. **DNS records.** Add the rows of the table at your domain provider. For `kavion.ai` on the server
+   `13.68.248.150`:
+
+   | Type | Name / Host | Value | Priority | |
+   |---|---|---|---|---|
+   | A | `mx` | `13.68.248.150` | | required |
+   | MX | `inbound` | `mx.kavion.ai` | 10 | required |
+   | MX | `*.inbound` | `mx.kavion.ai` | 10 | for subdomains |
+   | TXT | `inbound` | `v=spf1 -all` | | recommended: nobody may send *as* @inbound.kavion.ai |
+   | TXT | `_dmarc.inbound` | `v=DMARC1; p=reject; adkim=s; aspf=s` | | recommended |
+
+   `kavion.ai`'s own MX, SPF (`include:spf.protection.outlook.com ...`) and DKIM records stay as they are.
+   **Check DNS** shows each row as *✓ live*, *missing* or *different* (with what is there now). *Check DNS and ports*
+   also tries TCP 25 and the SMTP port from your machine.
+7. **Open port 25** on the server (cloud firewall) and redirect it to 2525 (see [Port 25](#port-25-firewalls-and-the-cloud)).
+8. **Test.** Use *Resources → inbound-mail → Mailbox → Send test mail* (no DNS needed). Once DNS is live, send a
+   real mail from Outlook or Gmail to `hello@inbound.kavion.ai` and watch it in the Mailbox and in *Logs*.
+
+**DNS setup** on the resource's row opens the records and the check again at any time.
+
+**Why no DKIM record?** DKIM is a signature the *sending* server adds with its private key; receivers check it with
+the public key in the sender's DNS (`<selector>._domainkey.<domain>`). To receive mail you publish nothing.
+pskit checks the DKIM of every mail it receives, and SPF and DMARC too (see
+[Who really sent it](#who-really-sent-it-spf-dkim-dmarc)). Your outgoing mail is signed by your mail provider
+(Microsoft 365 / Google), which gives you its own DKIM record.
 
 ## How it works
 
@@ -223,9 +269,7 @@ nslookup -type=mx example.com         # Windows
 receives mail, so they are optional for this setup. If this domain sends no mail at all, publishing
 `TXT @ "v=spf1 -all"` and `TXT _dmarc "v=DMARC1; p=reject"` stops others from forging it.
 
-pskit does not yet check SPF or DKIM on incoming mail. The full headers are in `event.data["headers"]`
-(`dkim-signature`, `received`, `authentication-results` added by upstream relays), so a handler can check them
-itself. To stay safe in the meantime, restrict who may send with `allowed_senders` / `allowed_ips`.
+pskit checks the SPF, DKIM and DMARC of every mail it **receives** (next section), so `From:` can be trusted.
 
 A **PTR (reverse DNS)** record is not needed to *receive* mail.
 
@@ -299,6 +343,48 @@ Then set `tls_cert` and `tls_key` to the `fullchain.pem` and `privkey.pem` paths
 them, so run it as root (systemd) or copy them with the right owner. `require_tls: true` refuses mail sent without
 STARTTLS. When `auth` is on, AUTH is offered only after STARTTLS unless there is no certificate at all (a private
 network).
+
+## Who really sent it: SPF, DKIM, DMARC
+
+Anyone can write `From: ceo@kavion.ai` in a mail. With `verify_senders` (on by default) pskit checks every message
+the way Gmail and Outlook do, and puts the results in `event.data["authentication"]`:
+
+```python
+{
+  "spf":   {"result": "pass", "domain": "partner.org", "reason": "198.51.100.7 is pass for partner.org's SPF record"},
+  "dkim":  [{"result": "pass", "domain": "partner.org", "selector": "s1", "reason": "signature verified"}],
+  "dmarc": {"result": "pass", "policy": "reject", "domain": "partner.org", "aligned": {"spf": True, "dkim": True}},
+  "summary": "spf=pass(partner.org) dkim=pass(partner.org) dmarc=pass(p=reject)",
+}
+```
+
+* **SPF**: is the connecting IP allowed by the sender domain's `v=spf1` record (`ip4`, `ip6`, `a`, `mx`, `include`,
+  `redirect`, `exists`; at most 10 lookups)? Results: `pass`, `fail`, `softfail`, `neutral`, `none`,
+  `temperror` (DNS did not answer), `permerror` (a broken record).
+* **DKIM**: does each `DKIM-Signature` verify with the key at `<s>._domainkey.<d>` (rsa-sha256 / rsa-sha1, simple
+  and relaxed)? A changed body or signed header gives `fail`. Ed25519 keys are reported `neutral`.
+* **DMARC**: did SPF or DKIM pass *for the domain in `From:`* (relaxed or strict alignment), and what does that
+  domain's `_dmarc` record ask (`p=none / quarantine / reject`, `sp=` for subdomains)?
+
+```python
+def handle(event, ctx):
+    mail = event.data
+    auth = mail["authentication"]
+    if auth["dmarc"]["result"] != "pass" and mail["from"]["domain"] == "partner.org":
+        return {"ignored": "not really from partner.org"}
+```
+
+**`block_spoofed: true`** (on in the setup form) stops a mail before any function runs when:
+
+* DMARC fails and the sender's domain asks for `quarantine` or `reject`, or
+* `From:` is one of **this server's own domains** (`ceo@kavion.ai` writing to `pay@inbound.kavion.ai`) and neither
+  SPF nor DKIM passed for it.
+
+Blocked mail stays in the Mailbox with status *blocked* and the reason. The results are checked once per message
+and kept with it (re-running functions does not ask DNS again). They also appear in the log line
+(`[spf=pass(...) dkim=pass(...) dmarc=pass(p=reject)]`). The host asks the DNS servers in `/etc/resolv.conf`
+(override with `PSKIT_DNS_SERVERS=1.1.1.1,8.8.8.8`). Mail sent through the admin API (`pskit trigger`, *Send test
+mail*) reports `spf=none`.
 
 ## Testing
 
@@ -382,6 +468,8 @@ with smtplib.SMTP("203.0.113.10", 2525) as s:
 | `require_tls` | `false` | Refuse mail before STARTTLS |
 | `allowed_senders` | anyone | Globs such as `*@partner.com` |
 | `allowed_ips` | anyone | CIDRs such as `10.0.0.0/8` |
+| `verify_senders` | `true` | Check SPF, DKIM and DMARC; results in `event.data.authentication` |
+| `block_spoofed` | `false` | Do not run functions for spoofed mail (see above); status *blocked* |
 
 The trigger, under `functions.<name>.events`:
 
@@ -406,3 +494,6 @@ Admin API on the host (with the admin token), used by `pskit trigger` and Studio
 | Mail arrives but no function runs (status *No function*) | No trigger's `recipients` / `subdomains` matched: check the mailbox's recipient table |
 | A function failed (status *failed*) | Read its error in the mailbox or `pskit logs -f <fn>`, fix it, deploy, then **Run functions again** |
 | Mail for subdomains bounces | Add the wildcard `MX *` record (or one per subdomain) |
+| Status *blocked* | `block_spoofed`: the reason is in the Mailbox; the sender must fix their SPF / DKIM, or turn it off |
+| `spf=temperror` in every mail | The server cannot reach DNS: set `PSKIT_DNS_SERVERS` in the env file |
+| Company mail stopped arriving at Microsoft 365 / Google | The root domain's MX was changed: put it back and receive on a subdomain |

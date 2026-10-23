@@ -7,6 +7,7 @@ import { Markdown } from "../components/Markdown";
 import { CreateDrawer, OnPremServices } from "../components/OnPremServices";
 import { ResourceData } from "../components/ResourceData";
 import { Mailbox, SmtpServerOptions } from "../components/SmtpPanels";
+import { MailSetup } from "../components/MailSetup";
 import { ResourceGuides, type GuideRef } from "../components/ResourceGuides";
 import { ResourceTester } from "../components/ResourceTester";
 import { useConfirm, useToast } from "../components/Feedback";
@@ -52,6 +53,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const [usage, setUsage] = useState<string | null>(null);
   const [browse, setBrowse] = useState<string | null>(null);
   const [mailbox, setMailbox] = useState<string | null>(null);
+  const [mailSetup, setMailSetup] = useState<{ key?: string } | null>(null);
   const { providerName } = useStudio();
   const onpremTarget = (state.target?.provider || providerName) === "onprem";
   // One-click on-prem services: create one straight into the list, or add one that is not in pskit.yml yet.
@@ -193,6 +195,11 @@ export function ResourcesView({ rest }: { rest: string[] }) {
           <button type="button" className="btn btn-sm btn-primary" onClick={() => setUsage(r.name)} title="Libraries, pskit.yml, Python / Node.js code and tests">
             How to use
           </button>
+          {str(r.res.type) === "smtp" && (
+            <button type="button" className="btn btn-sm" onClick={() => setMailSetup({ key: r.name })} title="DNS records at your domain provider (MX, A, SPF, DMARC) and a live check">
+              DNS setup
+            </button>
+          )}
           {onpremTarget && str(r.res.type) === "smtp" && (
             <button type="button" className="btn btn-sm" onClick={() => setMailbox(r.name)} title="Mail received: sender, recipients, subdomain, files, functions run">
               Mailbox
@@ -223,6 +230,9 @@ export function ResourcesView({ rest }: { rest: string[] }) {
           <span className="row-gap">
             <button type="button" className="btn" onClick={() => setGuide({ cloud: providerName || "index", page: "readme" })}>
               Guides
+            </button>
+            <button type="button" className="btn" onClick={() => setMailSetup({})} disabled={!onprem} title="Receive mail for your domain (e.g. anything@inbound.kavion.ai) and run functions with it">
+              + Mail domain (SMTP)
             </button>
             <button type="button" className="btn" onClick={() => setCreateOnprem({})} disabled={!onprem} title="Start Redis, Kafka, PostgreSQL, MinIO, OpenBao, ... with Docker and add it here">
               + On-prem service
@@ -286,6 +296,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       )}
       <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
       {browse && <ResourceData resourceKey={browse} onClose={() => setBrowse(null)} />}
+      {mailSetup && <MailSetup resourceKey={mailSetup.key} onClose={() => setMailSetup(null)} />}
       {mailbox && (
         <Mailbox
           provider={state.target?.provider || providerName}
