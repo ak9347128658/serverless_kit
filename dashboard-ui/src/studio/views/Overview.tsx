@@ -10,6 +10,7 @@ import { InlineIssues, PageHeader } from "../components/Misc";
 import { ServerForm } from "../components/OnPremMachines";
 import { DeployedBadge, useOnPremServers } from "../components/ServerPicker";
 import { capabilityLabel, ProviderCards } from "../components/ProviderCard";
+import { absorbShadows, providerShadows } from "../shadow";
 import { useStudio } from "../store";
 import type { Field, Json, JsonObject } from "../types";
 import { asObject, getIn, isObject, languageOf, runtimeLabel, SERVICE_RE, setIn, str } from "../util";
@@ -100,6 +101,8 @@ export function OverviewView() {
     raw = setIn(raw, ["provider", "name"], name);
     raw = setIn(raw, ["provider", "options"], isObject(parked.options) ? parked.options : undefined);
     raw = setIn(raw, ["provider", "region"], str(parked.region) || next.default_region || undefined);
+    // The parked settings are back under provider:, so the parked copy must not shadow later edits.
+    raw = absorbShadows(raw as JsonObject);
     const runtime = str(prov.runtime);
     if (runtime && next.runtimes.length && !next.runtimes.includes(runtime)) raw = setIn(raw, ["provider", "runtime"], undefined);
     replace(raw as JsonObject);
@@ -128,6 +131,7 @@ export function OverviewView() {
   };
   const optionFields = (provider?.options || []).filter((f) => providerName !== "onprem" || !ONPREM_SPECIAL.has(f.key));
   const serviceName = str(draft.service);
+  const shadows = providerShadows(draft);
 
   return (
     <div className="page">
@@ -144,6 +148,16 @@ export function OverviewView() {
         </FormRow>
       </Section>
 
+      {shadows.length > 0 && (
+        <div className="hint-box warn">
+          <b>providers.{providerName}</b> in pskit.yml overrides {shadows.length === 1 ? "a setting" : `${shadows.length} settings`} shown below, and
+          those values win when deploying: <code className="mono">{shadows.slice(0, 8).join(", ")}{shadows.length > 8 ? ", …" : ""}</code>.{" "}
+          <button type="button" className="btn btn-sm" onClick={() => replace(absorbShadows(draft))}>
+            Use the values shown here
+          </button>{" "}
+          <span className="muted small">(moves them under provider:, keeping settings only the override has; then Save)</span>
+        </div>
+      )}
       <Section title="Provider" hint={provider ? `${provider.display_name} · ${provider.tier}` : undefined}>
         <ProviderCards providers={meta.providers} value={providerName} onSelect={(n) => void switchProvider(n)} />
         {provider?.notes && <p className="muted small provider-notes">{provider.notes}</p>}

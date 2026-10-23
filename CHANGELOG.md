@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-23
+
+### Fixed
+- **Studio: Overview edits no longer lose to a stale `providers.<cloud>` copy.** Switching providers parked the old provider's options under `providers.<cloud>:`; switching back copied them to `provider:` but kept the parked block. That block is merged over `provider:` when deploying, so for example *On-premises options → Bind address 0.0.0.0* kept deploying `127.0.0.1` and a picked server kept `deploy.method: local`. Switching back now moves the parked settings into `provider:`. Editing any `provider.*` setting also removes the same setting from the active provider's `providers.<cloud>` block.
+
+### Added
+- **Overview warns about provider settings overridden under `providers.<active cloud>`** and offers **Use the values shown here**. This moves them under `provider:`: the values shown in Overview win, and settings only the override has are kept. Function / workflow overrides and other clouds' blocks are left alone.
+- **`pskit validate` / `deploy` warn** when `providers.<cloud>` overrides a different value set under `provider:` for that same cloud (`[providers.onprem.options.host] providers.onprem sets options.host to '127.0.0.1', which overrides '0.0.0.0' ...`).
+
 ## [1.3.10] - 2026-10-23
 
 ### Fixed

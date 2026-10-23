@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config.loader import LoadedConfig, load_config
 from ..config.schema import EventSpec, FunctionConfig, HttpEvent, ServiceConfig, is_generated_handler
@@ -26,6 +26,54 @@ def _apply_saved_server(options: Dict[str, Any], root: Path, stage: str) -> None
         resolve_deploy(options, root, stage, os.environ.get(SERVER_ENV) or None)
     except ServerError as exc:
         raise ConfigError(str(exc)) from None
+
+
+def shadowed_provider_settings(path: Path, provider: str) -> List[Issue]:
+    """Warn when ``providers.<provider>`` overrides a different value under ``provider:`` for that same provider.
+
+    The override wins, so a value edited under ``provider:`` (the studio's Overview) silently does nothing. Seen
+    with a copy left there by switching providers in the studio, e.g. ``providers.onprem.options.host: 127.0.0.1``.
+    """
+    from ..config.loader import _provider_override, _read_layers
+
+    issues: List[Issue] = []
+
+    def leaves(value: Any, prefix: str) -> List[Tuple[str, Any]]:
+        if isinstance(value, dict) and value:
+            return [leaf for k, v in value.items() for leaf in leaves(v, f"{prefix}.{k}")]
+        return [(prefix, value)]
+
+    def lookup(data: Any, dotted: str) -> Any:
+        for part in dotted.split(".")[1:]:
+            if not isinstance(data, dict) or part not in data:
+                return _MISSING
+            data = data[part]
+        return data
+
+    try:
+        layers = _read_layers(Path(path).resolve())
+    except Exception:  # noqa: BLE001 - loading already reported it
+        return issues
+    for layer in layers:
+        top: Dict[str, Any] = layer["provider"] if isinstance(layer.get("provider"), dict) else {}
+        if top.get("name") != provider:
+            continue
+        block = ((layer.get("providers") or {}).get(provider)) or {}
+        shadow = _provider_override(block).get("provider") if isinstance(block, dict) else None
+        for dotted, value in leaves(shadow or {}, "provider"):
+            mine = lookup(top, dotted)
+            if mine is not _MISSING and mine != value and not isinstance(mine, dict):
+                issues.append(Issue(
+                    "warning",
+                    f"providers.{provider} sets {dotted.split('.', 1)[1]} to {value!r}, which overrides {mine!r} under "
+                    f"provider: (the override wins). Remove it from providers.{provider}, or use the studio's "
+                    "Overview -> 'Use the values shown here'",
+                    f"providers.{provider}.{dotted.split('.', 1)[1]}",
+                ))
+    return issues
+
+
+_MISSING = object()
 
 
 def orchestrator_name(workflow: str) -> str:
@@ -83,6 +131,7 @@ class Project:
     def validate(self) -> List[Issue]:
         issues = self.provider.validate(self.config)
         issues.extend(self.provider.validate_files(self.config, self.root))
+        issues.extend(shadowed_provider_settings(self.loaded.path, self.config.provider.name))
         for kind, names in self.config.disabled.items():
             for name in names:
                 issues.append(Issue("warning", "disabled (enabled: false): not deployed", f"{kind}.{name}"))

@@ -200,3 +200,23 @@ def test_studio_passes_the_server_to_trigger_jobs_and_reports_the_deploy(tmp_pat
     info = _deployed_on(tmp_path, "dev")
     assert info["server"] == "VM_01" and info["endpoint"] == "http://10.0.0.5:8080" and info["deployed_at"]
 
+
+
+def test_stale_providers_block_that_shadows_provider_is_reported(make_project, tmp_path):
+    srv.save_server(tmp_path, "VM_01", {"host": "10.0.0.5", "user": "ubuntu"})
+    project = make_project("""
+service: shop
+provider:
+  name: onprem
+  options: {host: 0.0.0.0, port: 8080, deploy: {method: ssh, server: VM_01}}
+functions:
+  hello: {handler: app.handlers.hello, events: [{http: GET /hello}]}
+providers:
+  onprem:
+    options: {host: 127.0.0.1, port: 8080, deploy: {method: local}}
+  aws:
+    region: us-east-1
+""")
+    found = {i.where: i.message for i in project.validate() if i.where.startswith("providers.")}
+    assert set(found) == {"providers.onprem.options.host", "providers.onprem.options.deploy.method"}
+    assert "'127.0.0.1', which overrides '0.0.0.0'" in found["providers.onprem.options.host"]

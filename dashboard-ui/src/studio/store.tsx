@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
 import { api, ApiError, errorMessage } from "./api";
 import type { Issue, Json, JsonObject, Meta, ProjectState, ProviderMeta, ValidateResult } from "./types";
+import { clearShadow } from "./shadow";
 import { asObject, deepEqual, getIn, isObject, parseWhere, pathKey, setIn, str, type Path } from "./util";
 
 const HISTORY_CAP = 100;
@@ -90,7 +91,8 @@ function reducer(state: State, action: Action): State {
     }
     case "edit": {
       if (!state.draft) return state;
-      const next = setIn(state.draft, action.path, action.value) as JsonObject;
+      // A provider setting edited here must not lose to a stale copy under providers.<active provider>.
+      const next = clearShadow(setIn(state.draft, action.path, action.value) as JsonObject, action.path);
       return push(state, next, action.coalesce === false ? null : pathKey(action.path));
     }
     case "replace":
