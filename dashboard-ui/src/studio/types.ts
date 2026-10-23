@@ -351,6 +351,16 @@ export interface OnPremServer {
   description?: string;
 }
 
+/** Where an on-prem stage was last deployed (`GET /api/onprem-servers?stage=`). */
+export interface OnPremDeployed {
+  server: string | null;
+  method: string;
+  host: string | null;
+  label: string;
+  endpoint?: string | null;
+  deployed_at?: string | null;
+}
+
 export interface OnPremServerTest {
   name: string;
   ok: boolean;

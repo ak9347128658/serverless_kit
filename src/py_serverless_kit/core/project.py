@@ -15,15 +15,15 @@ from ..workflows import definition_dict
 WORK_DIR = ".pskit"
 
 
-def _apply_saved_server(options: Dict[str, Any], root: Path) -> None:
-    """``deploy: {server: NAME}`` / ``pskit deploy --server NAME``: a saved SSH server becomes the deploy target."""
+def _apply_saved_server(options: Dict[str, Any], root: Path, stage: str) -> None:
+    """``--server NAME`` / ``deploy: {server: NAME}`` / the server of the last deploy becomes the deploy target."""
     import os
 
     from ..config.loader import ConfigError
-    from .onprem_servers import SERVER_ENV, ServerError, apply_to_deploy
+    from .onprem_servers import SERVER_ENV, ServerError, resolve_deploy
 
     try:
-        apply_to_deploy(options, root, os.environ.get(SERVER_ENV) or None)
+        resolve_deploy(options, root, stage, os.environ.get(SERVER_ENV) or None)
     except ServerError as exc:
         raise ConfigError(str(exc)) from None
 
@@ -58,7 +58,7 @@ class Project:
         prov = get_provider(loaded.config.provider.name)
         config = loaded.config
         if config.provider.name == "onprem":
-            _apply_saved_server(config.provider.options, loaded.root)
+            _apply_saved_server(config.provider.options, loaded.root, config.provider.stage)
         if "runtime" not in (loaded.raw.get("provider") or {}):
             # Not pinned by the user: pick what this cloud supports.
             provider_cfg = config.provider.model_copy(update={"runtime": prov.default_runtime})

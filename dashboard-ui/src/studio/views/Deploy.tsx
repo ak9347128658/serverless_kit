@@ -4,10 +4,11 @@ import { JobConsole } from "../components/Console";
 import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FormRow, JsonInput, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
+import { DeployedBadge, ServerSelect, useServerChoice } from "../components/ServerPicker";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
 import { compatProblems, overridesOn, restoreTriggersOn, setEnabledOn, skipTriggersOn, type CompatProblem } from "../compat";
-import type { Job, Json, JsonObject, OnPremServer } from "../types";
+import type { Job, Json, JsonObject } from "../types";
 import { asObject, normalizeEvent, asArray } from "../util";
 import { relative } from "../../format";
 
@@ -27,16 +28,17 @@ export function DeployView() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [history, setHistory] = useState<Job[]>([]);
   const [deleteData, setDeleteData] = useState(true);
-  const [servers, setServers] = useState<OnPremServer[]>([]);
-  const [machine, setMachine] = useState("");
   const job = useJob(jobId);
   const target = state.target || { provider: "aws", stage: "dev" };
   const targetMeta = meta.providers.find((p) => p.name === target.provider);
   const problems = targetMeta ? compatProblems(draft, targetMeta) : [];
   const onprem = target.provider === "onprem";
+  const { servers, deployed, server: machine, setServer: setMachine, reload: reloadDeployed } = useServerChoice(onprem, target.stage);
+  // A finished deploy / remove changes where the stage runs: show it and keep the picker on it.
+  const finished = job.status !== "running" && job.status !== "idle";
   useEffect(() => {
-    if (onprem) api.onpremServers().then((r) => setServers(r.servers), () => setServers([]));
-  }, [onprem]);
+    if (onprem && finished) reloadDeployed();
+  }, [onprem, finished, jobId, reloadDeployed]);
 
   /** Switch every problem off on the target provider only. Returns the new draft. */
   const disableAll = (): JsonObject => {
@@ -144,7 +146,13 @@ export function DeployView() {
       });
       if (ok !== "confirm") return;
     } else if (command === "deploy") {
-      const ok = await confirm({ title: `Deploy to ${target.provider}/${target.stage}${onprem && machine ? ` on ${machine}` : ""}?`, confirmLabel: "Deploy" });
+      const where = !onprem ? "" : machine === "local" ? " on this machine" : machine ? ` on ${machine}` : deployed ? ` on ${deployed.label}` : "";
+      const moving = onprem && deployed && machine && machine !== (deployed.server || "") && !(machine === "local" && deployed.method === "local");
+      const ok = await confirm({
+        title: `Deploy to ${target.provider}/${target.stage}${where}?`,
+        body: moving ? <p>This stage is deployed on <b>{deployed.label}</b> now. Deploying it on <b>{machine === "local" ? "this machine" : machine}</b> moves it there.</p> : undefined,
+        confirmLabel: "Deploy",
+      });
       if (ok !== "confirm") return;
     }
     try {
@@ -177,15 +185,17 @@ export function DeployView() {
       {onprem && (
         <div className="card card-pad row-gap wrap deploy-machine">
           <b>Machine</b>
-          <select className="select" value={machine} onChange={(e) => setMachine(e.target.value)} aria-label="Machine">
-            <option value="">From pskit.yml (provider.options.deploy)</option>
-            {servers.map((s) => (
-              <option key={s.name} value={s.name}>
-                {s.name} ({s.label})
-              </option>
-            ))}
-          </select>
+          <ServerSelect
+            value={machine}
+            onChange={setMachine}
+            servers={servers}
+            deployed={deployed}
+            label="Machine"
+            emptyLabel={deployed ? `Same as the last deploy: ${deployed.label}` : "From pskit.yml (provider.options.deploy)"}
+          />
+          <DeployedBadge deployed={deployed} />
           <span className="muted small">
+            The stage remembers the machine of its last deploy: Test, Logs and <code className="mono">pskit trigger</code> / <code className="mono">pskit logs</code> use it, and the next deploy goes there unless you pick another (<code className="mono">--server local</code> for this machine).{" "}
             Saved servers come from <b>Resources → On-prem services → Servers</b>. The same as <code className="mono">pskit deploy --server NAME</code>; to make it permanent per stage set{" "}
             <code className="mono">provider.options.deploy.server</code>. Use one stage per machine to keep their deployments apart.
           </span>

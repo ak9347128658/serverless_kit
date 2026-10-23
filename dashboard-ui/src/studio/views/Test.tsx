@@ -5,6 +5,7 @@ import { JobConsole } from "../components/Console";
 import { useConfirm, useToast } from "../components/Feedback";
 import { FormRow, JsonInput, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
+import { DeployedBadge, ServerSelect, useServerChoice } from "../components/ServerPicker";
 import { useJob } from "../jobs";
 import { href, navigate } from "../route";
 import { useStudio } from "../store";
@@ -36,6 +37,8 @@ export function TestView({ rest }: { rest: string[] }) {
   const [showLogs, setShowLogs] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useJob(jobId);
+  const onprem = target.provider === "onprem";
+  const { servers, deployed, server, setServer } = useServerChoice(onprem, target.stage);
 
   const load = useCallback(() => {
     setError(null);
@@ -97,7 +100,7 @@ export function TestView({ rest }: { rest: string[] }) {
   const sendRemote = async () => {
     if (!fn || !trigger) return;
     const ok = await confirm({
-      title: `Send to ${providerName} / ${target.stage}?`,
+      title: `Send to ${providerName} / ${target.stage}${onprem ? ` on ${server === "local" ? "this machine" : server || deployed?.label || "the deployed host"}` : ""}?`,
       body: (
         <p>
           This sends a <b>real</b> {trigger.type === "invoke" ? "invocation" : `${trigger.type} event`} ({trigger.summary}) to the deployed
@@ -111,6 +114,7 @@ export function TestView({ rest }: { rest: string[] }) {
     if (ok !== "confirm") return;
     const args: Record<string, unknown> = { function: fn.name, event: trigger.index, data: payload === undefined ? undefined : payload };
     if (trigger.type === "http" && path && path !== trigger.path) args.path = path;
+    if (onprem && server) args.server = server;
     try {
       setJobId((await api.startJob("trigger", target.provider, target.stage, args)).job_id);
       setShowLogs(true);
@@ -234,6 +238,13 @@ export function TestView({ rest }: { rest: string[] }) {
                 </div>
               </Section>
               <Section title="3. Run it">
+                {onprem && guide.deployed && (
+                  <div className="row-gap wrap deploy-machine">
+                    <b>Server</b>
+                    <ServerSelect value={server} onChange={setServer} servers={servers} deployed={deployed} />
+                    <DeployedBadge deployed={deployed} />
+                  </div>
+                )}
                 <div className="row-gap wrap">
                   <button type="button" className="btn btn-primary" disabled={job.status === "running"} onClick={() => void runLocal()} title="Runs the handler on this machine with a synthetic event">
                     ▶ Run locally
@@ -251,7 +262,7 @@ export function TestView({ rest }: { rest: string[] }) {
                 </div>
                 {!trigger.remote.supported && guide.deployed && <p className="muted small">Deployed: {trigger.remote.reason}</p>}
                 {jobId && <JobConsole job={job} />}
-                {showLogs && guide.deployed && <DeployedLogs provider={target.provider} stage={target.stage} functions={[fn.name]} only={fn.name} />}
+                {showLogs && guide.deployed && <DeployedLogs provider={target.provider} stage={target.stage} functions={[fn.name]} only={fn.name} server={onprem ? server || undefined : undefined} />}
               </Section>
               <HowTo fnName={fn.name} trigger={trigger} provider={providerName} deployed={guide.deployed} toast={toast} />
             </div>

@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 import { LogStreams } from "../../components/LogStreams";
 import { LogViewer } from "../../components/LogViewer";
 import { api } from "../api";
 import { useConfirm } from "../components/Feedback";
 import { Section } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
+import { DeployedBadge, ServerSelect, useServerChoice } from "../components/ServerPicker";
 import { href } from "../route";
 import { useStudio } from "../store";
-import type { OnPremServer } from "../types";
 import { asObject } from "../util";
 
 type LogParams = Parameters<typeof api.logs>[2];
@@ -20,11 +20,7 @@ export function LogsView({ rest }: { rest: string[] }) {
   const only = rest[0] && functions.includes(rest[0]) ? rest[0] : undefined;
   const name = meta.providers.find((p) => p.name === target.provider)?.display_name || target.provider;
   const onprem = target.provider === "onprem";
-  const [servers, setServers] = useState<OnPremServer[]>([]);
-  const [server, setServer] = useState("");
-  useEffect(() => {
-    if (onprem) api.onpremServers().then((r) => setServers(r.servers), () => setServers([]));
-  }, [onprem]);
+  const { servers, deployed, server, setServer } = useServerChoice(onprem, target.stage);
   return (
     <div className="page">
       <PageHeader
@@ -39,16 +35,10 @@ export function LogsView({ rest }: { rest: string[] }) {
       {onprem && (
         <div className="card card-pad row-gap wrap deploy-machine">
           <b>Server</b>
-          <select className="select" value={server} onChange={(e) => setServer(e.target.value)} aria-label="Server">
-            <option value="">Last deployed (pskit.yml / last deploy)</option>
-            {servers.map((s) => (
-              <option key={s.name} value={s.name}>
-                {s.name} ({s.label})
-              </option>
-            ))}
-          </select>
+          <ServerSelect value={server} onChange={setServer} servers={servers} deployed={deployed} />
+          <DeployedBadge deployed={deployed} />
           <span className="muted small">
-            Reads the host on that saved server, so its port (default 8080) must be reachable from this machine. CLI:{" "}
+            Starts on the server this stage was deployed to. When its port (default 8080) is closed to this machine the logs are read over SSH. CLI:{" "}
             <code className="mono">pskit logs --server NAME</code>.
           </span>
         </div>

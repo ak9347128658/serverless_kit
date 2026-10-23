@@ -67,7 +67,7 @@ def build_argv(
             raise StudioError(400, "invalid stage")
         common += ["--stage", str(stage)]
     server = args.get("server")
-    if server and command in ("package", "plan", "deploy", "remove", "info"):
+    if server and command in ("package", "plan", "deploy", "remove", "info", "trigger", "resource-send", "workflow-run"):
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,62}", str(server)):
             raise StudioError(400, "invalid server name")
         common += ["--server", str(server)]

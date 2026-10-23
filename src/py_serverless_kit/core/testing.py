@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from ..runtime.adapters.base import envelope
 
@@ -548,9 +549,25 @@ def _send_onprem(record: Dict[str, Any], root: Path, name: str, trig: Dict[str, 
         key = str((payload or {}).get("key") or "test/hello.txt")
         method = "DELETE" if (payload or {}).get("action") == "deleted" else "PUT"
         content = None if method == "DELETE" else str((payload or {}).get("content", "hello from pskit")).encode()
-        headers = {"x-pskit-token": control.token} if control.token else {}
-        return _http(method, f"{control.base_url}/__pskit/storage/{target}/{key}", content, headers)
+        path = f"/__pskit/storage/{quote(target, safe='')}/{quote(key.lstrip('/'), safe='/')}"
+        return _host_http(control, method, path, content, {})
     return {"result": control.request("POST", f"/__pskit/invoke/{name}", envelope(kind, payload), timeout=900)}
+
+
+def _host_http(control: Any, method: str, path: str, body: Optional[bytes], headers: Dict[str, str]) -> Dict[str, Any]:
+    """An HTTP call to the on-prem host (directly, or over SSH when its port is closed): ``{status, body, host}``."""
+    from .onprem_control import HostUnavailable
+
+    try:
+        status, _headers, raw = control.fetch(method, path, body, headers, timeout=900)
+    except HostUnavailable as exc:
+        raise TriggerError(str(exc)) from None
+    text = raw.decode("utf-8", "replace")
+    try:
+        parsed: Any = json.loads(text)
+    except ValueError:
+        parsed = text[:4000]
+    return {"status": status, "body": parsed, "host": control.where}
 
 
 def send(
@@ -576,7 +593,20 @@ def send(
             url = base + (path if path.startswith("/") else "/" + path)
         has_body = trig["method"] not in ("GET", "HEAD", "DELETE") and payload is not None
         body = (payload if isinstance(payload, str) else _dumps(payload)).encode() if has_body else None
-        result = _http(trig["method"], url, body, {"content-type": "application/json"} if body else {})
+        headers = {"content-type": "application/json"} if body else {}
+        if provider == "onprem":
+            from .onprem_control import control_for
+
+            # The host of the last deploy (or --server), not the URL in the record: package / plan may have
+            # re-rendered it for another machine, and a closed port is reached over SSH.
+            control = control_for(record or {}, project.root)
+            if control is not None:
+                endpoint = str((record or {}).get("endpoint") or "").rstrip("/")
+                route = url[len(endpoint):] if endpoint and url.startswith(endpoint) else (path or trig["path"])
+                route = route if route.startswith("/") else "/" + route
+                return {"kind": "http", "url": control.base_url + route,
+                        **_host_http(control, trig["method"], route, body, headers)}
+        result = _http(trig["method"], url, body, headers)
         return {"kind": "http", "url": url, **result}
     try:
         if provider == "onprem":

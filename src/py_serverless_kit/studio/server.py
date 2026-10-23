@@ -81,6 +81,16 @@ def _int(params: Dict[str, List[str]], name: str, default: int) -> int:
     return int(raw)
 
 
+def _deployed_on(root: Path, stage: str) -> Optional[Dict[str, Any]]:
+    """Where ``onprem-<stage>`` was last deployed: the studio's server pickers default to it."""
+    from ..core.onprem_control import deployed_host, deployed_on
+
+    data = deployed_host(root, stage)
+    if data is None:
+        return None
+    return {**deployed_on(data["spec"], data.get("server")), "deployed_at": data.get("deployed_at")}
+
+
 def _obj(body: Any) -> Dict[str, Any]:
     if body is None:
         return {}
@@ -523,7 +533,11 @@ def make_handler(app: Studio) -> type:
             root = app.root
             try:
                 if parts == ["onprem-servers"] and method == "GET":
-                    return 200, {"servers": srv.list_servers(root)}
+                    out: Dict[str, Any] = {"servers": srv.list_servers(root)}
+                    stage = _param(params, "stage")
+                    if stage:
+                        out["deployed"] = _deployed_on(root, stage)
+                    return 200, out
                 if parts == ["onprem-servers"] and method == "POST":
                     body = _obj(self._body())
                     name = str(body.get("name") or "")

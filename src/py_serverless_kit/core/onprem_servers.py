@@ -18,6 +18,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 SERVERS_FILE = Path(".pskit") / "onprem-servers.json"
 SERVER_ENV = "PSKIT_DEPLOY_SERVER"
+LOCAL = "local"  # ``--server local``: this machine, whatever the last deploy used
+DEPLOYED_FILE = "onprem_deployed.json"  # .pskit/onprem-<stage>/: where the last successful deploy went
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,62}$")
 _KEEP = ("host", "user", "port", "identity_file", "password_file", "auth", "sudo", "known_hosts")
 
@@ -89,6 +91,8 @@ def save_server(root: Path, name: str, raw: Dict[str, Any], *, description: str 
 
     if not _NAME.match(str(name)):
         raise ServerError("server name: start with a letter; letters, digits, _ . - (max 63)")
+    if str(name).lower() == "local":
+        raise ServerError("server name 'local' is reserved for this machine (--server local)")
     previous = load_servers(root).get(name) or {}
     body = {**raw, "method": "ssh"}
     body.pop("server", None)
@@ -139,6 +143,52 @@ def test_server(root: Path, name: str, *, run: Optional[RunFn] = None) -> Dict[s
     if code or "os" not in facts:
         return {"name": name, "ok": False, "error": text.strip()[-600:] or f"ssh exited with {code}"}
     return {"name": name, "ok": True, "facts": facts}
+
+
+_LOGIN_KEYS = ("host", "user", "port", "ssh_port", "pem", "identity", "identity_file", "password_file", "auth",
+               "known_hosts", "server")
+
+
+def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Optional[str] = None) -> Optional[str]:
+    """Pick the machine ``onprem-<stage>`` deploys to, in place on ``options.deploy``. Returns the server name.
+
+    ``server`` (``--server`` / ``PSKIT_DEPLOY_SERVER``) wins; ``local`` means this machine. Next comes
+    ``options.deploy`` in pskit.yml (``server``, ``host`` or ``method``). Otherwise the stage goes back to the
+    saved server it was last deployed to, so a deploy from the studio's machine picker sticks for later
+    deploys, triggers, tests and logs.
+    """
+    if server == LOCAL:
+        deploy = options.get("deploy")
+        kept = {k: v for k, v in deploy.items() if k not in _LOGIN_KEYS} if isinstance(deploy, dict) else {}
+        options["deploy"] = {**kept, "method": "local"}
+        return None
+    if server:
+        return apply_to_deploy(options, root, server)
+    deploy = options.get("deploy")
+    configured = isinstance(deploy, str) or (
+        isinstance(deploy, dict) and any(deploy.get(k) for k in ("server", "host", "method"))
+    )
+    if configured:
+        return apply_to_deploy(options, root)
+    remembered = deployed_server(root, stage)
+    if not remembered:
+        return None
+    if remembered not in load_servers(root):
+        raise ServerError(
+            f"onprem-{stage} was last deployed to saved server {remembered!r}, which no longer exists. "
+            f"Pick the machine: --server NAME, or --server {LOCAL} for this machine"
+        )
+    return apply_to_deploy(options, root, remembered)
+
+
+def deployed_server(root: Path, stage: str) -> Optional[str]:
+    """The saved server ``onprem-<stage>`` was last deployed to (None: this machine, an inline host, or never)."""
+    try:
+        data = json.loads((root / ".pskit" / f"onprem-{stage}" / DEPLOYED_FILE).read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    server = data.get("server") if isinstance(data, dict) else None
+    return str(server) if server else None
 
 
 def apply_to_deploy(options: Dict[str, Any], root: Path, server: Optional[str] = None) -> Optional[str]:

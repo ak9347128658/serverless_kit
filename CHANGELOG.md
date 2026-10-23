@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.9] - 2026-10-23
+
+### Fixed
+- **On premises: commands go to the host the stage was deployed to.** A deploy remembers its machine (`.pskit/onprem-<stage>/onprem_deployed.json`, plus `deployed_on` in `deployment.json`). `pskit trigger`, `pskit logs`, `resources send`, executions and the studio no longer fall back to `http://127.0.0.1:8080` after `package` / `plan` / `info` re-rendered the spec without `--server`, or after the studio's Machine picker reset. The next deploy without `--server` goes to the same saved server; `--server local` picks this machine. `pskit deploy` prints where it deployed instead of `On-premises local`.
+- **On premises: hosts whose port is closed are reached over SSH.** Logs, triggers, bucket uploads, HTTP tests and the other control calls to a remote host whose port is not reachable from here (the default `127.0.0.1` bind, or a firewall) now run over the deploy's SSH login. Previously they failed with `WinError 10061 ... actively refused`. If nothing answers there either, the error says so and names the redeploy command.
+- **Studio: server pickers start on the deployed server.** Deploy (Machine), Test (new **Server** picker for *Send to …*, also used by its logs) and Logs open on the server the stage was deployed to, mark it `· deployed here`, and offer *This machine (local)*. Deploy asks before moving a stage to another machine. Studio trigger, resource-send and workflow-run jobs now pass `--server`.
+
 ## [1.3.8] - 2026-10-22
 
 ### Added

@@ -3,7 +3,7 @@ import type {
   DiscoverResult,
   OnPremConsoleInfo,
   OnPremConsoleResult,
-  OnPremServer,
+  OnPremDeployed, OnPremServer,
   OnPremServerTest,
   OnPremTerminal,
   FileContent,
@@ -214,7 +214,8 @@ export const api = {
   onpremConsoleInfo: (key: string) => request<OnPremConsoleInfo>("GET", `/api/onprem-services/${encodeURIComponent(key)}/console`),
   onpremConsole: (key: string, line: string, shell = false) =>
     request<OnPremConsoleResult>("POST", `/api/onprem-services/${encodeURIComponent(key)}/console`, { line, shell }),
-  onpremServers: () => request<{ servers: OnPremServer[] }>("GET", "/api/onprem-servers"),
+  onpremServers: (stage?: string) =>
+    request<{ servers: OnPremServer[]; deployed?: OnPremDeployed | null }>("GET", "/api/onprem-servers", undefined, { query: { stage } }),
   onpremServerSave: (name: string, target: JsonObject, description?: string) =>
     request<{ name: string }>("POST", "/api/onprem-servers", { name, target, description }),
   onpremServerTest: (name: string) => request<OnPremServerTest>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/test`, {}),

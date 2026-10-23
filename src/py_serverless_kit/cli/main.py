@@ -59,7 +59,8 @@ def project_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     @click.option("-s", "--stage", default=None, help="Stage, e.g. dev / staging / prod.")
     @click.option("-r", "--region", default=None, help="Override provider.region.")
     @click.option("--server", "server", default=None,
-                  help="On premises: deploy to this saved SSH server (pskit resources onprem servers list).")
+                  help="On premises: use this saved SSH server (pskit resources onprem servers list); 'local' "
+                       "for this machine. Default: the server the stage was last deployed to.")
     @click.option("-v", "--verbose", is_flag=True, help="Show tracebacks on errors.")
     @functools.wraps(fn)
     def wrapper(
@@ -340,7 +341,8 @@ def deploy(project, skip_deps: bool, confirm: bool, upgrade: bool, no_dashboard:
 
     _ask_onprem_pem(project)
     record = Deployer(project, echo=echo).deploy(skip_deps=skip_deps, auto_approve=not confirm, upgrade=upgrade)
-    ok(f"\nDeployed {record['service']} ({record['stage']}) to {record['provider_display']} {record['region']}")
+    where = (record.get("deployed_on") or {}).get("label") or record["region"]
+    ok(f"\nDeployed {record['service']} ({record['stage']}) to {record['provider_display']} {where}")
     _print_record(record)
     if not no_dashboard:
         path = write_dashboard(project.root)
@@ -1445,6 +1447,8 @@ def _ask_onprem_pem(project: Any) -> None:
 def _print_record(record: dict) -> None:
     if record.get("endpoint"):
         echo(f"endpoint: {record['endpoint']}")
+    if record.get("deployed_on"):
+        echo(f"deployed on: {record['deployed_on'].get('label')}")
     echo("functions:")
     for f in record["functions"]:
         triggers = ", ".join(e["summary"] for e in f["events"]) or "direct invoke"

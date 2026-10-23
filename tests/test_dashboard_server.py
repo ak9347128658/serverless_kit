@@ -95,7 +95,7 @@ def fakes(monkeypatch):
     control_mod = types.ModuleType("py_serverless_kit.core.onprem_control")
     control_mod.HostUnavailable = FakeUnavailable  # type: ignore[attr-defined]
     control = FakeControl()
-    control_mod.control_for = lambda record, root: control if record.get("provider") == "onprem" else None  # type: ignore[attr-defined]
+    control_mod.control_for = lambda record, root, server=None: control if record.get("provider") == "onprem" else None  # type: ignore[attr-defined]
     exec_mod = types.ModuleType("py_serverless_kit.core.executions")
     exec_mod.ExecutionError = FakeExecutionError  # type: ignore[attr-defined]
     state = {"backend": FakeBackend()}

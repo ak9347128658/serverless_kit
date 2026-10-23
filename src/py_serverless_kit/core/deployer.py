@@ -129,6 +129,8 @@ class Deployer:
                 "files": result.artifact.file_count,
             },
         )
+        if self.project.config.provider.name == "onprem":
+            self._remember_onprem(record)
         self.save_record(record)
         self.run_hook("after_deploy")
         return record
@@ -221,6 +223,16 @@ class Deployer:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record, indent=2, default=str), "utf-8")
         return path
+
+    def _remember_onprem(self, record: Dict[str, Any]) -> None:
+        """Keep the machine this stage now runs on: trigger, logs, test and the next deploy default to it."""
+        from .onprem_control import deployed_on, remember_deploy
+
+        deploy = self.project.config.provider.options.get("deploy")
+        server = str(deploy.get("server") or "") if isinstance(deploy, dict) else ""
+        data = remember_deploy(self.project.work_dir, server or None)
+        if data is not None:
+            record["deployed_on"] = deployed_on(data["spec"], data["server"])
 
     def load_record(self) -> Optional[Dict[str, Any]]:
         path = self.project.work_dir / RECORD_FILE
