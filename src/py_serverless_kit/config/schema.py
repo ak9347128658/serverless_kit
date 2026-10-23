@@ -169,25 +169,15 @@ class TopicEvent(_Model):
 
 
 class SmtpEvent(_Model):
-    """Mail received by an ``smtp`` resource (the on-prem host's SMTP server).
-
-    ``recipients`` (globs such as ``*@support.example.com`` or ``orders-*@example.com``) and ``subdomains``
-    (``support``, ``eu.*``; ``""`` is the domain itself) narrow which mail this function gets; both default to all.
-    """
+    """Mail received by an ``smtp`` resource: the SMTP on-prem service, which posts every mail to the host."""
 
     resource: str = Field("", description="key of a `resources:` entry of type smtp")
     name: str = ""
-    recipients: List[str] = Field(default_factory=list)
-    subdomains: List[str] = Field(default_factory=list)
-    existing: bool = False
 
     @model_validator(mode="after")
     def _source(self) -> SmtpEvent:
         if not self.resource:
-            raise ValueError("smtp event needs `resource` (an smtp resource: the server that receives the mail)")
-        for pattern in self.recipients:
-            if "@" not in pattern or any(c.isspace() for c in pattern):
-                raise ValueError(f"smtp recipients are address patterns such as *@example.com, got {pattern!r}")
+            raise ValueError("smtp event needs `resource` (an smtp resource: the SMTP server that receives the mail)")
         return self
 
 

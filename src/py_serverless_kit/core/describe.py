@@ -28,10 +28,8 @@ def event_summary(ev: EventSpec) -> Dict[str, Any]:
         text = f"bucket {c.bucket} [{', '.join(c.events)}]{filt}"
         extra = {"bucket": c.bucket, "events": list(c.events), "prefix": c.prefix, "suffix": c.suffix}
     elif ev.type == "smtp":
-        filt = "".join(f" {k}={','.join(v)}" for k, v in (("to", c.recipients), ("subdomains", c.subdomains)) if v)
-        text = f"smtp {c.name or c.resource}{filt}"
-        extra = {"name": c.name, "resource": c.resource, "recipients": list(c.recipients),
-                 "subdomains": list(c.subdomains)}
+        text = f"smtp {c.name or c.resource}"
+        extra = {"name": c.name, "resource": c.resource}
     else:
         text = f"topic {c.name}"
         extra = {"name": c.name, "existing": c.existing}

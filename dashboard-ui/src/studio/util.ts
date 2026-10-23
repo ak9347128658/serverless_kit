@@ -189,11 +189,8 @@ export function eventSummary(raw: Json): string {
       return `bucket ${String(c.resource ? `@${c.resource}` : c.bucket || "?")}`;
     case "topic":
       return `topic ${String(c.resource ? `@${c.resource}` : c.name || "?")}`;
-    case "smtp": {
-      const to = asArray(c.recipients).map((x) => String(x));
-      const subs = asArray(c.subdomains).map((x) => String(x));
-      return `mail @${String(c.resource || "?")}${to.length ? ` to ${to.join(", ")}` : ""}${subs.length ? ` (subdomains ${subs.join(", ")})` : ""}`;
-    }
+    case "smtp":
+      return `mail @${String(c.resource || "?")}`;
     default:
       return ev.type;
   }

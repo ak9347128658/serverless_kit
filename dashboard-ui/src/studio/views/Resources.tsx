@@ -4,10 +4,8 @@ import { DataTable, type Column } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { CloudResources } from "../components/CloudResources";
 import { Markdown } from "../components/Markdown";
-import { CreateDrawer, OnPremServices } from "../components/OnPremServices";
+import { CreateDrawer, OnPremServices, ServiceUsageDrawer } from "../components/OnPremServices";
 import { ResourceData } from "../components/ResourceData";
-import { Mailbox, SmtpServerOptions } from "../components/SmtpPanels";
-import { MailSetup } from "../components/MailSetup";
 import { ResourceGuides, type GuideRef } from "../components/ResourceGuides";
 import { ResourceTester } from "../components/ResourceTester";
 import { useConfirm, useToast } from "../components/Feedback";
@@ -52,8 +50,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const [guide, setGuide] = useState<GuideRef | null>(null);
   const [usage, setUsage] = useState<string | null>(null);
   const [browse, setBrowse] = useState<string | null>(null);
-  const [mailbox, setMailbox] = useState<string | null>(null);
-  const [mailSetup, setMailSetup] = useState<{ key?: string } | null>(null);
+  const [smtpGuide, setSmtpGuide] = useState<string | null>(null);
   const { providerName } = useStudio();
   const onpremTarget = (state.target?.provider || providerName) === "onprem";
   // One-click on-prem services: create one straight into the list, or add one that is not in pskit.yml yet.
@@ -195,14 +192,9 @@ export function ResourcesView({ rest }: { rest: string[] }) {
           <button type="button" className="btn btn-sm btn-primary" onClick={() => setUsage(r.name)} title="Libraries, pskit.yml, Python / Node.js code and tests">
             How to use
           </button>
-          {str(r.res.type) === "smtp" && (
-            <button type="button" className="btn btn-sm" onClick={() => setMailSetup({ key: r.name })} title="DNS records at your domain provider (MX, A, SPF, DMARC) and a live check">
-              DNS setup
-            </button>
-          )}
-          {onpremTarget && str(r.res.type) === "smtp" && (
-            <button type="button" className="btn btn-sm" onClick={() => setMailbox(r.name)} title="Mail received: sender, recipients, subdomain, files, functions run">
-              Mailbox
+          {str(r.res.type) === "smtp" && onprem?.services.some((s) => s.key === r.name) && (
+            <button type="button" className="btn btn-sm" onClick={() => setSmtpGuide(r.name)} title="DNS records to add at your domain provider (A, MX), the port, and the mail fields handlers get">
+              DNS guide
             </button>
           )}
           {onpremTarget && ["queue", "storage", "topic"].includes(str(r.res.type)) && (
@@ -231,8 +223,8 @@ export function ResourcesView({ rest }: { rest: string[] }) {
             <button type="button" className="btn" onClick={() => setGuide({ cloud: providerName || "index", page: "readme" })}>
               Guides
             </button>
-            <button type="button" className="btn" onClick={() => setMailSetup({})} disabled={!onprem} title="Receive mail for your domain (e.g. anything@inbound.kavion.ai) and run functions with it">
-              + Mail domain (SMTP)
+            <button type="button" className="btn" onClick={() => setCreateOnprem({ type: "smtp" })} disabled={!onprem} title="An SMTP server (Node.js) that receives mail for your domain and runs functions with it">
+              + SMTP server
             </button>
             <button type="button" className="btn" onClick={() => setCreateOnprem({})} disabled={!onprem} title="Start Redis, Kafka, PostgreSQL, MinIO, OpenBao, ... with Docker and add it here">
               + On-prem service
@@ -272,12 +264,13 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       {createOnprem && onprem && (
         <CreateDrawer
           state={onprem}
-          initial={null}
+          initial={(createOnprem.type === "smtp" && onprem.catalog.find((c) => c.id === "smtp")) || null}
           resourceType={createOnprem.type}
           onClose={() => setCreateOnprem(null)}
           onCreated={(svc, attach) => {
             setOnpremVersion((v) => v + 1);
             void addService(svc, attach);
+            if (svc.service === "smtp") setSmtpGuide(svc.key);
           }}
         />
       )}
@@ -296,15 +289,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       )}
       <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
       {browse && <ResourceData resourceKey={browse} onClose={() => setBrowse(null)} />}
-      {mailSetup && <MailSetup resourceKey={mailSetup.key} onClose={() => setMailSetup(null)} />}
-      {mailbox && (
-        <Mailbox
-          provider={state.target?.provider || providerName}
-          stage={state.target?.stage || "dev"}
-          resourceKey={mailbox}
-          onClose={() => setMailbox(null)}
-        />
-      )}
+      {smtpGuide && <ServiceUsageDrawer serviceKey={smtpGuide} onClose={() => setSmtpGuide(null)} />}
       {usage && <UsageDrawer resourceKey={usage} onClose={() => setUsage(null)} onTest={() => { setUsage(null); test(usage); }} />}
     </div>
   );
@@ -473,9 +458,6 @@ function ResourceDrawer({
           </div>
         </FormRow>
 
-        {type === "smtp" && (
-          <SmtpServerOptions resourceKey={name} value={onpremOptions} onChange={setOnpremOptions} />
-        )}
         {driverList.length > 0 && (
           <div className="driver-box card card-pad">
             <div className="row-between">

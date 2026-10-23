@@ -117,9 +117,9 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   buckets and objects for MinIO, RustFS, LocalStack, LocalEmu and fake-gcs-server (upload, download, folders,
   paging, versions, share links, policies); secrets for OpenBao and the AWS emulators (folders, versions,
   add / edit / delete). See [one-click services](resource-guides/onprem/services.md#pskits-own-browsers-when-the-native-ui-is-missing).
-- **E-mail (SMTP)**: an *E-mail (SMTP)* trigger, an *smtp* resource with domains, password on / off (users and
-  passwords saved to the env file), TLS and allow-lists, and **Resources → Mailbox** for received mail with its
-  subdomain, files and function results. See [E-mail triggers](smtp/README.md).
+- **E-mail (SMTP)**: **Resources → + SMTP server** (or *On-prem services → Mail*) starts a Node.js SMTP server
+  for your domains on a server and ticks the functions to run. Its **DNS guide** lists the A and MX records to add at
+  the domain provider. The *E-mail (SMTP)* trigger picks the server. See [E-mail triggers](smtp/README.md).
 - **Resources → + On-prem service** creates a one-click service and adds it straight to the resource list (with
   triggers); **Add resource** has *Create a <type> on premises*. Services not yet in `pskit.yml` appear above the list
   with an **Add** button, and rows backed by one are marked `on-prem <service> · <server>`.

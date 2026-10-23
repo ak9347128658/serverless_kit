@@ -160,8 +160,9 @@ through its driver.
 To have pskit start the service for you (Redis, Valkey, Kafka, NATS, RabbitMQ, MinIO, databases, ...) on this machine
 or an SSH server, see [one-click services](resource-guides/onprem/services.md).
 
-A resource of `type: smtp` (on premises) is a mail server for your domains, run by the host. Functions use it with
-the `smtp` trigger: see [E-mail triggers](smtp/README.md).
+A resource of `type: smtp` (on premises) is the SMTP server one-click service: a Node.js container that receives
+mail for your domains and posts it to the host. Functions use it with the `smtp` trigger: see
+[E-mail triggers](smtp/README.md).
 
 **Secrets.** Any parameter can be given as `<name>_env: VARIABLE` instead of `<name>: value`. The host reads `VARIABLE` from its own environment when it starts, so the secret never lands in Terraform state or `pskit_host.json`. A variable that isn't set stops the host with an error naming it. `provider.options.env_file: .env.onprem` ships a `KEY=VALUE` file with the host (as `host.env`) and loads it at start, for local, SSH and Docker deploys alike; only its digest is recorded. `${env:...}`, by contrast, is resolved on the machine running `pskit deploy` and *is* written into the files.
 

@@ -106,7 +106,7 @@ export function TestView({ rest }: { rest: string[] }) {
           This sends a <b>real</b> {trigger.type === "invoke" ? "invocation" : `${trigger.type} event`} ({trigger.summary}) to the deployed
           function, with this machine's credentials.
           {trigger.type === "storage" ? " The object is uploaded to the bucket." : ""}
-          {trigger.type === "smtp" ? " The mail is stored in the server's mailbox and delivered to every matching function." : ""}
+          {trigger.type === "smtp" ? " The test mail goes to the host like one the SMTP server received, and runs every function attached to the server." : ""}
           {trigger.type === "queue" || trigger.type === "topic" ? " The message is delivered to every subscriber." : ""}
         </p>
       ),

@@ -23,8 +23,8 @@ path you already have instead.
   ``DELETE /__pskit/logs[?function=]`` clears them. ``GET /__pskit/stats``
   returns per-function invocation counters.
 
-* ``/__pskit/mail[/<server>[/<id>]]`` lists, injects, reads, redelivers and deletes mail received by the
-  host's SMTP servers (``smtp`` resources; see ``runtime/mail_delivery.py`` and ``runtime/smtp_server.py``).
+* ``POST /__pskit/smtp/<resource>`` (JSON: a parsed mail, sent by the ``smtp`` on-prem service) runs every
+  function with an ``smtp`` trigger on that resource; ``500`` when one fails, so the sender retries.
 
 * ``POST /__pskit/queues/<name>/lease`` (``{"batch", "visibility"}``), ``.../ack`` and
   ``.../nack`` (``{"receipts": [...]}``) let a host elsewhere consume a built-in queue
@@ -73,7 +73,6 @@ from .cron import CronError, next_cron, rate_seconds, resolve_zone
 from .dispatch import execute
 from .event import Event, EventType, Headers, HttpRequest, Record
 from .executions import Executor, FileExecutionStore, valid_id
-from .mail_delivery import MailDelivery
 from .manifest import load_manifest, set_manifest
 from .response import Response, dumps
 from .routing import match_path, method_matches
@@ -770,8 +769,6 @@ class Host:
         self.language = str(self.spec.get("language") or "python")
         self._workers: Dict[str, Any] = {}
         self._workers_lock = threading.Lock()
-        # SMTP servers of `smtp` resources: mail for your domains becomes `smtp` events.
-        self.mail = MailDelivery(self.spec, self.broker.data_dir, self.invoke, self.logs.append)
 
     # ---------------------------------------------------------------- lifecycle
     def open(self) -> None:
@@ -1360,8 +1357,6 @@ class Host:
         self.capture_output()
         poller = threading.Thread(target=self._poll_loop, name="pskit-onprem", daemon=True)
         poller.start()
-        for note in self.mail.start():
-            self._note(note)
         server = self.make_server()
         bound = server.server_address
         self.logs.append("INFO", "host", f"listening on {bound[0]!s}:{bound[1]}")
@@ -1369,7 +1364,6 @@ class Host:
             server.serve_forever()
         finally:
             self._stop.set()
-            self.mail.stop()
             if self.executor is not None:
                 self.executor.shutdown()
             self.close_workers()
@@ -1478,10 +1472,14 @@ class Host:
                     return self._json(200, {"items": host.logs.functions()})
                 if parts == ["stats"]:
                     return self._json(200, host.stats())
-                if parts and parts[0] == "mail":
-                    status, headers, body = host.mail.admin(self.command, parts[1:], query, raw,
-                                                            str(self.headers.get("content-type") or ""))
-                    return self._send(status, headers, body)
+                if len(parts) == 2 and parts[0] == "smtp":
+                    if self.command != "POST":
+                        return self._json(405, {"error": "POST the mail"})
+                    try:
+                        mail = json.loads(raw.decode("utf-8"))
+                    except ValueError:
+                        return self._json(400, {"error": "the mail must be JSON"})
+                    return self._json(*host.deliver_mail(parts[1], mail))
                 if parts and parts[0] == "executions":
                     return self._executions(parts[1:], query)
                 if parts == ["resources"]:
@@ -1884,6 +1882,41 @@ class Host:
                 item["path"] = str(self.broker.bucket_dir(name))
             items.append(item)
         return {"items": items}
+
+    def deliver_mail(self, server: str, mail: Any) -> Tuple[int, Dict[str, Any]]:
+        """Run every function with an ``smtp`` trigger on resource ``server`` with ``mail`` (from the smtp service).
+
+        ``(200, results)`` when all succeeded; ``500`` when one failed and ``404`` when none listens, so the SMTP
+        service answers 451 and the sending server retries later.
+        """
+        if not isinstance(mail, dict):
+            return 400, {"error": "the mail must be a JSON object"}
+        listeners = [
+            name for name, fn in (self.spec.get("functions") or {}).items()
+            if any(ev.get("type") == "smtp" and server in (ev.get("resource"), ev.get("name"))
+                   for ev in fn.get("events") or [])
+        ]
+        summary = (f"mail {mail.get('id') or ''} from {mail.get('from') or '?'} to "
+                   f"{', '.join((mail.get('envelope') or {}).get('rcpt_to') or mail.get('to') or [])} "
+                   f"{json.dumps(str(mail.get('subject') or ''))}")
+        fields = {"server": server, "from": mail.get("from"), "to": mail.get("to"), "subject": mail.get("subject"),
+                  "attachments": [a.get("filename") for a in mail.get("attachments") or [] if isinstance(a, dict)]}
+        if not listeners:
+            self.logs.append("WARNING", "smtp", f"{summary}: no function has an smtp trigger on {server!r}",
+                             fields=fields)
+            return 404, {"error": f"no function has an smtp trigger on {server!r}"}
+        results: Dict[str, Any] = {}
+        for name in listeners:
+            self.logs.append("INFO", "smtp", f"{summary} -> {name}", function=name, fields=fields)
+            try:
+                self.invoke(name, Event(type=EventType.SMTP, data=mail, source=f"onprem.smtp.{server}"))
+                results[name] = {"ok": True}
+            except Exception as exc:  # noqa: BLE001 - reported to the SMTP service, which makes the sender retry
+                results[name] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                self.logs.append("ERROR", "smtp", f"{summary} -> {name} failed: {type(exc).__name__}: {exc}",
+                                 function=name, fields=fields)
+        ok = all(r["ok"] for r in results.values())
+        return (200 if ok else 500), {"delivered": results}
 
     def function_for(self, name: str) -> Optional[str]:
         """This host's function for a pskit name, a deployed name or a Lambda ARN (None if unknown)."""

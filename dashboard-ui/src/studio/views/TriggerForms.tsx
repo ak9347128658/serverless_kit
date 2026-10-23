@@ -12,7 +12,7 @@ export const EVENT_INFO: Record<EventType, { label: string; icon: string; blurb:
   queue: { label: "Queue", icon: "☰", blurb: "Process messages from a queue in batches, with retries." },
   storage: { label: "Storage", icon: "▣", blurb: "React to files created or deleted in a bucket." },
   topic: { label: "Topic", icon: "✺", blurb: "Receive published messages (fan-out pub/sub)." },
-  smtp: { label: "E-mail (SMTP)", icon: "✉", blurb: "Run when mail arrives for your domain: from, to, subdomain, body and attachments (on premises)." },
+  smtp: { label: "E-mail (SMTP)", icon: "✉", blurb: "Run when mail arrives for your domain: from, to, cc, subject, body and attachments (on premises)." },
 };
 
 export function defaultEvent(type: EventType, name: string): NormalEvent {
@@ -108,36 +108,25 @@ export function TriggerForm({ event, onChange, fnName }: { event: NormalEvent; o
 
 // --------------------------------------------------------------------- SMTP
 
-/** Mail received by an smtp resource (the host's SMTP server for your domains). */
+/** Mail received by an SMTP server (the `smtp` on-prem service, an smtp resource). */
 function SmtpForm({ config, set }: { config: JsonObject; set: (k: string, v: Json | undefined) => void }) {
-  const { draft, replace } = useStudio();
+  const { draft } = useStudio();
   const servers = Object.entries(asObject(draft.resources)).filter(([, r]) => str(asObject(r).type) === "smtp");
   const resource = str(config.resource);
-  const domains = asArray(asObject(asObject(asObject(draft.resources)[resource]).options).domains).map((d) => str(d));
-  const addServer = () => {
-    const key = uniqueName("inbound-mail", Object.keys(asObject(draft.resources)));
-    replace({ ...draft, resources: { ...asObject(draft.resources), [key]: { type: "smtp", options: { domains: ["example.com"], port: 2525 } } } });
-    set("resource", key);
-  };
   return (
     <div className="form">
-      <FormRow label="SMTP server" required error={!resource ? "pick or add the server that receives the mail" : null} help="An smtp resource: its domains, port and password settings are under Resources.">
-        <div className="row-gap">
-          <EnumSelect value={resource} allowEmpty emptyLabel="choose…" options={servers.map(([k]) => k)} onChange={(v) => set("resource", v)} />
-          <button type="button" className="btn btn-sm" onClick={addServer}>
-            + New SMTP server
-          </button>
-        </div>
-      </FormRow>
-      <FormRow label="Recipients" help={`Optional address patterns; empty = every address${domains.length ? ` at ${domains.join(", ")}` : ""}. e.g. *@support.${domains[0] || "example.com"}, orders-*@${domains[0] || "example.com"}`}>
-        <ListEditor value={asArray(config.recipients).map((x) => str(x))} onChange={(v) => set("recipients", v)} placeholder={`*@${domains[0] || "example.com"}`} addLabel="Add pattern" />
-      </FormRow>
-      <FormRow label="Subdomains" help="Optional: only mail to these subdomains (support for ann@support.example.com; * patterns work; leave an empty row out). Empty = all.">
-        <ListEditor value={asArray(config.subdomains).map((x) => str(x))} onChange={(v) => set("subdomains", v)} placeholder="support" addLabel="Add subdomain" />
+      <FormRow
+        label="SMTP server"
+        required
+        error={!resource ? "pick the SMTP server that receives the mail" : null}
+        help="Create one under Resources → + SMTP server (or On-prem services → Mail); its DNS guide lists the records to add at your domain provider."
+      >
+        <EnumSelect value={resource} allowEmpty emptyLabel="choose…" options={servers.map(([k]) => k)} onChange={(v) => set("resource", v)} />
       </FormRow>
       <p className="muted small">
-        The handler gets <code className="mono">event.data</code>: from, recipient (local, subdomain, domain), to / cc, subject, text, html, headers and attachments
-        (filename, content_type, size, content in base64). Every mail is logged with its sender, recipients, subdomain and files.
+        The handler gets <code className="mono">event.data</code>: from, from_name, to, cc, bcc, reply_to, subject, text, html, headers, attachments (filename,
+        content_type, size, content in base64), the SMTP envelope, and the same mail as an Amazon SES event (<code className="mono">Records[0].ses</code>, raw
+        message in <code className="mono">content</code>).
       </p>
     </div>
   );

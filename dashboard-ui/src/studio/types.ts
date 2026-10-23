@@ -353,33 +353,6 @@ export interface OnPremServer {
   description?: string;
 }
 
-export interface MailDnsRecord {
-  type: string;
-  name: string;
-  fqdn: string;
-  value: string;
-  priority?: number;
-  required: boolean;
-  why: string;
-  status?: "ok" | "missing" | "different" | "keep";
-  found?: string[];
-}
-
-/** POST /api/mail-setup: DNS records to receive mail for a domain, and their live state. */
-export interface MailSetup {
-  domain: string;
-  receive: string;
-  mx: string;
-  ip: string;
-  records: MailDnsRecord[];
-  notes: string[];
-  warnings: string[];
-  current_mx: string[];
-  ready?: boolean;
-  port_25?: string;
-  port_server?: string;
-}
-
 /** Where an on-prem stage was last deployed (`GET /api/onprem-servers?stage=`). */
 export interface OnPremDeployed {
   server: string | null;

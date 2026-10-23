@@ -11,7 +11,6 @@ the project.
 from __future__ import annotations
 
 import json
-import re
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -320,7 +319,7 @@ def make_handler(app: Studio) -> type:
                 stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
                 return 200, system.resource_test_guide(root, provider, stage)
             if parts and parts[0] in ("resource-check", "resource-clear", "resource-usage", "resource-data",
-                                      "resource-object", "resource-message-delete", "resource-mail") \
+                                      "resource-object", "resource-message-delete") \
                     and len(parts) == 1 and method == "POST":
                 body = _obj(self._body())
                 raw_provider = (app.raw_config().get("provider") or {})
@@ -328,62 +327,6 @@ def make_handler(app: Studio) -> type:
                 stage = str(body.get("stage") or raw_provider.get("stage") or "dev")
                 action = parts[0].split("-", 1)[1]
                 return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action, body)
-            if parts == ["mail-handler-stub"] and method == "POST":
-                from ..core.mail_setup import handler_stub
-
-                body = _obj(self._body())
-                language = "node" if body.get("language") == "node" else "python"
-                return 200, {"text": handler_stub(language, str(body.get("function") or "on-mail")[:63])}
-            if parts == ["mail-setup"] and method == "POST":
-                # DNS records to receive mail for a domain on this project's SMTP server, and their live state.
-                from ..core import mail_setup
-                from ..core.onprem_control import deployed_host
-                from ..core.onprem_servers import load_servers
-
-                body = _obj(self._body())
-                ip = str(body.get("ip") or "").strip()
-                saved = str(body.get("server") or "")
-                if not ip and saved:
-                    ip = mail_setup.server_ip(str((load_servers(Path(app.root)).get(saved) or {}).get("host") or ""))
-                if not ip:
-                    stage = str(body.get("stage") or (app.raw_config().get("provider") or {}).get("stage") or "dev")
-                    spec = (deployed_host(Path(app.root), stage) or {}).get("spec") or {}
-                    ssh_host = str(((spec.get("deploy") or {}).get("ssh") or {}).get("host") or "")
-                    ip = mail_setup.server_ip(ssh_host)
-                try:
-                    setup = mail_setup.plan(str(body.get("domain") or ""), str(body.get("subdomain") or ""),
-                                            str(body.get("mx") or ""), ip, bool(body.get("subdomains", True)),
-                                            bool(body.get("sends_mail")))
-                except mail_setup.SetupError as exc:
-                    raise StudioError(400, str(exc)) from None
-                if body.get("check"):
-                    port = body.get("port")
-                    return 200, mail_setup.check(setup, port=int(port) if body.get("port_check") and port else None)
-                return 200, setup
-            if parts == ["env-file"]:
-                # The project's on-prem env file (provider.options.env_file): set or remove values, and say which
-                # names are set. Values are never sent back to the browser.
-                from ..core import onprem_services as svc
-
-                raw = app.raw_config()
-                env_path = Path(app.root) / svc.env_file_of(raw)
-                if method == "GET":
-                    from ..runtime.onprem_host import parse_env_text
-
-                    values = parse_env_text(env_path.read_text("utf-8")) if env_path.is_file() else {}
-                    names = [n for n in (_param(params, "names") or "").split(",") if n]
-                    return 200, {"file": svc.env_file_of(raw), "set": {n: bool(values.get(n)) for n in names}}
-                if method == "POST":
-                    body = _obj(self._body())
-                    name = str(body.get("name") or "")
-                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
-                        raise StudioError(400, "name must be an environment variable name")
-                    value = body.get("value")
-                    if value is not None and (not isinstance(value, str) or "\n" in value or len(value) > 4096):
-                        raise StudioError(400, "value must be one line of text (or null to remove it)")
-                    svc.update_env_file(env_path, {name: value})
-                    svc._ensure_ignored(Path(app.root), svc.env_file_of(raw))
-                    return 200, {"file": svc.env_file_of(raw), "name": name, "set": value is not None}
             if parts == ["test-events"]:
                 if method == "GET":
                     return 200, system.test_events(root)

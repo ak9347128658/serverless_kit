@@ -3,7 +3,7 @@ import type {
   DiscoverResult,
   OnPremConsoleInfo,
   OnPremConsoleResult,
-  MailSetup, OnPremDeployed, OnPremServer,
+  OnPremDeployed, OnPremServer,
   OnPremServerTest,
   OnPremTerminal,
   FileContent,
@@ -236,12 +236,6 @@ export const api = {
     request<{ key: string; deleted: number; path: string }>("POST", "/api/resource-clear", { provider, stage, key }),
   resourceUsage: (provider: string, stage: string, key: string) =>
     request<{ key: string; title: string; markdown: string }>("POST", "/api/resource-usage", { provider, stage, key }),
-  mailSetup: (body: Record<string, unknown>) => request<MailSetup>("POST", "/api/mail-setup", body),
-  mailHandlerStub: (language: string, fn: string) => request<{ text: string }>("POST", "/api/mail-handler-stub", { language, function: fn }),
-  resourceMail: <T>(provider: string, stage: string, key: string, op: string, extra: Record<string, unknown> = {}) =>
-    request<T>("POST", "/api/resource-mail", { provider, stage, key, op, ...extra }),
-  envFileStatus: (names: string[]) => request<{ file: string; set: Record<string, boolean> }>("GET", "/api/env-file", undefined, { query: { names: names.join(",") } }),
-  envFileSet: (name: string, value: string | null) => request<{ file: string; set: boolean }>("POST", "/api/env-file", { name, value }),
   resourceData: (provider: string, stage: string, key: string, offset: number, limit: number, prefix?: string) =>
     request<ResourcePage>("POST", "/api/resource-data", { provider, stage, key, offset, limit, prefix }),
   resourceObject: (provider: string, stage: string, key: string, object: string, del = false) =>

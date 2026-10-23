@@ -27,6 +27,7 @@ one. It can also install Python or Docker on an SSH server.
 | MongoDB | database | connection values | 27017 | `mongodump --archive` | Mongo Express (companion) |
 | Memcached | cache | connection values | 11211 | none | |
 | Mailpit (SMTP) | custom | connection values | 1025 (web 8025) | none | Mailbox (8025) |
+| SMTP server (Node.js) | smtp: runs functions with each mail | `smtp` trigger ([guide](../../smtp/README.md)) | 25 | none | DNS guide |
 | Python 3, Docker | runtime on an SSH server | — | — | — | |
 | LocalEmu | queue, storage, secrets | `sqs`, `s3`, Secrets Manager (one port) | 4566 | none | Dashboard (`/_localemu/dashboard`) and pskit's browser |
 | Infisical | secrets (`infisical` driver) | `get_secret()` with a machine identity | 8080 | — | Infisical web UI (own sign-up) |

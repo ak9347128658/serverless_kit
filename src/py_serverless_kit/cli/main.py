@@ -788,7 +788,10 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--user", "login", default=None, help="User to create (default: pskit; Redis / Valkey: default).")
 @click.option("--password", default=None, help="Password to set (default: a generated one). Prefer --password-env.")
 @click.option("--password-env", default=None, help="Read the password from this environment variable.")
-@click.option("-a", "--attach", multiple=True, help="Add a trigger on this function (queue / storage). Repeatable.")
+@click.option("-a", "--attach", multiple=True, help="Add a trigger on this function (queue / storage / smtp). Repeatable.")
+@click.option("--domains", default=None, help="smtp: the domains it receives mail for, comma separated.")
+@click.option("--functions-url", default=None, help="smtp: the pskit host's URL (default: found from the deploy).")
+@click.option("--max-size-mb", type=float, default=None, help="smtp: largest mail accepted (default 25).")
 @click.option("--gui", is_flag=True, help="Also start its web UI (Adminer, Redis Commander, Kafka UI, Mongo Express).")
 @click.option("--gui-login", type=click.Choice(["password", "none"]), default=None,
               help="Web UI sign-in: password (default) or none (keep it on 127.0.0.1, a private network or a tunnel).")
@@ -819,6 +822,9 @@ def resources_onprem_create(  # noqa: PLR0913
     gui_password_env: Optional[str],
     server: Optional[str],
     version: Optional[str],
+    domains: Optional[str],
+    functions_url: Optional[str],
+    max_size_mb: Optional[float],
     save: bool,
     config_path: Optional[str],
     as_json: bool,
@@ -863,6 +869,9 @@ def resources_onprem_create(  # noqa: PLR0913
         "gui_login": gui_login if gui else None,
         "gui_password": gui_password if gui else None,
         "version": version,
+        "domains": domains,
+        "functions_url": functions_url,
+        "max_size_mb": max_size_mb,
     }
     entry = _service_call(svc.create, root, {k: v for k, v in body.items() if v is not None}, raw, echo)
     if as_json:
@@ -875,7 +884,9 @@ def resources_onprem_create(  # noqa: PLR0913
     elif not as_json:
         info("Add this to pskit.yml (or rerun with --save):")
         click.echo(svc.snippet(entry))
-    if entry["resource"]["type"] in ("queue", "storage", "topic"):
+    if entry["resource"]["type"] == "smtp":
+        click.echo(svc.service_usage(root, key, probe=False)["markdown"])
+    elif entry["resource"]["type"] in ("queue", "storage", "topic"):
         info(f"Test it: pskit deploy, then pskit resources send {key}")
     elif entry.get("role") == "secrets":
         store = "" if key == "secrets" else f", store=\"{key}\""

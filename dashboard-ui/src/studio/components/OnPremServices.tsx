@@ -20,6 +20,7 @@ const GROUPS: { title: string; match: (c: OnPremCatalogItem) => boolean }[] = [
   serviceGroup("Redis-compatible (cache, queue, stream)", "Caches and queues"),
   serviceGroup("Object storage", "Object storage"),
   serviceGroup("Databases", "Databases"),
+  serviceGroup("Mail (receive e-mail, run functions)", "Mail"),
   serviceGroup("Secret managers", "Secrets"),
   serviceGroup("AWS emulators", "AWS emulators"),
   serviceGroup("Monitoring & tracing", "Monitoring"),
@@ -37,12 +38,14 @@ const ROLE_LABEL: Record<string, string> = {
   storage: "Bucket",
   custom: "Service",
   secrets: "Secret manager",
+  smtp: "SMTP server (mail trigger)",
 };
 /** The pskit.yml resource type a service role becomes. */
 export const ROLE_RESOURCE_TYPE: Record<string, string> = { stream: "queue", secrets: "custom" };
 const roleType = (role: string) => ROLE_RESOURCE_TYPE[role] || role;
 // Roles a function can be triggered by (others are only bound as connection values).
-const TRIGGER_ROLES = ["queue", "stream", "storage"];
+const TRIGGER_ROLES = ["queue", "stream", "storage", "smtp"];
+const DOMAIN_RE = /^(?!-)[A-Za-z0-9-]{1,63}(\.(?!-)[A-Za-z0-9-]{1,63})+$/;
 
 export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }) {
   const [state, setState] = useState<OnPremServicesState | null>(null);
@@ -161,8 +164,13 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
                 <td className="mono small">{svc.port ? `${svc.address}:${svc.port}` : "—"}</td>
                 <td>
                   <span className="row-gap">
-                    <button type="button" className="btn btn-sm btn-primary" onClick={() => setUsage(svc.key)} title="Connect from any program: code, terminal, security">
-                      How to use
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-primary"
+                      onClick={() => setUsage(svc.key)}
+                      title={svc.service === "smtp" ? "DNS records to add at your domain provider, the port, and the mail fields handlers get" : "Connect from any program: code, terminal, security"}
+                    >
+                      {svc.service === "smtp" ? "DNS guide" : "How to use"}
                     </button>
                     <button type="button" className="btn btn-sm" onClick={() => setDetails(svc.key)}>
                       Details
@@ -220,6 +228,7 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
           onCreated={(svc, attach) => {
             load();
             void addToProject(svc, attach);
+            if (svc.service === "smtp") setUsage(svc.key); // the DNS records to add come next
           }}
         />
       )}
@@ -286,6 +295,9 @@ export function CreateDrawer({
   );
   const [sshPassword, setSshPassword] = useState("");
   const [attach, setAttach] = useState<string[]>([]);
+  const [domains, setDomains] = useState("");
+  const [functionsUrl, setFunctionsUrl] = useState("");
+  const [maxSize, setMaxSize] = useState<number | undefined>(undefined);
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const job = useJob(jobId);
@@ -298,7 +310,19 @@ export function CreateDrawer({
     setImage("");
     setKey(
       uniqueName(
-        c.kind === "runtime" ? c.id : c.roles[0] === "database" ? `${c.id}-db` : c.roles[0] === "storage" ? "files" : c.roles[0] === "secrets" ? "secrets" : c.id === "kafka" ? "events" : "jobs",
+        c.kind === "runtime"
+          ? c.id
+          : c.roles[0] === "database"
+            ? `${c.id}-db`
+            : c.roles[0] === "storage"
+              ? "files"
+              : c.roles[0] === "secrets"
+                ? "secrets"
+                : c.roles[0] === "smtp"
+                  ? "inbound-mail"
+                  : c.id === "kafka"
+                    ? "events"
+                    : "jobs",
         taken,
       ),
     );
@@ -337,9 +361,20 @@ export function CreateDrawer({
           : null;
   const guiPasswordError =
     guiPassword && !/^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$/.test(guiPassword) ? "8-128 characters: letters, digits and !#%*+,.:=?@^_~-" : null;
+  const isSmtp = item?.id === "smtp";
+  const domainList = domains.split(/[\s,]+/).filter(Boolean);
+  const badDomain = domainList.find((d) => !DOMAIN_RE.test(d));
+  const domainsError = !isSmtp
+    ? null
+    : !domainList.length
+      ? "the domain mail is sent to, e.g. inbound.example.com"
+      : badDomain
+        ? `${badDomain} is not a domain name`
+        : null;
+  const functionsUrlError = isSmtp && functionsUrl.trim() && !/^https?:\/\/\S+$/.test(functionsUrl.trim()) ? "http://host:port of the pskit host" : null;
 
   const submit = async () => {
-    if (!item || keyError || sshError || passwordError || loginError || guiPasswordError) return;
+    if (!item || keyError || sshError || passwordError || loginError || guiPasswordError || domainsError || functionsUrlError) return;
     setSubmitError(null);
     const sshTarget: OnPremTarget = { ...ssh, method: "ssh", auth: sshAuth };
     if (sshAuth !== "key") delete sshTarget.identity_file;
@@ -361,6 +396,11 @@ export function CreateDrawer({
       if (guiLogin === "password" && guiPassword) body.gui_password = guiPassword;
     }
     if (TRIGGER_ROLES.includes(role)) body.attach = attach;
+    if (isSmtp) {
+      body.domains = domainList;
+      if (functionsUrl.trim()) body.functions_url = functionsUrl.trim();
+      if (maxSize) body.max_size_mb = maxSize;
+    }
     try {
       setJobId((await api.onpremCreate(body)).job_id);
     } catch (exc) {
@@ -379,7 +419,9 @@ export function CreateDrawer({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={!!keyError || !!sshError || !!passwordError || !!loginError || !!guiPasswordError || running || job.status === "succeeded"}
+            disabled={
+              !!keyError || !!sshError || !!passwordError || !!loginError || !!guiPasswordError || !!domainsError || !!functionsUrlError || running || job.status === "succeeded"
+            }
             onClick={() => void submit()}
           >
             {running ? "Creating…" : job.status === "succeeded" ? "Created" : item.kind === "runtime" ? "Install" : "Create"}
@@ -429,6 +471,16 @@ export function CreateDrawer({
           {item.kind === "service" && (
             <FormRow label="Resource key" required error={keyError} help="How handlers and triggers refer to it: resource(&quot;key&quot;).">
               <TextInput mono value={key} onChange={setKey} invalid={!!keyError} />
+            </FormRow>
+          )}
+          {isSmtp && (
+            <FormRow
+              label="Domains"
+              required
+              error={domainsError}
+              help="Mail to any address at these domains (and their subdomains) runs the functions. Everything else is refused, so it is never an open relay. Already have mailboxes on your root domain (Microsoft 365, Google)? Use a subdomain such as inbound.example.com."
+            >
+              <TextInput mono value={domains} onChange={setDomains} placeholder="inbound.example.com" invalid={!!domainsError} />
             </FormRow>
           )}
           {item.roles.length > 1 && (
@@ -523,12 +575,24 @@ export function CreateDrawer({
           )}
           {item.kind === "service" && (
             <>
-              <FormRow label="Port" help={`Published on the server. Default ${item.port}${item.extra_ports?.length ? ` (also ${item.extra_ports.join(", ")})` : ""}.`}>
+              <FormRow
+                label="Port"
+                help={
+                  isSmtp
+                    ? "Other mail servers always connect to 25: keep 25 unless something else uses it (then forward 25 to this port; the DNS guide shows how)."
+                    : `Published on the server. Default ${item.port}${item.extra_ports?.length ? ` (also ${item.extra_ports.join(", ")})` : ""}.`
+                }
+              >
                 <NumberInput integer min={1} max={65535} value={port} placeholder={String(item.port || "")} onChange={setPort} />
               </FormRow>
               <div className="driver-box card card-pad">
                 <h3>Security</h3>
-                {item.auth === false ? (
+                {isSmtp ? (
+                  <p className="muted small">
+                    Receive only: senders do not log in (that is how mail between servers works) and only mail for the domains above is accepted, so nobody can
+                    send mail through it. Mail goes to the pskit host with its admin token when the host has one.
+                  </p>
+                ) : item.auth === false ? (
                   <p className="muted small">
                     {item.label} runs without authentication in this setup. Keep it on 127.0.0.1 (this machine only) or a private network, and open the
                     port only to the servers that need it.
@@ -613,7 +677,14 @@ export function CreateDrawer({
                 <p className="muted small">{item.companion} has no login of its own: it asks for the service's user and password.</p>
               )}
               {TRIGGER_ROLES.includes(role) && (
-                <FormRow label="Trigger functions" help="Adds a queue / storage event on resource: key to each selected function.">
+                <FormRow
+                  label="Trigger functions"
+                  help={
+                    isSmtp
+                      ? "Each selected function runs for every mail, with from, to, cc, subject, text, html, headers and attachments (an smtp event on this resource)."
+                      : "Adds a queue / storage event on resource: key to each selected function."
+                  }
+                >
                   <div className="check-grid">
                     {functions.map((f) => (
                       <label key={f} className="check">
@@ -633,6 +704,20 @@ export function CreateDrawer({
                 <FormRow label="Docker image">
                   <TextInput mono value={image} onChange={setImage} placeholder={item.image || ""} />
                 </FormRow>
+                {isSmtp && (
+                  <>
+                    <FormRow
+                      label="pskit host URL"
+                      error={functionsUrlError}
+                      help="Where the SMTP server sends each mail. Default: the functions' host on the same server (127.0.0.1), on the deploy server, or host.docker.internal here."
+                    >
+                      <TextInput mono value={functionsUrl} onChange={setFunctionsUrl} placeholder="http://10.0.0.5:8080" invalid={!!functionsUrlError} />
+                    </FormRow>
+                    <FormRow label="Largest mail (MB)" help="Bigger mail is refused. Default 25.">
+                      <NumberInput min={1} max={100} value={maxSize} placeholder="25" onChange={setMaxSize} />
+                    </FormRow>
+                  </>
+                )}
               </details>
             </>
           )}
@@ -652,7 +737,7 @@ function generatePassword(): string {
 }
 
 /** Connect to a service from any program: details, Python / Node.js clients, terminal, security. */
-function ServiceUsageDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: () => void }) {
+export function ServiceUsageDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: () => void }) {
   const [doc, setDoc] = useState<string | null>(null);
   const [reveal, setReveal] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
+from . import onprem_smtp
 from .onprem_apps import DEFAULT_USERS, NO_AUTH_APPS, SELF_LOGIN, apps
 from .onprem_browser import browsers_for
 from .onprem_runtimes import RUNTIME_SPECS, check_version, install_script
@@ -113,6 +114,7 @@ def _svc(
 # and `backup` run inside the container with `sh -c`; backup writes to stdout.
 # A role is the resource type the service is used as; `stream` is a queue on a Redis stream.
 ROLE_TYPE = {"stream": "queue", "secrets": "custom"}
+
 def _redis_start(binary: str, var: str) -> str:
     return (
         f'if [ "${var}_USER" = default ]; then exec {binary}-server --appendonly yes --requirepass "${var}_PASSWORD"; '
@@ -122,7 +124,7 @@ def _redis_start(binary: str, var: str) -> str:
 
 
 # Services that run without authentication in this setup (keep them on 127.0.0.1 or a private network).
-NO_AUTH = ("elasticmq", "kafka", "apache-kafka", "memcached", "mailpit", "localstack", "fake-gcs", *NO_AUTH_APPS)
+NO_AUTH = ("elasticmq", "kafka", "apache-kafka", "memcached", "mailpit", "localstack", "fake-gcs", "smtp", *NO_AUTH_APPS)
 # No pskit login either: the service asks you to create its admin account on the first visit.
 NO_CREDENTIALS = (*NO_AUTH, *SELF_LOGIN)
 DEFAULT_USER = {"redis": "default", "valkey": "default", "keydb": "default", "dragonfly": "default", **DEFAULT_USERS}
@@ -481,6 +483,19 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         ("custom",),
         extra_ports=(8025,),
         notes="An SMTP server that keeps every mail for inspection (web UI on port 8025). For development and tests.",
+    ),
+    # Built by core/onprem_smtp.py (run arguments, resource, guide): Node.js smtp-server + mailparser.
+    "smtp": _svc(
+        "SMTP server (receive mail, Node.js)",
+        "node:22-alpine",
+        25,
+        ("smtp",),
+        data="/data",
+        health=onprem_smtp.HEALTH,
+        notes="Receives mail for your domains and runs the functions attached to it with the mail: from, to, cc, "
+        "subject, text, html, headers and attachments (also in the Amazon SES event shape). Never relays. After "
+        "creating it, How to use lists the DNS records (A, MX) to add at your domain provider.",
+        group="Mail",
     ),
 }
 
@@ -881,8 +896,8 @@ class _Runner:
 
 
 def _mask(arg: str) -> str:
-    # `-e NAME=secret` and URLs with passwords stay out of logs.
-    text = str(arg)
+    # `-e NAME=secret` and URLs with passwords stay out of logs; the SMTP service's script is only named.
+    text = re.sub(r"(PSKIT_SMTP_JS=)[A-Za-z0-9+/=]+", r"\1<onprem_smtp.js in base64>", str(arg))
     if re.match(r"^[A-Z0-9_]*(PASSWORD|PASS|SECRET|TOKEN|KEY)[A-Z0-9_]*=", text):
         return text.split("=", 1)[0] + "=***"
     text = re.sub(r"(://[^:/@\s]*:)[^@\s]+@", r"\1***@", text)
@@ -1048,7 +1063,12 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
             raise ServiceError("gui_password must be 8-128 characters of letters, digits and !#%*+,.:=?@^_~- "
                                "(and only with gui_login: password)")
     project = str((raw or {}).get("service") or "")
+    extra: Dict[str, Any] = {}
+    if service == "smtp":
+        extra["smtp"] = onprem_smtp.check(body, raw, root, target)
+        extra["token"] = onprem_smtp.admin_token(raw, root, env_file_of(raw))
     return {
+        **extra,
         "user": user or DEFAULT_USER.get(service, "pskit"),
         "password": password,
         "project": project,
@@ -1283,6 +1303,10 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
         res["connection"] = {"host": addr, "port": port}
     elif service == "mailpit":
         res["connection"] = {"smtp_host": addr, "smtp_port": port, "web_url": f"http://{addr}:{host_port(req, 8025)}"}
+    elif service == "smtp":
+        res = onprem_smtp.resource(req)
+        notes.append("add the DNS records in How to use (A and MX) so mail for "
+                     f"{', '.join(req['smtp']['domains'])} reaches this server")
     connect = (SERVICES.get(service) or {}).get("connect") or {}
     if connect:
         values = {**_values(req, password), "prefix": prefix, "address": addr, "port": str(port),
@@ -1366,6 +1390,8 @@ def _values(req: Dict[str, Any], password: str = "") -> Dict[str, str]:
 
 def run_args(req: Dict[str, Any], password: str) -> List[str]:
     """``docker run`` arguments for a service request (password included)."""
+    if req["service"] == "smtp":
+        return onprem_smtp.run_args(req, str(req.get("token") or ""))
     spec = SERVICES[req["service"]]
     values = _values(req, password)
     argv = ["run", "-d", "--name", req["container"], "--restart", "unless-stopped"]
@@ -1463,6 +1489,9 @@ def create(
     if req["volume"]:
         sh(docker_argv(target, ["volume", "create", req["volume"]]), show=False)
     sh(docker_argv(target, run_args(req, password)))
+    if req["service"] == "smtp":
+        emit("installing smtp-server and mailparser in the container (once, about a minute)...")
+        wait_seconds = max(wait_seconds, 300)
     _wait_ready(req, spec, target, sh, wait_seconds, emit)
     init = spec["init"].get(req["role"], "") if isinstance(spec["init"], dict) else spec["init"]
     if init:
@@ -1502,6 +1531,8 @@ def create(
     }
     if spec.get("sidecars"):
         entry["sidecars"] = [f"{req['container']}-{side['name']}" for side in spec["sidecars"]]
+    if req.get("smtp"):
+        entry["smtp"] = req["smtp"]
     state = load_state(root)
     state["services"][req["key"]] = entry
     save_state(root, state)
@@ -1805,7 +1836,7 @@ def remove(
 
 
 def _event_kind(resource_type: str) -> Optional[str]:
-    return resource_type if resource_type in ("queue", "storage", "topic") else None
+    return resource_type if resource_type in ("queue", "storage", "topic", "smtp") else None
 
 
 def apply_to_raw(raw: Dict[str, Any], entry: Dict[str, Any], attach: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -1908,6 +1939,8 @@ def service_usage(root: Path, key: str, *, reveal: bool = False, probe: bool = T
         text = (f"# {entry['service']} on {describe_target(entry['target'])}\n\nInstalled by pskit. Check it with:\n\n"
                 f"```bash\nssh {entry['target'].get('user')}@{entry['target'].get('host')} '{check}'\n```\n")
         return {"key": key, "markdown": text}
+    if entry["service"] == "smtp":
+        return {"key": key, "markdown": onprem_smtp.usage_markdown(entry)}
     spec = SERVICES[entry["service"]]
     res = entry.get("resource") or {}
     shown = public_entry(entry, reveal)

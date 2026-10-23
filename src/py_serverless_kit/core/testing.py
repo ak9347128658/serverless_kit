@@ -45,8 +45,8 @@ PAYLOAD_HELP: Dict[str, str] = {
     "topic": '{"message": ..., "attributes": {...}}: the published message.',
     "invoke": "event.data the function receives.",
     "smtp": '{"from", "to": [...], "cc", "subject", "text", "html", "attachments": [{"filename", "content_type", '
-            '"content" or "content_base64"}]}: the mail. The handler gets it parsed (event.data: from, recipient with '
-            'subdomain and domain, text, html, attachments base64).',
+            '"content" or "content_base64"}]}: the mail. The handler gets what the SMTP service sends (event.data: '
+            'from, to, cc, subject, text, html, headers, attachments in base64, and the Amazon SES Records).',
 }
 _SDK = {
     "aws": "boto3 (pip install 'py-serverless-kit[aws]')",
@@ -106,18 +106,10 @@ def _sample(trigger: Dict[str, Any]) -> Any:
 
 
 def _smtp_test_address(project: Any, ev: Any) -> str:
-    """An address the trigger accepts: from its recipient patterns, else its subdomain and the server's domain."""
-    import re
-
-    for pattern in ev.recipients:
-        local, _, host = pattern.partition("@")
-        if "*" not in host and "?" not in host:
-            return f"{re.sub(r'[*?]', 'test', local) or 'test'}@{host}"
+    """An address at the SMTP server's first domain."""
     res = project.config.resources.get(ev.resource)
-    domains = (res.options.get("domains") if res is not None else None) or ["example.com"]
-    domain = str(domains[0] if isinstance(domains, list) else domains)
-    sub = next((s for s in ev.subdomains if s and not any(c in s for c in "*?[")), "")
-    return f"test@{sub + '.' if sub else ''}{domain}"
+    domain = (res.conn("domains") if res is not None else "").split(",")[0].strip() or "example.com"
+    return f"support@{domain}"
 
 
 def _record_function(record: Optional[Dict[str, Any]], name: str) -> Dict[str, Any]:
@@ -571,8 +563,11 @@ def _send_onprem(record: Dict[str, Any], root: Path, name: str, trig: Dict[str, 
         body = payload if isinstance(payload, dict) and "message" in payload else {"message": payload}
         return {"result": control.request("POST", f"/__pskit/topics/{target}", body)}
     if kind == "smtp":
-        # Stored and delivered by the host like a mail its SMTP server received (works when port 25 is closed).
-        return {"result": control.request("POST", f"/__pskit/mail/{quote(target, safe='')}", payload or {}, timeout=900)}
+        # Delivered by the host like a mail the SMTP service received (works when port 25 is closed).
+        from .onprem_smtp import test_event
+
+        mail = test_event(payload or SAMPLES["smtp"], target)
+        return {"result": control.request("POST", f"/__pskit/smtp/{quote(target, safe='')}", mail, timeout=900)}
     if kind == "storage":
         key = str((payload or {}).get("key") or "test/hello.txt")
         method = "DELETE" if (payload or {}).get("action") == "deleted" else "PUT"
@@ -854,51 +849,6 @@ def host_call(
         raise TriggerError(f"{exc.args[0] if exc.args else exc} (redeploy if you just added it)") from None
     except (ValueError, OSError, PermissionError) as exc:
         raise TriggerError(str(exc)) from None
-
-
-def mail_action(project: Any, record: Optional[Dict[str, Any]], key: str, op: str,
-                extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """The mailbox of an ``smtp`` resource on the deployed host: ``list``, ``get``, ``attachment``, ``raw``,
-    ``redeliver``, ``delete``, ``purge`` or ``send`` (a test mail, delivered like one from SMTP)."""
-    import base64
-
-    from .onprem_control import HostUnavailable, control_for
-
-    extra = dict(extra or {})
-    res = project.config.resources.get(key)
-    if res is None or res.type != "smtp":
-        raise TriggerError(f"{key!r} is not an smtp resource")
-    control = control_for(record or {}, project.root) if record else None
-    if control is None:
-        raise TriggerError("the on-prem host is not deployed yet: run `pskit deploy`")
-    base = f"/__pskit/mail/{quote(res.native_name(key), safe='')}"
-    ident = quote(str(extra.get("id") or ""), safe="")
-    try:
-        if op == "list":
-            query = {"offset": int(extra.get("offset") or 0), "limit": int(extra.get("limit") or 50),
-                     "status": str(extra.get("status") or "")}
-            return dict(control.request("GET", base, query=query))
-        if op == "get":
-            return dict(control.request("GET", f"{base}/{ident}"))
-        if op in ("attachment", "raw"):
-            path = f"{base}/{ident}/attachments/{int(extra.get('index') or 0)}" if op == "attachment" else f"{base}/{ident}/raw"
-            status, headers, data = control.fetch("GET", path)
-            if status != 200:
-                raise TriggerError(f"HTTP {status}: {data[:200].decode('utf-8', 'replace')}")
-            lowered = {k.lower(): v for k, v in headers.items()}
-            return {"content_type": lowered.get("content-type") or "application/octet-stream",
-                    "content": base64.b64encode(data).decode("ascii")}
-        if op == "redeliver":
-            return dict(control.request("POST", f"{base}/{ident}/redeliver", {}, timeout=900))
-        if op == "delete":
-            return dict(control.request("DELETE", f"{base}/{ident}"))
-        if op == "purge":
-            return dict(control.request("DELETE", base))
-        if op == "send":
-            return dict(control.request("POST", base, extra.get("payload") or SAMPLES["smtp"], timeout=900))
-    except (KeyError, ValueError, PermissionError, HostUnavailable) as exc:
-        raise TriggerError(str(exc.args[0] if isinstance(exc, KeyError) and exc.args else exc)) from None
-    raise TriggerError(f"unknown mail action {op!r}")
 
 
 def browse_resource(

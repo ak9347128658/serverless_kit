@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-23
+
+### Changed
+- **E-mail triggers are now one on-prem service.** *Resources → **+ SMTP server*** (or *On-prem services → Mail*)
+  starts a Node.js SMTP server (nodemailer's `smtp-server` + `mailparser`, `node:22-alpine`) on any server for the
+  domains you list, and ticks the functions to run. Each mail is posted to the host (`POST /__pskit/smtp/<key>`),
+  which runs every function with `- smtp: {resource: <key>}`. When one fails, or none is attached, the sender gets
+  `451` and retries. Mail for other domains is refused (never a relay). On an SSH server it uses the host network, so
+  a host bound to 127.0.0.1 works.
+- `event.data` of an `smtp` event: `from`, `from_name`, `to`, `cc`, `bcc`, `reply_to`, `subject`, `date`, `text`,
+  `html`, `headers`, `attachments` (base64 `content`), `envelope`, plus the Amazon SES receipt event (`Records[0].ses`)
+  and the raw message (`content`, base64), so code written for SES reads it unchanged.
+- **DNS guide** on the SMTP service (also *How to use* and `pskit resources onprem create --service smtp`): the A and
+  MX records with your values, provider notes (Cloudflare grey cloud, keep the root domain's MX), port 25 and tests.
+- `pskit resources onprem create`: `--domains`, `--functions-url`, `--max-size-mb`.
+
+### Removed
+- The host's built-in SMTP server and everything around it: `type: smtp` resource options (`domains`, `port`, `auth`,
+  `users`, TLS, allow-lists, `verify_senders`, `block_spoofed`), the `recipients` / `subdomains` trigger filters,
+  SPF / DKIM / DMARC checks, the Mailbox and `/__pskit/mail`, the *Mail domain* setup wizard (`/api/mail-setup`,
+  `/api/mail-handler-stub`, `/api/resource-mail`, `/api/env-file`). Recreate an SMTP server as the on-prem service.
+
 ## [1.6.0] - 2026-10-23
 
 ### Added
