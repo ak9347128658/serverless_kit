@@ -25,10 +25,10 @@ PROVIDERS = (
     "cloudflare",
     "onprem",
 )
-EVENT_TYPES = ("http", "schedule", "queue", "storage", "topic")
-RESOURCE_TYPES = ("storage", "queue", "topic", "database", "cache", "custom")
+EVENT_TYPES = ("http", "schedule", "queue", "storage", "topic", "smtp")
+RESOURCE_TYPES = ("storage", "queue", "topic", "database", "cache", "custom", "smtp")
 # Resource types an event of the same name can consume.
-EVENT_RESOURCE_TYPES = ("queue", "storage", "topic")
+EVENT_RESOURCE_TYPES = ("queue", "storage", "topic", "smtp")
 _CONN_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
 _RESERVED_CONN_KEYS = ("type", "name", "external")
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY")
@@ -168,20 +168,44 @@ class TopicEvent(_Model):
         return self
 
 
-EventConfig = Union[HttpEvent, ScheduleEvent, QueueEvent, StorageEvent, TopicEvent]
+class SmtpEvent(_Model):
+    """Mail received by an ``smtp`` resource (the on-prem host's SMTP server).
+
+    ``recipients`` (globs such as ``*@support.example.com`` or ``orders-*@example.com``) and ``subdomains``
+    (``support``, ``eu.*``; ``""`` is the domain itself) narrow which mail this function gets; both default to all.
+    """
+
+    resource: str = Field("", description="key of a `resources:` entry of type smtp")
+    name: str = ""
+    recipients: List[str] = Field(default_factory=list)
+    subdomains: List[str] = Field(default_factory=list)
+    existing: bool = False
+
+    @model_validator(mode="after")
+    def _source(self) -> SmtpEvent:
+        if not self.resource:
+            raise ValueError("smtp event needs `resource` (an smtp resource: the server that receives the mail)")
+        for pattern in self.recipients:
+            if "@" not in pattern or any(c.isspace() for c in pattern):
+                raise ValueError(f"smtp recipients are address patterns such as *@example.com, got {pattern!r}")
+        return self
+
+
+EventConfig = Union[HttpEvent, ScheduleEvent, QueueEvent, StorageEvent, TopicEvent, SmtpEvent]
 _EVENT_MODELS: Dict[str, Type[BaseModel]] = {
     "http": HttpEvent,
     "schedule": ScheduleEvent,
     "queue": QueueEvent,
     "storage": StorageEvent,
     "topic": TopicEvent,
+    "smtp": SmtpEvent,
 }
 
 
 class EventSpec(_Model):
     """One trigger. Written in YAML as a single-key mapping, e.g. ``- http: {path: /x}``."""
 
-    type: Literal["http", "schedule", "queue", "storage", "topic"]
+    type: Literal["http", "schedule", "queue", "storage", "topic", "smtp"]
     config: Any
 
     @model_validator(mode="before")
@@ -207,6 +231,8 @@ class EventSpec(_Model):
             body = {"name": body}
         if kind == "storage" and isinstance(body, str):
             body = {"bucket": body}
+        if kind == "smtp" and isinstance(body, str):  # shorthand: `- smtp: inbound-mail` (the resource key)
+            body = {"resource": body}
         return {"type": kind, "config": _EVENT_MODELS[kind].model_validate(body or {})}
 
 
@@ -487,7 +513,7 @@ class ResourceConfig(_Model):
     creates or destroys it and only hands its connection details to handlers.
     """
 
-    type: Literal["storage", "queue", "topic", "database", "cache", "custom"]
+    type: Literal["storage", "queue", "topic", "database", "cache", "custom", "smtp"]
     external: bool = False
     name: Optional[str] = Field(None, description="native name; defaults to the resource key")
     connection: Dict[str, Any] = Field(default_factory=dict, description="values exposed to handlers")
@@ -668,6 +694,9 @@ class ServiceConfig(_Model):
                     raise ValueError(
                         f"function {fn_name!r} has a {ev.type} event on resource {key!r}, which is a {res.type}"
                     )
+                if ev.type == "smtp":  # the server is the resource; nothing is "existing" about it
+                    ev.config.name = res.native_name(key)
+                    continue
                 attr = "bucket" if ev.type == "storage" else "name"
                 native = res.native_name(key)
                 current = getattr(ev.config, attr)

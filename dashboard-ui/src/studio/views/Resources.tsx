@@ -6,6 +6,7 @@ import { CloudResources } from "../components/CloudResources";
 import { Markdown } from "../components/Markdown";
 import { CreateDrawer, OnPremServices } from "../components/OnPremServices";
 import { ResourceData } from "../components/ResourceData";
+import { Mailbox, SmtpServerOptions } from "../components/SmtpPanels";
 import { ResourceGuides, type GuideRef } from "../components/ResourceGuides";
 import { ResourceTester } from "../components/ResourceTester";
 import { useConfirm, useToast } from "../components/Feedback";
@@ -22,7 +23,7 @@ interface Row {
   res: JsonObject;
 }
 
-const MANAGEABLE = ["storage", "queue", "topic"];
+const MANAGEABLE = ["storage", "queue", "topic", "smtp"];
 const CLOUD_ORDER = ["aws", "azure", "gcp", "alibaba", "tencent", "huawei", "oracle", "ibm", "digitalocean", "cloudflare", "self-hosted", "any"];
 const CLOUD_LABEL: Record<string, string> = {
   aws: "AWS",
@@ -50,6 +51,7 @@ export function ResourcesView({ rest }: { rest: string[] }) {
   const [guide, setGuide] = useState<GuideRef | null>(null);
   const [usage, setUsage] = useState<string | null>(null);
   const [browse, setBrowse] = useState<string | null>(null);
+  const [mailbox, setMailbox] = useState<string | null>(null);
   const { providerName } = useStudio();
   const onpremTarget = (state.target?.provider || providerName) === "onprem";
   // One-click on-prem services: create one straight into the list, or add one that is not in pskit.yml yet.
@@ -191,6 +193,11 @@ export function ResourcesView({ rest }: { rest: string[] }) {
           <button type="button" className="btn btn-sm btn-primary" onClick={() => setUsage(r.name)} title="Libraries, pskit.yml, Python / Node.js code and tests">
             How to use
           </button>
+          {onpremTarget && str(r.res.type) === "smtp" && (
+            <button type="button" className="btn btn-sm" onClick={() => setMailbox(r.name)} title="Mail received: sender, recipients, subdomain, files, functions run">
+              Mailbox
+            </button>
+          )}
           {onpremTarget && ["queue", "storage", "topic"].includes(str(r.res.type)) && (
             <button type="button" className="btn btn-sm" onClick={() => setBrowse(r.name)} title="See the messages / objects it holds">
               Data
@@ -279,6 +286,14 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       )}
       <ResourceGuides open={!!guide} start={guide || undefined} onClose={() => setGuide(null)} />
       {browse && <ResourceData resourceKey={browse} onClose={() => setBrowse(null)} />}
+      {mailbox && (
+        <Mailbox
+          provider={state.target?.provider || providerName}
+          stage={state.target?.stage || "dev"}
+          resourceKey={mailbox}
+          onClose={() => setMailbox(null)}
+        />
+      )}
       {usage && <UsageDrawer resourceKey={usage} onClose={() => setUsage(null)} onTest={() => { setUsage(null); test(usage); }} />}
     </div>
   );
@@ -447,6 +462,9 @@ function ResourceDrawer({
           </div>
         </FormRow>
 
+        {type === "smtp" && (
+          <SmtpServerOptions resourceKey={name} value={onpremOptions} onChange={setOnpremOptions} />
+        )}
         {driverList.length > 0 && (
           <div className="driver-box card card-pad">
             <div className="row-between">

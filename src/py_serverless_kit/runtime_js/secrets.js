@@ -6,8 +6,9 @@
  *   const password = await getSecret("db-password");
  *
  * The store comes from PSKIT_<STORE>_DRIVER / _URL / _TOKEN / _MOUNT / _REGION / _ACCESS_KEY / _SECRET_KEY
- * (default store "secrets"): vault (HashiCorp Vault / OpenBao KV v2), aws (Secrets Manager or LocalStack) or env
- * (PSKIT_SECRET_<NAME>, then <NAME>). No dependencies.
+ * (default store "secrets"): vault (HashiCorp Vault / OpenBao KV v2), aws (Secrets Manager or LocalStack), infisical
+ * (_URL, _CLIENT_ID / _CLIENT_SECRET or _TOKEN, _PROJECT_ID, _ENVIRONMENT, _PATH) or env (PSKIT_SECRET_<NAME>, then
+ * <NAME>). No dependencies.
  */
 
 const TTL_MS = 60000;
@@ -124,14 +125,57 @@ async function envRead(_cfg, name) {
   throw new SecretNotFound(`secret ${name} not found: set PSKIT_SECRET_${varName(name)} (or ${varName(name)}), or configure a store (PSKIT_SECRETS_URL / _TOKEN)`);
 }
 
-const READ = { vault: vaultRead, aws: awsRead, env: envRead };
-const WRITE = { vault: vaultWrite, aws: awsWrite };
+const tokens = new Map();
+
+async function infisicalToken(cfg) {
+  if (cfg.token) return cfg.token;
+  if (!cfg.client_id || !cfg.client_secret) {
+    throw new SecretError(`infisical: set PSKIT_${varName(cfg.store)}_CLIENT_ID and _CLIENT_SECRET (a machine identity with Universal Auth) or _TOKEN`);
+  }
+  const url = String(cfg.url || "").replace(/\/+$/, "");
+  const hit = tokens.get(url + cfg.client_id);
+  if (hit && hit.until > Date.now()) return hit.token;
+  const r = await http("POST", `${url}/api/v1/auth/universal-auth/login`, { "Content-Type": "application/json" },
+    JSON.stringify({ clientId: cfg.client_id, clientSecret: cfg.client_secret }));
+  if (r.status !== 200) throw new SecretError(`infisical: login failed (${r.status}): ${r.text.slice(0, 200)}`);
+  const data = JSON.parse(r.text);
+  tokens.set(url + cfg.client_id, { token: data.accessToken, until: Date.now() + (Math.max(60, data.expiresIn || 600) - 30) * 1000 });
+  return data.accessToken;
+}
+
+function infisicalScope(cfg) {
+  if (!cfg.project_id) throw new SecretError(`infisical: set PSKIT_${varName(cfg.store)}_PROJECT_ID (Project settings -> Project ID)`);
+  return { workspaceId: cfg.project_id, environment: cfg.environment || "dev", secretPath: cfg.path || "/" };
+}
+
+async function infisicalRead(cfg, name) {
+  const url = String(cfg.url || "").replace(/\/+$/, "");
+  const query = new URLSearchParams(infisicalScope(cfg)).toString();
+  const r = await http("GET", `${url}/api/v3/secrets/raw/${encodeURIComponent(name)}?${query}`, { Authorization: `Bearer ${await infisicalToken(cfg)}` });
+  if (r.status === 404) throw new SecretNotFound(`secret ${name} not found in ${cfg.store} (infisical)`);
+  if (r.status !== 200) throw new SecretError(`infisical: reading ${name} failed (${r.status}): ${r.text.slice(0, 200)}`);
+  return fields(String((JSON.parse(r.text).secret || {}).secretValue || ""));
+}
+
+async function infisicalWrite(cfg, name, values) {
+  const url = String(cfg.url || "").replace(/\/+$/, "");
+  const keys = Object.keys(values);
+  const text = keys.length === 1 && keys[0] === "value" ? values.value : JSON.stringify(values, keys.sort());
+  const body = JSON.stringify({ ...infisicalScope(cfg), secretValue: text, type: "shared" });
+  const headers = { Authorization: `Bearer ${await infisicalToken(cfg)}`, "Content-Type": "application/json" };
+  let r = await http("PATCH", `${url}/api/v3/secrets/raw/${encodeURIComponent(name)}`, headers, body);
+  if (r.status === 400 || r.status === 404) r = await http("POST", `${url}/api/v3/secrets/raw/${encodeURIComponent(name)}`, headers, body);
+  if (r.status !== 200) throw new SecretError(`infisical: writing ${name} failed (${r.status}): ${r.text.slice(0, 200)}`);
+}
+
+const READ = { vault: vaultRead, aws: awsRead, env: envRead, infisical: infisicalRead };
+const WRITE = { vault: vaultWrite, aws: awsWrite, infisical: infisicalWrite };
 
 /** Every field of a secret ({value} for a plain one). Cached for 60 s. */
 async function getSecrets(name, opts = {}) {
   const cfg = config(opts.store);
   const reader = READ[cfg.driver];
-  if (!reader) throw new SecretError(`unknown secrets driver ${cfg.driver} (vault, aws or env)`);
+  if (!reader) throw new SecretError(`unknown secrets driver ${cfg.driver} (vault, aws, infisical or env)`);
   const key = `${cfg.store}\u0000${name}`;
   const hit = cache.get(key);
   if (hit && !opts.refresh && Date.now() - hit.at < TTL_MS) return Object.assign({}, hit.values);

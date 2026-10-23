@@ -276,6 +276,18 @@ def build_event(kind: str, data: Any = None, **http: Any) -> Event:
             for i, item in enumerate(items)
         ]
         return Event(type=kind, records=records, source="local")
+    if kind == EventType.SMTP:
+        # A test mail ({"from", "to", "subject", "text", "attachments": [...]}) becomes the parsed mail the host
+        # gives handlers; an already parsed mail (with "envelope") is passed as it is.
+        from ..runtime import mail as mailparse
+
+        if isinstance(data, dict) and "envelope" not in data:
+            rcpts = mailparse.envelope_recipients(data)
+            parsed = mailparse.parse_message(mailparse.build_message(data),
+                                             {"mail_from": data.get("from") or "sender@example.org", "rcpt_to": rcpts},
+                                             data.get("domains") or [], ident="local", resource="local")
+            data = {**parsed, "matched": parsed["recipients"], "recipient": parsed["recipients"][0]}
+        return Event(type=kind, data=data, source="local")
     if kind not in EventType.ALL:
         raise ValueError(f"unknown event type {kind!r}; one of {', '.join(EventType.ALL)}")
     return Event(type=kind, data=data)

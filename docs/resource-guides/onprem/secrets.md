@@ -58,6 +58,37 @@ unseal key, kept in the data volume so every restart unseals by itself. That is 
 and backups then hold the key, so protect them like the secrets. For a hardened cluster (several unseal keys, auto-unseal
 with a KMS, policies per app), run OpenBao or Vault yourself and point pskit at it (below).
 
+## Infisical (secrets manager with a web UI)
+
+`pskit resources onprem create vault --service infisical --save` (or *Secret managers → Infisical* in the studio)
+starts Infisical with its own PostgreSQL and Redis. Then:
+
+1. Open the web UI (`http://<server>:8080`) and create the admin account.
+2. Create a project, then a **machine identity** with **Universal Auth**, and give it access to the project.
+3. Fill these values in the env file (`.env.onprem`) and deploy:
+
+```bash
+PSKIT_VAULT_DRIVER=infisical            # written by pskit
+PSKIT_VAULT_URL=http://10.0.0.5:8080    # written by pskit
+PSKIT_VAULT_CLIENT_ID=...               # the machine identity
+PSKIT_VAULT_CLIENT_SECRET=...
+PSKIT_VAULT_PROJECT_ID=...              # Project settings -> Project ID
+PSKIT_VAULT_ENVIRONMENT=dev             # dev / staging / prod (the environment slug)
+# PSKIT_VAULT_PATH=/                    # folder, default /
+# PSKIT_VAULT_TOKEN=...                 # instead of client id / secret: a service or access token
+```
+
+`get_secret("DB_PASSWORD", store="vault")` / `getSecret("DB_PASSWORD", { store: "vault" })` reads the secret's
+value. A JSON object value becomes fields (`get_secret("db", "password", store="vault")`). `put_secret` creates or
+updates one. The same driver works with Infisical Cloud: set `_URL` to `https://app.infisical.com`.
+
+## Browse secrets in the studio
+
+OpenBao's release images have no web UI ("OpenBao UI is not available in this binary"). Use **Browse secrets** on the
+service's row (*Resources → On-prem services*). It shows folders and secrets (values hidden until *Show values*), and
+lets you copy values, see versions, and add, edit (a new version) or delete secrets. LocalStack and LocalEmu get the
+same browser for Secrets Manager.
+
 ## Add and read secrets
 
 | Where | How |

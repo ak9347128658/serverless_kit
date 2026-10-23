@@ -31,9 +31,9 @@ export interface Driver {
   notes?: string;
 }
 
-export type Capability = "http" | "schedule" | "queue" | "storage" | "topic" | "workflow_native";
-export type EventType = "http" | "schedule" | "queue" | "storage" | "topic";
-export const EVENT_TYPES: EventType[] = ["http", "schedule", "queue", "storage", "topic"];
+export type Capability = "http" | "schedule" | "queue" | "storage" | "topic" | "smtp" | "workflow_native";
+export type EventType = "http" | "schedule" | "queue" | "storage" | "topic" | "smtp";
+export const EVENT_TYPES: EventType[] = ["http", "schedule", "queue", "storage", "topic", "smtp"];
 
 export interface ProviderMeta {
   name: string;
@@ -238,7 +238,7 @@ export interface CloudResourceRow {
 
 export interface TestTrigger {
   index: number;
-  type: "http" | "schedule" | "queue" | "storage" | "topic" | "invoke";
+  type: "http" | "schedule" | "queue" | "storage" | "topic" | "smtp" | "invoke";
   summary: string;
   method?: string;
   path?: string;
@@ -320,6 +320,8 @@ export interface OnPremCatalogItem {
   notes: string;
   group?: string;
   versions?: string[];
+  /** pskit's own UIs for the service: s3, gcs, vault, aws-secrets. */
+  browsers?: string[];
 }
 
 export interface OnPremConsoleInfo {

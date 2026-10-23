@@ -69,6 +69,40 @@ def _nodejs(version: str) -> str:
     )
 
 
+_PY_DISTRO = (
+    _pkg("python3 python3-venv python3-pip", "python3 python3-pip", "python3 py3-pip")
+    + "if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then pm_install; fi\n"
+    + "python3 --version\n"
+)
+_PY_DIR = "/opt/pskit-python"
+
+
+def _python(version: str) -> str:
+    """``system``: the distribution's python3 (with venv and pip). ``3.X``: a standalone CPython 3.X from
+    python-build-standalone (through uv) in /opt/pskit-python, linked as /usr/local/bin/python3.X, on any distro.
+    The on-prem host picks python3.X first when the project's runtime is python3.X."""
+    if version in ("", "system"):
+        return _PY_DISTRO
+    exe = f"python{version}"
+    return (
+        _need_curl()
+        + f"if command -v {exe} >/dev/null 2>&1 && {exe} -m venv --help >/dev/null 2>&1; then\n"
+        + f"  echo 'pskit: {exe} is already installed'\n"
+        + "else\n"
+        + "  if ! command -v uv >/dev/null 2>&1; then\n"
+        + "    curl -LsSf https://astral.sh/uv/install.sh -o /tmp/pskit-uv.sh\n"
+        + "    as_root env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh /tmp/pskit-uv.sh && rm -f /tmp/pskit-uv.sh\n"
+        + "  fi\n"
+        + f"  as_root env UV_PYTHON_INSTALL_DIR={_PY_DIR} \"$(command -v uv || echo /usr/local/bin/uv)\" python install {version}\n"
+        + f"  py=$(ls -d {_PY_DIR}/cpython-{version}.*/bin/{exe} 2>/dev/null | sort -V | tail -1)\n"
+        + f'  [ -n "$py" ] || {{ echo "pskit: uv did not install Python {version}" >&2; exit 1; }}\n'
+        + f'  as_root ln -sf "$py" /usr/local/bin/{exe}\n'
+        + "  command -v python3 >/dev/null 2>&1 || as_root ln -sf \"$py\" /usr/local/bin/python3\n"
+        + "fi\n"
+        + f"{exe} --version && {exe} -m pip --version\n"
+    )
+
+
 def _go(version: str) -> str:
     return (
         _need_curl()
@@ -102,12 +136,23 @@ def _java(version: str) -> str:
 
 
 RUNTIME_SPECS: Dict[str, Dict[str, Any]] = {
+    "python": {
+        "label": "Python 3",
+        "group": "Languages and Docker",
+        "notes": "system: the distribution's python3 with venv and pip. 3.X: that exact CPython (standalone build "
+        "through uv, any distro) as /usr/local/bin/python3.X, so the host runs with python: system and runtime "
+        "python3.X.",
+        "versions": ["system", "3.13", "3.12", "3.11", "3.10", "3.9", "3.14"],
+        "check": "for p in python3.14 python3.13 python3.12 python3.11 python3.10 python3.9; do "
+        "command -v $p >/dev/null 2>&1 && $p --version; done; python3 --version",
+        "script": _python,
+    },
     "nodejs": {
         "label": "Node.js",
         "group": "Languages",
         "notes": "Node.js and npm from NodeSource (apt / dnf; Alpine: its own version). Needed by Node.js functions "
         "with node: system, PM2 and npm-based tools.",
-        "versions": ["22", "20", "18"],
+        "versions": ["22", "24", "20", "18"],
         "check": "node -v",
         "script": _nodejs,
     },
@@ -199,6 +244,8 @@ def check_version(name: str, version: Any) -> str:
         return ""
     if not text:
         return str(versions[0])
+    if text in versions:
+        return text
     if not _VERSION.match(text):
         raise ValueError("version must look like 22 or 1.23.4")
     return text

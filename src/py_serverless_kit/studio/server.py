@@ -11,6 +11,7 @@ the project.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +28,8 @@ from .vscode import VSCode
 
 PAGE = Path(__file__).with_name("studio.html")
 MAX_BODY = 2 * 1024 * 1024
+# Uploads through a service browser carry the file as base64 in JSON (64 MB file -> ~86 MB body).
+MAX_UPLOAD_BODY = 90 * 1024 * 1024
 _CSP = (
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
     "img-src 'self' data:; font-src 'self' data:; frame-src http://127.0.0.1:* http://localhost:*; "
@@ -130,8 +133,9 @@ def make_handler(app: Studio) -> type:
                 length = int(self.headers.get("content-length") or "0")
             except ValueError:
                 raise StudioError(400, "invalid content-length") from None
-            if length < 0 or length > MAX_BODY:
-                raise StudioError(413, f"request body must be at most {MAX_BODY} bytes")
+            limit = MAX_UPLOAD_BODY if "/browse/" in self.path else MAX_BODY
+            if length < 0 or length > limit:
+                raise StudioError(413, f"request body must be at most {limit} bytes")
             return length
 
         def _body(self) -> Any:
@@ -316,13 +320,38 @@ def make_handler(app: Studio) -> type:
                 stage = _param(params, "stage") or str((app.raw_config().get("provider") or {}).get("stage") or "dev")
                 return 200, system.resource_test_guide(root, provider, stage)
             if parts and parts[0] in ("resource-check", "resource-clear", "resource-usage", "resource-data",
-                                      "resource-object", "resource-message-delete") and len(parts) == 1 and method == "POST":
+                                      "resource-object", "resource-message-delete", "resource-mail") \
+                    and len(parts) == 1 and method == "POST":
                 body = _obj(self._body())
                 raw_provider = (app.raw_config().get("provider") or {})
                 provider = str(body.get("provider") or raw_provider.get("name") or "")
                 stage = str(body.get("stage") or raw_provider.get("stage") or "dev")
                 action = parts[0].split("-", 1)[1]
                 return 200, system.resource_action(root, provider, stage, str(body.get("key") or ""), action, body)
+            if parts == ["env-file"]:
+                # The project's on-prem env file (provider.options.env_file): set or remove values, and say which
+                # names are set. Values are never sent back to the browser.
+                from ..core import onprem_services as svc
+
+                raw = app.raw_config()
+                env_path = Path(app.root) / svc.env_file_of(raw)
+                if method == "GET":
+                    from ..runtime.onprem_host import parse_env_text
+
+                    values = parse_env_text(env_path.read_text("utf-8")) if env_path.is_file() else {}
+                    names = [n for n in (_param(params, "names") or "").split(",") if n]
+                    return 200, {"file": svc.env_file_of(raw), "set": {n: bool(values.get(n)) for n in names}}
+                if method == "POST":
+                    body = _obj(self._body())
+                    name = str(body.get("name") or "")
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
+                        raise StudioError(400, "name must be an environment variable name")
+                    value = body.get("value")
+                    if value is not None and (not isinstance(value, str) or "\n" in value or len(value) > 4096):
+                        raise StudioError(400, "value must be one line of text (or null to remove it)")
+                    svc.update_env_file(env_path, {name: value})
+                    svc._ensure_ignored(Path(app.root), svc.env_file_of(raw))
+                    return 200, {"file": svc.env_file_of(raw), "name": name, "set": value is not None}
             if parts == ["test-events"]:
                 if method == "GET":
                     return 200, system.test_events(root)
@@ -494,6 +523,13 @@ def make_handler(app: Studio) -> type:
 
                     label = {"gui": "Start", "gui-remove": "Remove", "gui-check": "Check"}[action] + f" web UI of {key}"
                     return 202, {"job_id": app.jobs.run_callable("onprem-service", run_gui, label=label).id}
+                if len(rest) == 4 and rest[1] == "browse" and method == "POST":
+                    from ..core import onprem_browser as brw
+
+                    try:
+                        return 200, brw.browse(svc._entry(root, rest[0]), rest[2], rest[3], _obj(self._body()))
+                    except brw.BrowseError as exc:
+                        raise StudioError(400, str(exc)) from None
                 if len(rest) == 2 and rest[1] == "console":
                     from ..core import onprem_console as con
 

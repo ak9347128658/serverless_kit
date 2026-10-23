@@ -155,7 +155,7 @@ export function normalizeEvent(raw: Json): NormalEvent | null {
   if (keys.length !== 1) return null;
   const type = keys[0] as EventType;
   const body = raw[type];
-  if (!["http", "schedule", "queue", "storage", "topic"].includes(type)) return null;
+  if (!["http", "schedule", "queue", "storage", "topic", "smtp"].includes(type)) return null;
   if (isObject(body)) return { type, config: { ...body } };
   if (typeof body === "string") {
     if (type === "http") {
@@ -164,6 +164,7 @@ export function normalizeEvent(raw: Json): NormalEvent | null {
     }
     if (type === "schedule") return { type, config: RATE_RE.test(body) ? { rate: body } : { cron: body } };
     if (type === "storage") return { type, config: { bucket: body } };
+    if (type === "smtp") return { type, config: { resource: body } };
     return { type, config: { name: body } };
   }
   return { type, config: {} };
@@ -188,6 +189,11 @@ export function eventSummary(raw: Json): string {
       return `bucket ${String(c.resource ? `@${c.resource}` : c.bucket || "?")}`;
     case "topic":
       return `topic ${String(c.resource ? `@${c.resource}` : c.name || "?")}`;
+    case "smtp": {
+      const to = asArray(c.recipients).map((x) => String(x));
+      const subs = asArray(c.subdomains).map((x) => String(x));
+      return `mail @${String(c.resource || "?")}${to.length ? ` to ${to.join(", ")}` : ""}${subs.length ? ` (subdomains ${subs.join(", ")})` : ""}`;
+    }
     default:
       return ev.type;
   }

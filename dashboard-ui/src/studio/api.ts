@@ -214,6 +214,8 @@ export const api = {
   onpremConsoleInfo: (key: string) => request<OnPremConsoleInfo>("GET", `/api/onprem-services/${encodeURIComponent(key)}/console`),
   onpremConsole: (key: string, line: string, shell = false) =>
     request<OnPremConsoleResult>("POST", `/api/onprem-services/${encodeURIComponent(key)}/console`, { line, shell }),
+  onpremBrowse: <T>(key: string, kind: string, action: string, body: Record<string, unknown> = {}) =>
+    request<T>("POST", `/api/onprem-services/${encodeURIComponent(key)}/browse/${encodeURIComponent(kind)}/${encodeURIComponent(action)}`, body),
   onpremServers: (stage?: string) =>
     request<{ servers: OnPremServer[]; deployed?: OnPremDeployed | null }>("GET", "/api/onprem-servers", undefined, { query: { stage } }),
   onpremServerSave: (name: string, target: JsonObject, description?: string) =>
@@ -234,6 +236,10 @@ export const api = {
     request<{ key: string; deleted: number; path: string }>("POST", "/api/resource-clear", { provider, stage, key }),
   resourceUsage: (provider: string, stage: string, key: string) =>
     request<{ key: string; title: string; markdown: string }>("POST", "/api/resource-usage", { provider, stage, key }),
+  resourceMail: <T>(provider: string, stage: string, key: string, op: string, extra: Record<string, unknown> = {}) =>
+    request<T>("POST", "/api/resource-mail", { provider, stage, key, op, ...extra }),
+  envFileStatus: (names: string[]) => request<{ file: string; set: Record<string, boolean> }>("GET", "/api/env-file", undefined, { query: { names: names.join(",") } }),
+  envFileSet: (name: string, value: string | null) => request<{ file: string; set: boolean }>("POST", "/api/env-file", { name, value }),
   resourceData: (provider: string, stage: string, key: string, offset: number, limit: number, prefix?: string) =>
     request<ResourcePage>("POST", "/api/resource-data", { provider, stage, key, offset, limit, prefix }),
   resourceObject: (provider: string, stage: string, key: string, object: string, del = false) =>

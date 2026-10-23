@@ -564,6 +564,7 @@ def build_meta() -> Dict[str, Any]:
         "queue": model_fields(schema.QueueEvent, "queue"),
         "storage": model_fields(schema.StorageEvent, "storage"),
         "topic": model_fields(schema.TopicEvent, "topic"),
+        "smtp": model_fields(schema.SmtpEvent, "smtp"),
     }
     state_types = list(typing.get_args(schema.StateType))
     return {

@@ -25,10 +25,16 @@ Support at a glance (the full detail is below and in [providers.md](providers.md
 | `queue` | ✓ SQS | ✓ Pub/Sub | ✓ Storage Queue | – | – | – | – | – | – | – | ✓ files |
 | `storage` | ✓ S3 | ✓ GCS | ✓ Blob (created only) | ✓ OSS | ✓ Object Storage | – | – | ✓ COS | ✓ OBS | – | ✓ directory |
 | `topic` | ✓ SNS | ✓ Pub/Sub | ✓ Service Bus | ✓ MNS | – | – | – | – | ✓ SMN | – | ✓ files |
+| `smtp` | – | – | – | – | – | – | – | – | – | – | ✓ host SMTP server |
 
 ¹ Huawei HTTP needs `provider.options.apig_instance_id`.
 
 `pskit validate` reports an error for any trigger or option the selected provider can't honour.
+
+`smtp` (on premises) runs a function when mail arrives for your domain: `- smtp: {resource: inbound-mail,
+subdomains: [support]}` on an `smtp` resource. The handler gets the sender, recipients split into local part,
+subdomain and domain, the body and the attachments. Setup, DNS records, port 25 and password options:
+[smtp/README.md](smtp/README.md).
 
 ---
 

@@ -25,8 +25,9 @@ class EventType:
     TOPIC = "topic"
     INVOKE = "invoke"
     WORKFLOW = "workflow"
+    SMTP = "smtp"  # a received e-mail (on-prem SMTP server); ``data`` is the parsed mail (runtime/mail.py)
 
-    ALL = (HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC, INVOKE, WORKFLOW)
+    ALL = (HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC, INVOKE, WORKFLOW, SMTP)
 
 
 class Headers(Mapping[str, str]):

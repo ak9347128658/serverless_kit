@@ -228,6 +228,10 @@ def resource_action(
             return dict(host_call(project, record, "GET", f"/__pskit/resources/{key}/object", {"key": obj}))
         if action == "message-delete":
             return dict(host_call(project, record, "DELETE", f"/__pskit/resources/{key}/message", {"id": str(extra.get("id") or "")}))
+        if action == "mail":
+            from ..core.testing import mail_action
+
+            return mail_action(project, record, key, str(extra.get("op") or "list"), extra)
         if action == "usage":
             from ..core.resource_usage import usage
 

@@ -23,6 +23,9 @@ path you already have instead.
   ``DELETE /__pskit/logs[?function=]`` clears them. ``GET /__pskit/stats``
   returns per-function invocation counters.
 
+* ``/__pskit/mail[/<server>[/<id>]]`` lists, injects, reads, redelivers and deletes mail received by the
+  host's SMTP servers (``smtp`` resources; see ``runtime/mail_delivery.py`` and ``runtime/smtp_server.py``).
+
 * ``POST /__pskit/queues/<name>/lease`` (``{"batch", "visibility"}``), ``.../ack`` and
   ``.../nack`` (``{"receipts": [...]}``) let a host elsewhere consume a built-in queue
   with at-least-once leases (the ``pskit_host`` driver).
@@ -70,6 +73,7 @@ from .cron import CronError, next_cron, rate_seconds, resolve_zone
 from .dispatch import execute
 from .event import Event, EventType, Headers, HttpRequest, Record
 from .executions import Executor, FileExecutionStore, valid_id
+from .mail_delivery import MailDelivery
 from .manifest import load_manifest, set_manifest
 from .response import Response, dumps
 from .routing import match_path, method_matches
@@ -766,6 +770,8 @@ class Host:
         self.language = str(self.spec.get("language") or "python")
         self._workers: Dict[str, Any] = {}
         self._workers_lock = threading.Lock()
+        # SMTP servers of `smtp` resources: mail for your domains becomes `smtp` events.
+        self.mail = MailDelivery(self.spec, self.broker.data_dir, self.invoke, self.logs.append)
 
     # ---------------------------------------------------------------- lifecycle
     def open(self) -> None:
@@ -1354,6 +1360,8 @@ class Host:
         self.capture_output()
         poller = threading.Thread(target=self._poll_loop, name="pskit-onprem", daemon=True)
         poller.start()
+        for note in self.mail.start():
+            self._note(note)
         server = self.make_server()
         bound = server.server_address
         self.logs.append("INFO", "host", f"listening on {bound[0]!s}:{bound[1]}")
@@ -1361,6 +1369,7 @@ class Host:
             server.serve_forever()
         finally:
             self._stop.set()
+            self.mail.stop()
             if self.executor is not None:
                 self.executor.shutdown()
             self.close_workers()
@@ -1469,6 +1478,10 @@ class Host:
                     return self._json(200, {"items": host.logs.functions()})
                 if parts == ["stats"]:
                     return self._json(200, host.stats())
+                if parts and parts[0] == "mail":
+                    status, headers, body = host.mail.admin(self.command, parts[1:], query, raw,
+                                                            str(self.headers.get("content-type") or ""))
+                    return self._send(status, headers, body)
                 if parts and parts[0] == "executions":
                     return self._executions(parts[1:], query)
                 if parts == ["resources"]:

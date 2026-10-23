@@ -1702,7 +1702,7 @@ def dev(project, host: str, port: int, env_file: str) -> None:  # noqa: ANN001
     "--type",
     "kind",
     default=None,
-    type=click.Choice(["http", "schedule", "queue", "storage", "topic", "invoke", "workflow"]),
+    type=click.Choice(["http", "schedule", "queue", "storage", "topic", "invoke", "workflow", "smtp"]),
     help="Event type (default: the function's first event, or invoke).",
 )
 @click.option("-d", "--data", default=None, help="JSON payload or @file.json.")

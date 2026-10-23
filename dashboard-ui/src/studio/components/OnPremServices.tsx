@@ -10,14 +10,21 @@ import { Markdown } from "./Markdown";
 import { useConfirm, useToast } from "./Feedback";
 import { EnumSelect, FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
 import { ServersPanel, ServiceConsole, TerminalDrawer } from "./OnPremMachines";
+import { ServiceBrowser } from "./ServiceBrowser";
 import type { GuideRef } from "./ResourceGuides";
 
+// Services by their catalog group (one group each), then software to install on a server.
+const serviceGroup = (title: string, ...groups: string[]) => ({ title, match: (c: OnPremCatalogItem) => c.kind === "service" && groups.includes(c.group || "") });
 const GROUPS: { title: string; match: (c: OnPremCatalogItem) => boolean }[] = [
-  { title: "Queues & streams", match: (c) => c.roles.includes("queue") || c.roles.includes("stream") },
-  { title: "Storage", match: (c) => c.roles.includes("storage") },
-  { title: "Databases", match: (c) => c.roles.includes("database") },
-  { title: "Secret managers", match: (c) => c.roles.includes("secrets") },
-  { title: "Caches & other", match: (c) => c.kind === "service" && (c.roles.includes("cache") || c.roles.includes("custom")) },
+  serviceGroup("Queues & streams", "Queues and streams"),
+  serviceGroup("Redis-compatible (cache, queue, stream)", "Caches and queues"),
+  serviceGroup("Object storage", "Object storage"),
+  serviceGroup("Databases", "Databases"),
+  serviceGroup("Secret managers", "Secrets"),
+  serviceGroup("AWS emulators", "AWS emulators"),
+  serviceGroup("Monitoring & tracing", "Monitoring"),
+  serviceGroup("Identity & search", "Identity", "Search"),
+  serviceGroup("Automation, web & tools", "Automation", "Web", "Tools"),
   { title: "Install on a server: languages & Docker", match: (c) => c.kind === "runtime" && (c.group || "").startsWith("Languages") },
   { title: "Install on a server: web servers", match: (c) => c.kind === "runtime" && c.group === "Web servers" },
   { title: "Install on a server: process managers & tools", match: (c) => c.kind === "runtime" && ["Process managers", "Tools"].includes(c.group || "") },
@@ -45,6 +52,8 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
   const [usage, setUsage] = useState<string | null>(null);
   const [consoleKey, setConsoleKey] = useState<string | null>(null);
   const [terminalKey, setTerminalKey] = useState<string | null>(null);
+  const [browse, setBrowse] = useState<{ key: string; kinds: string[] } | null>(null);
+  const browsersOf = (service: string) => state?.catalog.find((c) => c.id === service)?.browsers || [];
   const [createServer, setCreateServer] = useState<string | undefined>(undefined);
   const [jobId, setJobId] = useState<string | null>(null);
   const job = useJob(jobId);
@@ -158,6 +167,16 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
                     <button type="button" className="btn btn-sm" onClick={() => setDetails(svc.key)}>
                       Details
                     </button>
+                    {svc.kind === "service" && browsersOf(svc.service).length > 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-primary"
+                        onClick={() => setBrowse({ key: svc.key, kinds: browsersOf(svc.service) })}
+                        title="pskit's own UI: buckets and objects, or secrets"
+                      >
+                        {browsersOf(svc.service).some((b) => b === "s3" || b === "gcs") ? "Browse" : "Browse secrets"}
+                      </button>
+                    )}
                     {svc.kind === "service" && (
                       <button type="button" className="btn btn-sm" onClick={() => setConsoleKey(svc.key)} title="Run commands: redis-cli, psql, mongosh, rpk, bao, ... or sh in the container">
                         Console
@@ -206,6 +225,7 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
       )}
       {details && <DetailsDrawer serviceKey={details} onClose={() => setDetails(null)} />}
       {usage && <ServiceUsageDrawer serviceKey={usage} onClose={() => setUsage(null)} />}
+      {browse && <ServiceBrowser serviceKey={browse.key} kinds={browse.kinds} onClose={() => setBrowse(null)} />}
       {consoleKey && <ServiceConsole serviceKey={consoleKey} onClose={() => setConsoleKey(null)} />}
       {terminalKey && <TerminalDrawer request={{ key: terminalKey }} onClose={() => setTerminalKey(null)} />}
       <ServersPanel

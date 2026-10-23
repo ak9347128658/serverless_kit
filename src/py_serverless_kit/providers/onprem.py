@@ -46,7 +46,7 @@ from ..config.schema import ResourceConfig, ServiceConfig
 from ..runtime.cron import CronError, next_cron, resolve_zone
 from ..runtime.drivers import S3_PRESETS
 from ..runtime.onprem_host import ENV_FILE
-from .base import HTTP, QUEUE, SCHEDULE, STORAGE, TOPIC, Issue, Provider, RenderContext
+from .base import HTTP, QUEUE, SCHEDULE, SMTP, STORAGE, TOPIC, Issue, Provider, RenderContext
 from .onprem_remote import _extended_path, _rmtree, dockerfile_text, launcher_text, node_bin_rel, systemd_unit_text
 from .onprem_spec import (
     advertise_host,
@@ -204,7 +204,7 @@ class OnPremProvider(Provider):
     tier = "experimental"
     terraform_source = "terraform.io/builtin/terraform"
     default_region = "local"
-    capabilities = frozenset({HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC})
+    capabilities = frozenset({HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC, SMTP})
     max_name_length = 63
     runtimes = {f"python3.{minor}": f"python3.{minor}" for minor in (9, 10, 11, 12, 13, 14)}
     # Node.js functions run in a `node` worker process driven by the (Python) host.
@@ -274,6 +274,7 @@ class OnPremProvider(Provider):
     def extra_validation(self, config: ServiceConfig) -> List[Issue]:
         issues: List[Issue] = []
         options = config.provider.options
+        issues.extend(self._smtp_validation(config))
         known = {
             "host",
             "port",
@@ -671,6 +672,38 @@ class OnPremProvider(Provider):
             out[key] = item
         return out
 
+    # ------------------------------------------------------------------ smtp resources
+    def _smtp_validation(self, config: ServiceConfig) -> List[Issue]:
+        issues: List[Issue] = []
+        ports: Dict[int, str] = {}
+        host_port = int(config.provider.options.get("port") or 8080)
+        for key, res in sorted(config.resources.items()):
+            if res.type != "smtp":
+                continue
+            where = f"resources.{key}.options"
+            try:
+                cfg = smtp_config(res.options)
+            except ValueError as exc:
+                issues.append(Issue("error", str(exc), where))
+                continue
+            if cfg["port"] in ports or cfg["port"] == host_port:
+                other = ports.get(cfg["port"]) or "the host's HTTP port"
+                issues.append(Issue("error", f"port {cfg['port']} is already used by {other}", where + ".port"))
+            ports[cfg["port"]] = f"resources.{key}"
+            if cfg["port"] < 1024:
+                issues.append(Issue("warning", f"port {cfg['port']} needs root on the server (install: systemd with "
+                                               "sudo); or listen on 2525 and redirect 25 to it (see the SMTP guide)",
+                                    where + ".port"))
+            if cfg["auth"] and not cfg["users"]:
+                issues.append(Issue("error", "auth: true needs at least one entry in users", where + ".users"))
+            if cfg["auth"] and not cfg["tls_cert"]:
+                issues.append(Issue("warning", "SMTP AUTH without tls_cert sends passwords in clear text: keep the "
+                                               "port on a private network or add a certificate", where + ".auth"))
+            if key not in config.event_resources():
+                issues.append(Issue("warning", "no function has an smtp event on this server: mail is stored "
+                                               "but nothing runs", f"resources.{key}"))
+        return issues
+
     def _spec(self, ctx: RenderContext) -> Dict[str, Any]:
         cfg = ctx.config
         options = cfg.provider.options
@@ -721,6 +754,10 @@ class OnPremProvider(Provider):
             extra.update(
                 {"language": "node", "node_bin": node_bin_rel(spec.target_os) if spec.node == "bundle" else "node"}
             )
+        smtp = {res.native_name(key): smtp_config(res.options) for key, res in sorted(cfg.resources.items())
+                if res.type == "smtp"}
+        if smtp:
+            extra["smtp"] = smtp
         return {
             **extra,
             "service": cfg.service,
@@ -1047,3 +1084,60 @@ def _without_foreign(extra: Any) -> Tuple[Dict[str, Any], List[str]]:
         if not outputs:
             cleaned.pop("output", None)
     return cleaned, dropped
+
+
+_SMTP_KEYS = ("domains", "subdomains", "port", "bind", "hostname", "auth", "users", "max_size_mb", "tls_cert", "tls_key",
+              "require_tls", "allowed_senders", "allowed_ips")
+
+
+def smtp_config(options: Dict[str, Any]) -> Dict[str, Any]:
+    """``resources.<key>.options`` of an ``smtp`` resource -> the host's server config (``pskit_host.json`` smtp)."""
+    unknown = sorted(set(options) - set(_SMTP_KEYS))
+    if unknown:
+        raise ValueError(f"unknown smtp options {unknown}; expected {', '.join(_SMTP_KEYS)}")
+    domains = options.get("domains") or []
+    if isinstance(domains, str):
+        domains = [domains]
+    if not isinstance(domains, list) or not domains:
+        raise ValueError("smtp options.domains: list the domains this server receives mail for, e.g. [example.com]")
+    for domain in domains:
+        if not re.match(r"^(?!-)[A-Za-z0-9-]{1,63}(\.(?!-)[A-Za-z0-9-]{1,63})+$", str(domain)):
+            raise ValueError(f"smtp options.domains: {domain!r} is not a domain name")
+    try:
+        port = int(options.get("port") or 2525)
+        max_size = int(float(options.get("max_size_mb") or 25) * 1024 * 1024)
+    except (TypeError, ValueError):
+        raise ValueError("smtp options.port and max_size_mb must be numbers") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("smtp options.port must be between 1 and 65535")
+    users_raw = options.get("users") or {}
+    if not isinstance(users_raw, dict):
+        raise ValueError("smtp options.users: a mapping of user name -> {password_env: VARIABLE}")
+    users: Dict[str, Dict[str, str]] = {}
+    for name, body in users_raw.items():
+        var = body.get("password_env") if isinstance(body, dict) else None
+        if not re.match(r"^[A-Za-z0-9._@+-]{1,64}$", str(name)) or not var or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$",
+                                                                                          str(var)):
+            raise ValueError(f"smtp options.users.{name}: write {{password_env: VARIABLE}} (the password stays in the "
+                             "env file, never in pskit.yml)")
+        users[str(name)] = {"password_env": str(var)}
+    for field in ("allowed_senders", "allowed_ips"):
+        if not isinstance(options.get(field) or [], list):
+            raise ValueError(f"smtp options.{field} must be a list")
+    if bool(options.get("tls_cert")) != bool(options.get("tls_key")):
+        raise ValueError("smtp options: set both tls_cert and tls_key (PEM files on the server) or neither")
+    return {
+        "domains": [str(d).lower() for d in domains],
+        "subdomains": bool(options.get("subdomains", True)),
+        "port": port,
+        "bind": str(options.get("bind") or "0.0.0.0"),  # noqa: S104 - a mail server listens on the network
+        "hostname": str(options.get("hostname") or ""),
+        "auth": bool(options.get("auth", False)),
+        "users": users,
+        "max_size": max_size,
+        "tls_cert": str(options.get("tls_cert") or ""),
+        "tls_key": str(options.get("tls_key") or ""),
+        "require_tls": bool(options.get("require_tls", False)),
+        "allowed_senders": [str(x) for x in options.get("allowed_senders") or []],
+        "allowed_ips": [str(x) for x in options.get("allowed_ips") or []],
+    }

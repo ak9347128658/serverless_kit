@@ -119,7 +119,7 @@ def test_meta_catalog(studio):
     assert "queue" in aws["capabilities"] and aws["default_region"] == "us-east-1" and aws["runtimes"]
     gcp = next(p for p in meta["providers"] if p["name"] == "gcp")
     assert any(f["key"] == "project" and f["required"] for f in gcp["options"])
-    assert set(meta["events"]) == {"http", "schedule", "queue", "storage", "topic"}
+    assert set(meta["events"]) == {"http", "schedule", "queue", "storage", "topic", "smtp"}
     method = next(f for f in meta["events"]["http"] if f["key"] == "method")
     assert method["type"] == "enum" and "POST" in method["options"]
     batch = next(f for f in meta["events"]["queue"] if f["key"] == "batch_size")

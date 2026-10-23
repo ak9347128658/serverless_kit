@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-23
+
+### Added
+- **E-mail (SMTP) triggers on premises.** A resource of `type: smtp` makes the host run an SMTP server for your domains (`options.domains`, subdomains on by default, port 2525, `max_size_mb`). Functions get `- smtp: {resource: inbound-mail, subdomains: [support], recipients: ["*@support.example.com"]}`. The handler receives `event.data` with `from`, `recipient` / `recipients` split into local part, **subdomain** and domain, `to` / `cc`, subject, text, html, headers and attachments (base64). Mail is stored before `250` is answered and delivered after a restart. Every message is logged with its sender, recipients, subdomain, subject, files and a body preview, plus structured fields. The server is never an open relay. Options: SMTP **AUTH on / off** with users whose passwords live in the env file (`password_env`), STARTTLS (`tls_cert` / `tls_key`, `require_tls`), `allowed_senders` and `allowed_ips`. Mail admin API `/__pskit/mail`; `pskit trigger` and `pskit invoke -t smtp` send test mail. Studio: an *E-mail (SMTP)* trigger form, an SMTP server form (domains, password on/off, users, generate and save passwords, TLS, allow-lists) and a **Mailbox** (paged list with subdomain and domain, details, attachments, `.eml`, run functions again, delete, send a test mail). Other providers reject `smtp` triggers when you validate. Guide with DNS (MX, A, wildcard MX for subdomains), port 25, cloud firewalls, TLS, testing and the architecture: `docs/smtp/README.md`.
+- **pskit's own service browsers** where the native UI is missing or limited (*Browse* on a service row). **S3** (MinIO, RustFS, LocalStack, LocalEmu): buckets, folders, paginated listings, filter, multi-file upload, download, info and metadata, old versions, rename / copy, presigned share links, versioning and bucket policies (private / public read / JSON). **Cloud Storage** (fake-gcs-server). **Secrets** for OpenBao (folders, versions, add / edit / delete); its release images have no web UI, which the *"OpenBao UI is not available in this binary"* page meant. Also **Secrets Manager** for LocalStack and LocalEmu. A closed service port is reached over the server's SSH login.
+- **More one-click services**: LocalEmu (AWS emulator), Infisical (secrets manager with its own PostgreSQL and Redis as sidecars; generated `ENCRYPTION_KEY` / `AUTH_SECRET` kept in the env file and reused when it is created again), Grafana, Prometheus, Uptime Kuma, Jaeger, Keycloak, Meilisearch, Typesense, Qdrant, ClickHouse, Neo4j, Eclipse Mosquitto, n8n, Portainer, Gitea and Nginx Proxy Manager. The catalog is grouped (queues, Redis-compatible, object storage, databases, secrets, AWS emulators, monitoring, identity and search, automation and tools). Services are described by data (`sidecars`, `generate`, `connect` templates) in the new `core/onprem_apps.py`.
+- **`infisical` secrets driver** for `get_secret()` / `put_secret()` in Python and `getSecret()` / `putSecret()` in Node.js (machine identity with Universal Auth, or a token; project, environment, path).
+- **Pick the Python version** when installing Python on a server: `system` (the distribution's) or 3.9 to 3.14 as a standalone CPython (through uv, any distribution) linked as `python3.X`. Node.js adds 24.
+
+### Fixed
+- Command logs mask every `*KEY*` value (`ENCRYPTION_KEY`, API keys), not only passwords, secrets and tokens.
+
 ## [1.4.0] - 2026-10-23
 
 ### Fixed

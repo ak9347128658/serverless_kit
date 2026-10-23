@@ -113,6 +113,13 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   Azure NSG / AWS security group / GCP firewall, ufw) and prints the fix. *SSH server* targets log in with a key
   file, the SSH agent / default key, or a password (sshpass; on Windows install a key once with
   `pskit resources onprem ssh-key user@host`).
+- **On-prem services → Browse / Browse secrets**: pskit's own UI where a service has none (or a limited one):
+  buckets and objects for MinIO, RustFS, LocalStack, LocalEmu and fake-gcs-server (upload, download, folders,
+  paging, versions, share links, policies); secrets for OpenBao and the AWS emulators (folders, versions,
+  add / edit / delete). See [one-click services](resource-guides/onprem/services.md#pskits-own-browsers-when-the-native-ui-is-missing).
+- **E-mail (SMTP)**: an *E-mail (SMTP)* trigger, an *smtp* resource with domains, password on / off (users and
+  passwords saved to the env file), TLS and allow-lists, and **Resources → Mailbox** for received mail with its
+  subdomain, files and function results. See [E-mail triggers](smtp/README.md).
 - **Resources → + On-prem service** creates a one-click service and adds it straight to the resource list (with
   triggers); **Add resource** has *Create a <type> on premises*. Services not yet in `pskit.yml` appear above the list
   with an **Add** button, and rows backed by one are marked `on-prem <service> · <server>`.

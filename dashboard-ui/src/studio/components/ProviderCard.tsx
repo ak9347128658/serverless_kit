@@ -44,7 +44,7 @@ export function ProviderCards({
             {p.tier !== "stable" && <span className={`badge badge-${p.tier === "beta" ? "info" : "warn"}`}>{p.tier}</span>}
           </span>
           <span className="chips">
-            {["http", "schedule", "queue", "storage", "topic", "workflow_native"].map((cap) => (
+            {["http", "schedule", "queue", "storage", "topic", "smtp", "workflow_native"].map((cap) => (
               <span key={cap} className={p.capabilities.includes(cap) ? "chip chip-accent" : "chip chip-off"} title={p.capabilities.includes(cap) ? "supported" : "not supported"}>
                 {capabilityLabel(cap)}
               </span>

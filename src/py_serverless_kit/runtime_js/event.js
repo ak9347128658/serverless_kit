@@ -17,7 +17,8 @@ const EventType = Object.freeze({
   TOPIC: "topic",
   INVOKE: "invoke",
   WORKFLOW: "workflow",
-  ALL: Object.freeze(["http", "schedule", "queue", "storage", "topic", "invoke", "workflow"]),
+  SMTP: "smtp",
+  ALL: Object.freeze(["http", "schedule", "queue", "storage", "topic", "invoke", "workflow", "smtp"]),
 });
 
 const MISSING = Symbol("missing");

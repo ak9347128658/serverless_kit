@@ -115,6 +115,12 @@ def test_runtime_catalog_and_versions(tmp_path):
     assert {"python", "docker", "nodejs", "nginx", "java", "go", "pm2", "caddy", "certbot", "git", "tools"} <= set(ids)
     assert ids["nodejs"]["versions"][0] == "22"
     assert rts.check_version("nodejs", None) == "22" and rts.check_version("go", "1.22.1") == "1.22.1"
+    assert rts.check_version("python", None) == "system" and rts.check_version("python", "3.12") == "3.12"
+    assert "python3-venv" in rts.install_script("python", "system")
+    script = rts.install_script("python", "3.11")
+    assert "UV_PYTHON_INSTALL_DIR" in script and "python install 3.11" in script and "/usr/local/bin/python3.11" in script
+    with pytest.raises(ValueError):
+        rts.check_version("python", "3.12; reboot")
     with pytest.raises(ValueError):
         rts.check_version("nginx", "1.2")
     with pytest.raises(ValueError):

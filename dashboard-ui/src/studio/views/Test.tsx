@@ -12,7 +12,7 @@ import { useStudio } from "../store";
 import type { Json, SavedTestEvent, TestGuide, TestTrigger } from "../types";
 import { DeployedLogs } from "./Logs";
 
-const ICON: Record<string, string> = { http: "⇄", schedule: "⏱", queue: "☰", storage: "▣", topic: "✺", invoke: "λ" };
+const ICON: Record<string, string> = { http: "⇄", schedule: "⏱", queue: "☰", storage: "▣", topic: "✺", smtp: "✉", invoke: "λ" };
 
 function copy(text: string, toast: ReturnType<typeof useToast>) {
   navigator.clipboard.writeText(text).then(
@@ -106,6 +106,7 @@ export function TestView({ rest }: { rest: string[] }) {
           This sends a <b>real</b> {trigger.type === "invoke" ? "invocation" : `${trigger.type} event`} ({trigger.summary}) to the deployed
           function, with this machine's credentials.
           {trigger.type === "storage" ? " The object is uploaded to the bucket." : ""}
+          {trigger.type === "smtp" ? " The mail is stored in the server's mailbox and delivered to every matching function." : ""}
           {trigger.type === "queue" || trigger.type === "topic" ? " The message is delivered to every subscriber." : ""}
         </p>
       ),

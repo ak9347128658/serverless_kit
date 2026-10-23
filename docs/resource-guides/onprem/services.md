@@ -28,6 +28,43 @@ one. It can also install Python or Docker on an SSH server.
 | Memcached | cache | connection values | 11211 | none | |
 | Mailpit (SMTP) | custom | connection values | 1025 (web 8025) | none | Mailbox (8025) |
 | Python 3, Docker | runtime on an SSH server | — | — | — | |
+| LocalEmu | queue, storage, secrets | `sqs`, `s3`, Secrets Manager (one port) | 4566 | none | Dashboard (`/_localemu/dashboard`) and pskit's browser |
+| Infisical | secrets (`infisical` driver) | `get_secret()` with a machine identity | 8080 | — | Infisical web UI (own sign-up) |
+| Grafana | dashboards | URL, admin user and password | 3000 | data directory | Grafana |
+| Prometheus | metrics | URL | 9090 | — | Prometheus UI |
+| Uptime Kuma | uptime monitoring | URL | 3001 | data directory | own sign-up |
+| Jaeger | tracing (OTLP 4317 / 4318) | URL, OTLP endpoints | 16686 | — | Jaeger UI |
+| Keycloak | identity, SSO, OIDC | URL, issuer, admin login | 8080 | — | Admin console (`/admin/`) |
+| Meilisearch, Typesense | search | URL, API key (the password) | 7700, 8108 | — | Meilisearch search preview |
+| Qdrant | vector database | URL, API key | 6333 (gRPC 6334) | — | Dashboard (`/dashboard`) |
+| ClickHouse | analytics database | URL, user, password | 8123 (native 9000) | — | SQL playground (`/play`) |
+| Neo4j | graph database | `bolt://` URL, user `neo4j` | 7687 (browser 7474) | — | Neo4j Browser |
+| Eclipse Mosquitto | MQTT broker | `mqtt://` URL | 1883 | — | |
+| n8n | workflow automation | URL | 5678 | data directory | own sign-up |
+| Portainer | Docker UI for the server | URL | 9000 (9443) | — | own sign-up |
+| Gitea | Git hosting | URL | 3000 | data directory | install page |
+| Nginx Proxy Manager | reverse proxy, Let's Encrypt | URL | 81 (80, 443) | — | Admin UI |
+
+Infisical starts with its own PostgreSQL and Redis (*sidecar* containers on a private Docker network, removed with it).
+Its `ENCRYPTION_KEY` and `AUTH_SECRET` are generated once and kept in the env file, so creating it again reuses them.
+Services marked *own sign-up* ask you to create their admin account on the first visit, so pskit sets no password.
+
+## pskit's own browsers (when the native UI is missing)
+
+Some services ship without a usable web UI. OpenBao's release images say *"OpenBao UI is not available in this
+binary"*, and MinIO's community console no longer has the admin pages. For these, **Browse** on the service's row
+opens pskit's UI in the studio:
+
+| Service | Browser | What you can do |
+|---|---|---|
+| MinIO, RustFS, LocalStack, LocalEmu | **Buckets (S3)** | Create and delete buckets (with every object and old version); folders and breadcrumbs; filter by name; 25 to 1000 objects per page with next / previous; upload several files (up to 64 MB each); download; info (size, type, ETag, metadata); old versions (list, download); rename / move and copy; share links valid 1 hour, 1 day or 7 days (S3 presigned URLs); bucket versioning on / off; bucket policy (private, public read, or your JSON) |
+| fake-gcs-server | **Buckets (Cloud Storage)** | The same, without versioning, policies and signed links |
+| OpenBao | **Secrets** | Folders, open a secret (values hidden until *Show values*), copy a value, versions (pick an old one), add / edit (each save is a new version), delete |
+| LocalStack, LocalEmu | **Secrets (Secrets Manager)** | List with paging, open, add / edit, delete |
+
+The studio talks to the service from your machine. When its port is closed by a firewall, it goes over the server's
+SSH login instead (`127.0.0.1:<port>` on the server). Credentials stay in `.pskit/onprem-services.json` and never
+reach the browser page.
 
 Every service and role above was created with Docker and driven through its pskit driver (publish, receive, settle;
 put, list, get) during development. Queues and buckets on Azurite, LocalStack, fake-gcs-server and RustFS are created
@@ -258,8 +295,9 @@ The catalog's *Install on a server* groups install with the server's package man
 
 | Software | Versions | Notes |
 |---|---|---|
-| Python 3, Docker | distribution | Python with venv and pip; Docker installed and started |
-| **Node.js** | 22 (default), 20, 18 | NodeSource packages with npm (Alpine: its own version) |
+| **Python 3** | `system` (default), 3.13, 3.12, 3.11, 3.10, 3.9, 3.14 | `system`: the distribution's python3 with venv and pip. A version: that exact CPython (standalone build through uv, any distribution) in `/opt/pskit-python`, linked as `/usr/local/bin/python3.X`; the host then runs with `python: system` and `runtime: python3.X` |
+| Docker | distribution | installed and started |
+| **Node.js** | 22 (default), 24, 20, 18 | NodeSource packages with npm (Alpine: its own version) |
 | Java (OpenJDK) | 21, 17 | headless runtime |
 | Go | 1.23.4 (any `1.x.y`) | official toolchain in `/usr/local/go` |
 | **nginx** | distribution | enabled and started; put a reverse proxy to the pskit host in `/etc/nginx/conf.d/` |
@@ -269,6 +307,7 @@ The catalog's *Install on a server* groups install with the server's package man
 | Git, basic tools | distribution | curl, wget, unzip, jq, htop, tmux, netcat |
 
 ```bash
+pskit resources onprem create py312 --service python --version 3.12 --server edge1
 pskit resources onprem create node --service nodejs --version 20 --server edge1
 pskit resources onprem create web --service nginx --server edge1
 ```

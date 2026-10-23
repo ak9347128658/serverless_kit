@@ -29,7 +29,8 @@ STORAGE = "storage"
 TOPIC = "topic"
 WORKFLOW_NATIVE = "workflow_native"
 ALL_CAPABILITIES = (HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC, WORKFLOW_NATIVE)
-EVENT_CAPABILITIES = frozenset({HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC})
+SMTP = "smtp"  # mail received by the host's SMTP server (on premises only)
+EVENT_CAPABILITIES = frozenset({HTTP, SCHEDULE, QUEUE, STORAGE, TOPIC, SMTP})
 
 ORCHESTRATOR_HANDLER = "py_serverless_kit.runtime.workflow.orchestrate"
 # The Node.js runtime is vendored at the bundle root as ``pskit_runtime/`` (see deploy_docs/NODE_RUNTIME.md).

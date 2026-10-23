@@ -348,7 +348,7 @@ function InvokePanel({ functions, disabled, onRun }: { functions: string[]; disa
             label="Event type"
             value={kind}
             onChange={setKind}
-            options={["default", "http", "schedule", "queue", "storage", "topic", "invoke"].map((k) => ({ value: k, label: k }))}
+            options={["default", "http", "schedule", "queue", "storage", "topic", "smtp", "invoke"].map((k) => ({ value: k, label: k }))}
           />
         </FormRow>
         {(kind === "http" || (kind === "default" && first?.type === "http")) && (

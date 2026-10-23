@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
+from .onprem_apps import DEFAULT_USERS, NO_AUTH_APPS, SELF_LOGIN, apps
+from .onprem_browser import browsers_for
 from .onprem_runtimes import RUNTIME_SPECS, check_version, install_script
 
 STATE_FILE = Path(".pskit") / "onprem-services.json"
@@ -70,9 +72,18 @@ def _svc(
     run_args: Sequence[str] = (),
     init: Any = "",
     gui: Sequence[Dict[str, Any]] = (),
+    sidecars: Sequence[Dict[str, Any]] = (),
+    connect: Optional[Dict[str, Any]] = None,
+    generate: Optional[Dict[str, str]] = None,
+    group: str = "",
+    ready_path: str = "",
 ) -> Dict[str, Any]:
-    return {
+    out: Dict[str, Any] = {
         "init": init,
+        "sidecars": [dict(c) for c in sidecars],
+        "connect": dict(connect or {}),
+        "generate": dict(generate or {}),
+        "group": group,
         "gui": [dict(g) for g in gui],
         "label": label,
         "kind": "service",
@@ -89,10 +100,16 @@ def _svc(
         "notes": notes,
         "run_args": list(run_args),
     }
+    if ready_path:
+        out["ready_path"] = ready_path
+    return out
 
 
 # `{password}`, `{user}`, `{database}`, `{bucket}`, `{name}` (the resource key), `{address}` and
-# `{port}` are filled in when the service is created. `health`, `init` (once, after it is ready)
+# `{port}` are filled in when the service is created, plus each `generate` value (`{encryption_key}` ...) and
+# `{container}`. `sidecars` are extra containers (a database, a cache) on a private network with the service,
+# reachable from it as `{container}-<name>`. `connect` describes the resource pskit adds: `env` (names after
+# PSKIT_<KEY>_, written to the env file) and `connection` (`{prefix}` is that PSKIT_<KEY>). `health`, `init` (once, after it is ready)
 # and `backup` run inside the container with `sh -c`; backup writes to stdout.
 # A role is the resource type the service is used as; `stream` is a queue on a Redis stream.
 ROLE_TYPE = {"stream": "queue", "secrets": "custom"}
@@ -105,8 +122,10 @@ def _redis_start(binary: str, var: str) -> str:
 
 
 # Services that run without authentication in this setup (keep them on 127.0.0.1 or a private network).
-NO_AUTH = ("elasticmq", "kafka", "apache-kafka", "memcached", "mailpit", "localstack", "fake-gcs")
-DEFAULT_USER = {"redis": "default", "valkey": "default", "keydb": "default", "dragonfly": "default"}
+NO_AUTH = ("elasticmq", "kafka", "apache-kafka", "memcached", "mailpit", "localstack", "fake-gcs", *NO_AUTH_APPS)
+# No pskit login either: the service asks you to create its admin account on the first visit.
+NO_CREDENTIALS = (*NO_AUTH, *SELF_LOGIN)
+DEFAULT_USER = {"redis": "default", "valkey": "default", "keydb": "default", "dragonfly": "default", **DEFAULT_USERS}
 _PASSWORD_OK = re.compile(r"^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$")
 _LOGIN_OK = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,63}$")
 
@@ -420,9 +439,9 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         backup="tar czf - -C /openbao/file .",
         backup_ext="tar.gz",
         notes="A secret manager with the HashiCorp Vault API (KV v2 at secret/): get_secret() / put_secret(), "
-        "hvac, node-vault and the vault / bao CLI. The password is the access token. Web UI at /ui. "
+        "hvac, node-vault and the vault / bao CLI. The password is the access token. OpenBao's release images "
+        "ship without its web UI, so use Browse secrets (pskit's UI: folders, versions, add / edit / delete). "
         "Backups hold the data and the unseal key: keep them safe.",
-        gui=({"port": 8200, "path": "/ui/", "label": "OpenBao UI", "login": "token"},),
     ),
     "fake-gcs": _svc(
         "fake-gcs-server (Cloud Storage emulator)",
@@ -468,6 +487,10 @@ SERVICES: Dict[str, Dict[str, Any]] = {
 for _name, _path in (("azurite", "/"), ("rustfs", "/"), ("fake-gcs", "/storage/v1/b"), ("elasticmq", "/"),
                      ("mailpit", "/")):
     SERVICES[_name]["ready_path"] = _path
+
+SERVICES.update(apps(_svc))
+SERVICES["localstack"]["group"] = "AWS emulators"
+SERVICES["azurite"]["group"] = "Object storage"
 
 SERVICES["rabbitmq"]["gui"] = [{"port": 15672, "label": "Management UI", "login": "user"}]
 SERVICES["elasticmq"]["gui"] = [{"port": 9325, "label": "Queue browser", "login": "none"}]
@@ -548,13 +571,6 @@ COMPANIONS: Dict[str, Dict[str, Any]] = {
 }
 
 RUNTIMES: Dict[str, Dict[str, Any]] = {
-    "python": {
-        "label": "Python 3",
-        "kind": "runtime",
-        "roles": [],
-        "notes": "Installs python3 (with venv and pip) on an SSH server so the host can run with python: system.",
-        "check": "python3 --version",
-    },
     "docker": {
         "label": "Docker",
         "kind": "runtime",
@@ -564,32 +580,24 @@ RUNTIMES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-RUNTIMES["python"]["group"] = RUNTIMES["docker"]["group"] = "Languages and Docker"
+RUNTIMES["docker"]["group"] = "Languages and Docker"
 for _name, _rt in RUNTIME_SPECS.items():
     RUNTIMES[_name] = {"label": _rt["label"], "kind": "runtime", "roles": [], "notes": _rt["notes"],
                        "check": _rt["check"], "group": _rt["group"]}
 
-_RUNTIME_INSTALL = {
-    "python": (
-        "if ! command -v python3 >/dev/null 2>&1 || ! python3 -m venv --help >/dev/null 2>&1; then\n"
-        "  if command -v apt-get >/dev/null 2>&1; then\n"
-        "    export DEBIAN_FRONTEND=noninteractive\n"
-        "    as_root apt-get update\n"
-        "    as_root apt-get install -y python3 python3-venv python3-pip\n"
-        "  elif command -v dnf >/dev/null 2>&1; then\n"
-        "    as_root dnf install -y python3 python3-pip\n"
-        "  elif command -v yum >/dev/null 2>&1; then\n"
-        "    as_root yum install -y python3 python3-pip\n"
-        "  elif command -v apk >/dev/null 2>&1; then\n"
-        "    as_root apk add --no-cache python3 py3-pip\n"
-        "  else\n"
-        '    echo "pskit: no apt-get, dnf, yum or apk on this server; install Python 3 by hand" >&2\n'
-        "    exit 1\n"
-        "  fi\n"
-        "fi\n"
-        "python3 --version\n"
-    ),
-}
+def _group_of(svc: Dict[str, Any]) -> str:
+    roles = svc["roles"]
+    if "secrets" in roles and len(roles) == 1:
+        return "Secrets"
+    if roles == ["storage"]:
+        return "Object storage"
+    if "database" in roles:
+        return "Databases"
+    if set(roles) & {"queue", "stream"}:
+        return "Queues and streams" if "cache" not in roles else "Caches and queues"
+    if "cache" in roles:
+        return "Caches and queues"
+    return "Tools"
 
 
 def catalog() -> List[Dict[str, Any]]:
@@ -612,6 +620,8 @@ def catalog() -> List[Dict[str, Any]]:
                 "companion": next((c["label"] for c in COMPANIONS.values() if name in c["for"]), None),
                 "gui_logins": gui_login_choices(name),
                 "default_user": DEFAULT_USER.get(name, "pskit"),
+                "browsers": browsers_for(name),
+                "group": svc.get("group") or _group_of(svc),
                 "notes": svc["notes"],
             }
         )
@@ -873,10 +883,10 @@ class _Runner:
 def _mask(arg: str) -> str:
     # `-e NAME=secret` and URLs with passwords stay out of logs.
     text = str(arg)
-    if re.match(r"^[A-Z0-9_]*(PASSWORD|PASS|SECRET|TOKEN)[A-Z0-9_]*=", text):
+    if re.match(r"^[A-Z0-9_]*(PASSWORD|PASS|SECRET|TOKEN|KEY)[A-Z0-9_]*=", text):
         return text.split("=", 1)[0] + "=***"
     text = re.sub(r"(://[^:/@\s]*:)[^@\s]+@", r"\1***@", text)
-    return re.sub(r"((?:PASSWORD|PASS|SECRET|TOKEN)[A-Z0-9_]*=)[^ ']+", r"\1***", text)
+    return re.sub(r"((?:PASSWORD|PASS|SECRET|TOKEN|KEY)[A-Z0-9_]*=)[^ ']+", r"\1***", text)
 
 
 # ----------------------------------------------------------------------------- state and env file
@@ -1011,6 +1021,11 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
             f"{spec['label']} runs without authentication here; leave user and password empty and keep it on "
             "bind 127.0.0.1 or a private network"
         )
+    if service in SELF_LOGIN and (user or password):
+        raise ServiceError(f"{spec['label']} asks you to create its admin account on the first visit; "
+                           "leave user and password empty")
+    if service == "neo4j" and user not in ("", "neo4j"):
+        raise ServiceError("Neo4j's user is always neo4j; leave user empty")
     if user and not _LOGIN_OK.match(user):
         raise ServiceError("user must be 3-64 characters: a letter, then letters, digits, _ . or -")
     if password and not _PASSWORD_OK.match(password):
@@ -1218,7 +1233,7 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
                               "container": name, "create_bucket": True}
         res["connection"] = {"account": user, "blob_endpoint": f"http://{addr}:{port}/{user}",
                              "queue_endpoint": f"http://{addr}:{host_port(req, 10001)}/{user}"}
-    elif service == "localstack":
+    elif service in ("localstack", "localemu"):
         if role == "queue":
             res["options"] = {
                 "driver": "sqs",
@@ -1268,14 +1283,31 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
         res["connection"] = {"host": addr, "port": port}
     elif service == "mailpit":
         res["connection"] = {"smtp_host": addr, "smtp_port": port, "web_url": f"http://{addr}:{host_port(req, 8025)}"}
+    connect = (SERVICES.get(service) or {}).get("connect") or {}
+    if connect:
+        values = {**_values(req, password), "prefix": prefix, "address": addr, "port": str(port),
+                  **{f"port_{n}": str(host_port(req, n)) for n in SERVICES[service]["extra_ports"]}}
+        for name, template in (connect.get("env") or {}).items():
+            env[f"{prefix}_{name}"] = _fill(template, values)
+        if connect.get("connection"):
+            res["connection"] = {k: (int(_fill(v, values)) if k == "port" else _fill(v, values))
+                                 for k, v in connect["connection"].items()}
+        if connect.get("note"):
+            notes.append(_fill(connect["note"], values))
     if role == "secrets":
         # get_secret(name, store=key) reads PSKIT_<KEY>_DRIVER / _URL / _TOKEN ...; key "secrets" is the default store.
         url = f"http://{addr}:{port}"
-        if service == "openbao":
+        if service == "infisical":
+            env.update({f"{prefix}_DRIVER": "infisical", f"{prefix}_URL": url, f"{prefix}_CLIENT_ID": "",
+                        f"{prefix}_CLIENT_SECRET": "", f"{prefix}_PROJECT_ID": "", f"{prefix}_ENVIRONMENT": "dev"})
+            res["connection"] = {"driver": "infisical", "url": url, "client_id_env": f"{prefix}_CLIENT_ID",
+                                 "client_secret_env": f"{prefix}_CLIENT_SECRET", "project_id_env": f"{prefix}_PROJECT_ID"}
+            notes.append(f"open {url}, create the admin account, a project and a machine identity (Universal Auth); "
+                         f"fill {prefix}_CLIENT_ID, {prefix}_CLIENT_SECRET and {prefix}_PROJECT_ID in the env file")
+        elif service == "openbao":
             env.update({f"{prefix}_DRIVER": "vault", f"{prefix}_URL": url, f"{prefix}_TOKEN": password,
                         f"{prefix}_MOUNT": "secret"})
-            res["connection"] = {"driver": "vault", "url": url, "mount": "secret", "token_env": f"{prefix}_TOKEN",
-                                 "ui": f"{url}/ui/"}
+            res["connection"] = {"driver": "vault", "url": url, "mount": "secret", "token_env": f"{prefix}_TOKEN"}
         else:
             env.update({f"{prefix}_DRIVER": "aws", f"{prefix}_URL": url, f"{prefix}_REGION": "us-east-1",
                         f"{prefix}_ACCESS_KEY": "test", f"{prefix}_SECRET_KEY": "test"})
@@ -1294,8 +1326,32 @@ def _fill(text: str, values: Dict[str, str]) -> str:
     return text
 
 
+_GENERATORS = {
+    "hex16": lambda: secrets.token_hex(16),
+    "hex32": lambda: secrets.token_hex(32),
+    "b64_32": lambda: base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+    "token": lambda: secrets.token_urlsafe(24),
+}
+
+
+def _generated(root: Path, raw: Optional[Dict[str, Any]], req: Dict[str, Any]) -> Dict[str, str]:
+    """Random keys a service needs (``generate``). A value already in the env file is kept: re-creating the
+    service must not change an encryption key its data was written with."""
+    from ..runtime.onprem_host import parse_env_text
+
+    spec = SERVICES[req["service"]]
+    if not spec.get("generate"):
+        return {}
+    path = root / env_file_of(raw)
+    existing = parse_env_text(path.read_text("utf-8")) if path.is_file() else {}
+    prefix = _var_prefix(req["key"])
+    return {name: existing.get(f"{prefix}_{name.upper()}") or _GENERATORS[kind]()
+            for name, kind in spec["generate"].items()}
+
+
 def _values(req: Dict[str, Any], password: str = "") -> Dict[str, str]:
     return {
+        **{k: str(v) for k, v in (req.get("generated") or {}).items()},
         "password": password,
         "user": str(req.get("user") or "pskit"),
         "database": re.sub(r"[^A-Za-z0-9_]", "_", req["key"]),
@@ -1322,10 +1378,48 @@ def run_args(req: Dict[str, Any], password: str) -> List[str]:
         argv += ["-e", f"{name}={_fill(template, values)}"]
     if spec["data"]:
         argv += ["-v", f"{req['volume']}:{spec['data']}"]
+    if spec.get("sidecars"):
+        argv += ["--network", f"{req['container']}-net"]
     argv += list(spec["run_args"])
     argv.append(req["image"])
     argv += [_fill(part, values) for part in spec["command"]]
     return argv
+
+
+def sidecar_args(req: Dict[str, Any], side: Dict[str, Any], password: str) -> List[str]:
+    """``docker run`` arguments for one sidecar of a service (no published port: only the service reaches it)."""
+    values = _values(req, password)
+    name = f"{req['container']}-{side['name']}"
+    argv = ["run", "-d", "--name", name, "--restart", "unless-stopped", "--network", f"{req['container']}-net",
+            "--network-alias", name, "--label", f"pskit.key={req['key']}", "--label", f"pskit.sidecar={side['name']}"]
+    for env_name, template in (side.get("env") or {}).items():
+        argv += ["-e", f"{env_name}={_fill(template, values)}"]
+    if side.get("data"):
+        argv += ["-v", f"{name}-data:{side['data']}"]
+    argv.append(side["image"])
+    argv += [_fill(part, values) for part in side.get("command") or ()]
+    return argv
+
+
+def _start_sidecars(req: Dict[str, Any], spec: Dict[str, Any], target: Dict[str, Any], sh: Any, password: str,
+                    emit: Emit, timeout: float) -> None:
+    sh(docker_argv(target, ["network", "create", f"{req['container']}-net"]), check=False, show=False)
+    for side in spec["sidecars"]:
+        name = f"{req['container']}-{side['name']}"
+        sh(docker_argv(target, ["rm", "-f", name]), check=False, show=False)
+        sh(docker_argv(target, ["pull", side["image"]]))
+        sh(docker_argv(target, sidecar_args(req, side, password)))
+        if side.get("health"):
+            emit(f"waiting for {side['name']} ({side['image']})...")
+            deadline = time.monotonic() + timeout
+            while True:
+                code, _out = sh.run_fn(docker_argv(target, ["exec", name, "sh", "-c", side["health"]]), None)
+                if code == 0:
+                    break
+                if time.monotonic() > deadline:
+                    logs = sh(docker_argv(target, ["logs", "--tail", "30", name]), check=False, show=False)
+                    raise ServiceError(f"{side['name']} did not become ready. Last log lines:\n{logs.strip()}")
+                time.sleep(2)
 
 
 def create(
@@ -1361,7 +1455,10 @@ def create(
     spec = SERVICES[req["service"]]
     _ensure_docker(target, sh, install=bool(body.get("install_docker", True)))
     password = req["password"] or secrets.token_urlsafe(18).replace("-", "x").replace("_", "y")
+    req["generated"] = _generated(root, raw, req)
     sh(docker_argv(target, ["rm", "-f", req["container"]]), check=False, show=False)
+    if spec.get("sidecars"):
+        _start_sidecars(req, spec, target, sh, password, emit, wait_seconds)
     sh(docker_argv(target, ["pull", req["image"]]))
     if req["volume"]:
         sh(docker_argv(target, ["volume", "create", req["volume"]]), show=False)
@@ -1373,6 +1470,9 @@ def create(
     if req["service"] == "elasticmq":
         _elasticmq_queue(req, emit, sh)
     resource, env_values, notes = _connection(req, password)
+    for name, value in (req.get("generated") or {}).items():
+        # Kept in the env file: re-creating the service reuses them (data encrypted with them stays readable).
+        env_values[f"{_var_prefix(req['key'])}_{name.upper()}"] = value
     if req["service"] in DRIVER_TEMPLATES:
         _add_driver(root, raw, req["service"])
     env_file = env_file_of(raw)
@@ -1392,7 +1492,7 @@ def create(
         "port": req["port"],
         "address": req["address"],
         "bind": req["bind"],
-        "user": req["user"] if req["service"] not in NO_AUTH else "",
+        "user": req["user"] if req["service"] not in NO_CREDENTIALS else "",
         "attach": req["attach"],
         "env_file": env_file,
         "env": env_values,
@@ -1400,6 +1500,8 @@ def create(
         "notes": notes,
         "created_at": _now(),
     }
+    if spec.get("sidecars"):
+        entry["sidecars"] = [f"{req['container']}-{side['name']}" for side in spec["sidecars"]]
     state = load_state(root)
     state["services"][req["key"]] = entry
     save_state(root, state)
@@ -1439,10 +1541,8 @@ def _install_runtime(name: str, target: Dict[str, Any], sh: _Runner, *, version:
     header = _docker_shell_header()
     if name == "docker":
         script = header + _docker_install_block() + _docker_ready_block() + "dk --version\n"
-    elif name in RUNTIME_SPECS:
-        script = header + install_script(name, version)
     else:
-        script = header + _RUNTIME_INSTALL[name]
+        script = header + install_script(name, version)
     # A script file: multi-line SSH commands are re-quoted by Windows OpenSSH.
     import tempfile
 
@@ -1680,6 +1780,10 @@ def remove(
         if isinstance(gui, dict):
             sh(docker_argv(entry["target"], ["rm", "-f", gui["container"]]), check=False)
         sh(docker_argv(entry["target"], ["rm", "-f", entry["container"]]), check=False)
+        for side in entry.get("sidecars") or []:
+            sh(docker_argv(entry["target"], ["rm", "-f", side]), check=False)
+            if delete_data:
+                sh(docker_argv(entry["target"], ["volume", "rm", f"{side}-data"]), check=False, show=False)
         # After the service container: a network with a connected container cannot be removed.
         sh(docker_argv(entry["target"], ["network", "rm", _network(entry)]), check=False, show=False)
         if delete_data and entry.get("volume"):
@@ -1932,6 +2036,7 @@ def gui_links(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for gui in spec.get("gui") or []:
         login = {"user": f"user `{user}`, password in the env file",
+                 "signup": "create the admin account on the first visit",
                  "token": f"Token method: the token in {_var_prefix(str(entry.get('key')))}_TOKEN (env file)"}.get(
             str(gui.get("login")), "no login")
         port = host_port(entry, int(gui["port"]))

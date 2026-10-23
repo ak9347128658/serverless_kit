@@ -313,6 +313,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     if (ev.type === "schedule" && !ev.config.rate && !ev.config.cron) return "pick a rate or a cron expression";
     if ((ev.type === "queue" || ev.type === "topic") && !ev.config.name && !ev.config.resource) return "a name or resource is required";
     if (ev.type === "storage" && !ev.config.bucket && !ev.config.resource) return "a bucket or resource is required";
+    if (ev.type === "smtp" && !ev.config.resource) return "pick the SMTP server (an smtp resource) that receives the mail";
     return null;
   });
   const blocking = !!nameError || !!handlerError || eventErrors.some(Boolean);

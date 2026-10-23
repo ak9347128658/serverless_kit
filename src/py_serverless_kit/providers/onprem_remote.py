@@ -202,6 +202,8 @@ def _docker_run_argv(docker: Dict[str, Any], spec: Dict[str, Any]) -> List[str]:
         "-v",
         f"{docker['container']}-data:/var/pskit/data",
     ]
+    for smtp in (spec.get("smtp") or {}).values():  # the host's SMTP servers listen in the container too
+        argv += ["-p", f"{smtp['port']}:{smtp['port']}"]
     argv.extend(str(item) for item in (docker.get("args") or []))
     argv.append(str(docker["image"]))
     return argv
