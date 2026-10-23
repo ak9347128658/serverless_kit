@@ -168,7 +168,7 @@ function ServerFacts({ result }: { result: OnPremServerTest }) {
   );
 }
 
-function ServerForm({ initial, taken, onClose, onSaved }: { initial: OnPremServer | null; taken: string[]; onClose: () => void; onSaved: (name: string) => void }) {
+export function ServerForm({ initial, taken, onClose, onSaved }: { initial: OnPremServer | null; taken: string[]; onClose: () => void; onSaved: (name: string) => void }) {
   const [name, setName] = useState(initial?.name || "");
   const [host, setHost] = useState(initial?.host || "");
   const [user, setUser] = useState(initial?.user || "ubuntu");

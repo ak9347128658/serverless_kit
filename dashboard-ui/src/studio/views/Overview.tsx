@@ -7,6 +7,8 @@ import { ComboInput, EnumSelect, FieldForm, FormRow, KeyValueEditor, Section, Se
 import { useJob } from "../jobs";
 import { href } from "../route";
 import { InlineIssues, PageHeader } from "../components/Misc";
+import { ServerForm } from "../components/OnPremMachines";
+import { DeployedBadge, useOnPremServers } from "../components/ServerPicker";
 import { capabilityLabel, ProviderCards } from "../components/ProviderCard";
 import { useStudio } from "../store";
 import type { Field, Json, JsonObject } from "../types";
@@ -260,8 +262,15 @@ export function OverviewView() {
   );
 }
 
+/** Keys a saved server supplies: dropped from options.deploy when one is picked. */
+const SERVER_LOGIN_KEYS = new Set(["host", "user", "port", "ssh_port", "pem", "identity", "identity_file", "password_file", "auth", "known_hosts"]);
+
 function OnPremSection() {
-  const { draft, meta, edit, issuesAt } = useStudio();
+  const { state, draft, meta, edit, issuesAt } = useStudio();
+  const toast = useToast();
+  const stage = state.target?.stage || str(getIn(draft, ["provider", "stage"]), "dev");
+  const { servers, deployed, reload } = useOnPremServers(true, stage);
+  const [adding, setAdding] = useState(false);
   const options = asObject(getIn(draft, ["provider", "options"]));
   const rawDeploy = options.deploy;
   const deploy: JsonObject = typeof rawDeploy === "string" ? { method: rawDeploy } : asObject(rawDeploy);
@@ -282,27 +291,80 @@ function OnPremSection() {
       edit(["provider", "options", "deploy"], clean);
     }
   };
+  const chosen = str(deploy.server);
+  const pickServer = (name: string) => {
+    if (name === "__add") {
+      setAdding(true);
+      return;
+    }
+    const rest: JsonObject = {};
+    for (const [k, v] of Object.entries(deploy)) if (k !== "server" && (!name || !SERVER_LOGIN_KEYS.has(k))) rest[k] = v;
+    // A saved server is another machine: deploy over SSH (or Docker there), never "this machine".
+    setDeploy(name ? { ...rest, method: method === "docker" ? "docker" : "ssh", server: name } : rest);
+  };
   return (
     <>
       <Section title="On-premises deployment" hint="provider.options.deploy">
+        <FormRow
+          label="Saved server"
+          help={
+            chosen
+              ? `Deploys to ${chosen}: its host, user, port and login come from the saved server (Resources → On-prem services → Servers).`
+              : "Pick a saved SSH server to deploy to it, or add one. Leave empty to set the machine below (or per deploy in Deploy → Machine)."
+          }
+        >
+          <div className="row-gap wrap">
+            <select className="select" value={chosen} onChange={(e) => pickServer(e.target.value)} aria-label="Saved server">
+              <option value="">None: use the method below</option>
+              {servers.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name} ({s.label}){deployed?.server === s.name ? " · deployed here" : ""}
+                </option>
+              ))}
+              {chosen && !servers.some((s) => s.name === chosen) && <option value={chosen}>{chosen} (not saved on this machine)</option>}
+              <option value="__add">+ Add a server…</option>
+            </select>
+            <button type="button" className="btn btn-sm" onClick={() => setAdding(true)}>
+              + Add server
+            </button>
+          </div>
+        </FormRow>
+        <DeployedBadge deployed={deployed} />
+        {adding && (
+          <ServerForm
+            initial={null}
+            taken={servers.map((s) => s.name)}
+            onClose={() => setAdding(false)}
+            onSaved={(name) => {
+              setAdding(false);
+              reload();
+              pickServer(name);
+              toast(`Saved server ${name}; deploys of this stage now go there`, "ok");
+            }}
+          />
+        )}
         <FormRow label="Where the host runs" help={method === "local" ? "This machine." : method === "ssh" ? "A server reached over SSH (scp + process or systemd)." : "A Docker container, locally or on a server over SSH."}>
           <Segmented
             label="Deploy method"
             value={method}
-            onChange={(m) => setDeploy({ ...deploy, method: m })}
+            onChange={(m) => {
+              // "This machine" and a saved server exclude each other.
+              const { server: _server, ...rest } = deploy;
+              setDeploy(m === "local" ? { ...rest, method: m } : { ...deploy, method: m });
+            }}
             options={methods.map((m) => ({ value: m, label: m === "local" ? "This machine" : m === "ssh" ? "SSH server" : "Docker" }))}
           />
         </FormRow>
         {deployFields.length > 0 && (
           <FieldForm
-            fields={deployFields}
+            fields={chosen ? deployFields.filter((f) => !SERVER_LOGIN_KEYS.has(f.key)) : deployFields}
             value={deploy}
             idPrefix={`dep-${method}`}
             errorsFor={(k) => issuesAt(["provider", "options", "deploy", k]).map((i) => i.message)}
             onChange={(k, v) => setDeploy({ ...deploy, [k]: v === undefined ? "" : v, method })}
           />
         )}
-        {(method === "ssh" || (method === "docker" && !!str(deploy.host))) && <SshTest deploy={deploy} />}
+        {!chosen && (method === "ssh" || (method === "docker" && !!str(deploy.host))) && <SshTest deploy={deploy} />}
         <p className="muted small">
           Missing ssh, scp or Docker on this machine? <a href={href("setup")}>Setup &amp; credentials</a> checks them and shows how
           to install them.

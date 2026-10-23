@@ -153,7 +153,7 @@ def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Opti
     """Pick the machine ``onprem-<stage>`` deploys to, in place on ``options.deploy``. Returns the server name.
 
     ``server`` (``--server`` / ``PSKIT_DEPLOY_SERVER``) wins; ``local`` means this machine. Next comes
-    ``options.deploy`` in pskit.yml (``server``, ``host`` or ``method``). Otherwise the stage goes back to the
+    ``options.deploy`` in pskit.yml (``server``, ``host``, or a ``method`` other than local). Otherwise the stage goes back to the
     saved server it was last deployed to, so a deploy from the studio's machine picker sticks for later
     deploys, triggers, tests and logs.
     """
@@ -165,8 +165,10 @@ def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Opti
     if server:
         return apply_to_deploy(options, root, server)
     deploy = options.get("deploy")
-    configured = isinstance(deploy, str) or (
-        isinstance(deploy, dict) and any(deploy.get(k) for k in ("server", "host", "method"))
+    # `method: local` alone (the default a new project writes) does not pin this machine; --server local does.
+    configured = (isinstance(deploy, str) and deploy != LOCAL) or (
+        isinstance(deploy, dict)
+        and (any(deploy.get(k) for k in ("server", "host")) or str(deploy.get("method") or LOCAL) != LOCAL)
     )
     if configured:
         return apply_to_deploy(options, root)
@@ -195,8 +197,8 @@ def apply_to_deploy(options: Dict[str, Any], root: Path, server: Optional[str] =
     """Merge a saved server into ``options.deploy`` (in place). Returns the server name used, or None.
 
     ``server`` (``--server`` / ``PSKIT_DEPLOY_SERVER``) wins over ``options.deploy.server``. The server's host, user,
-    port and login replace those in ``options.deploy``; method, path, python, install, ... stay. A deploy without a
-    method becomes ``method: ssh``.
+    port and login replace those in ``options.deploy``; path, python, install, ... stay. ``method`` stays ``ssh``,
+    ``scp`` or ``docker``; anything else (none, ``local``) becomes ``ssh``.
     """
     deploy = options.get("deploy")
     name = server or (deploy.get("server") if isinstance(deploy, dict) else None)
@@ -206,7 +208,9 @@ def apply_to_deploy(options: Dict[str, Any], root: Path, server: Optional[str] =
     if not isinstance(deploy, dict):
         deploy = {"method": str(deploy)} if isinstance(deploy, str) and deploy in ("ssh", "scp", "docker") else {}
     deploy = dict(deploy)
-    deploy.setdefault("method", "ssh")
+    if str(deploy.get("method") or "local") not in ("ssh", "scp", "docker"):
+        # A saved server is another machine: `method: local` (what a new pskit.yml has) would run the host here.
+        deploy["method"] = "ssh"
     for key in ("identity_file", "pem", "identity", "password_file", "auth"):
         deploy.pop(key, None)
     deploy.update({"host": item["host"], "user": item.get("user") or "root", "port": int(item.get("port") or 22)})

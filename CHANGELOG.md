@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.3.10] - 2026-10-23
+
+### Fixed
+- **On premises: a chosen server really deploys there.** With `deploy: {method: local}` in `pskit.yml` (what a new project writes), `pskit deploy --server NAME` and studio *Deploy → Machine* kept `method: local`, so the host started on this machine and was labelled `VM_01 (this machine)`. A saved server now always deploys over SSH (`docker` stays `docker`). `method: local` on its own no longer overrides the server a stage was last deployed to; `--server local` still picks this machine.
+
+### Added
+- **Studio Overview → On-premises deployment: Saved server.** Pick one of the servers saved under *Resources → On-prem services → Servers* (writes `provider.options.deploy.server` and switches the method to SSH), or **+ Add server** to save a new one from there. Shows where the stage is deployed now.
+
 ## [1.3.9] - 2026-10-23
 
 ### Fixed

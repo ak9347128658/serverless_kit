@@ -72,6 +72,16 @@ def test_resolve_deploy_goes_back_to_the_remembered_server(tmp_path):
     assert srv.resolve_deploy(options, tmp_path, "dev", "VM_02") == "VM_02"  # --server wins
     assert options["deploy"]["host"] == "10.0.0.6"
 
+    # pskit.yml written by a new project says `method: local`: a chosen or remembered server still deploys there.
+    options = {"deploy": {"method": "local", "host_python": "python3.10"}}
+    assert srv.resolve_deploy(options, tmp_path, "dev", "VM_02") == "VM_02"
+    assert options["deploy"]["method"] == "ssh" and options["deploy"]["host"] == "10.0.0.6"
+    options = {"deploy": {"method": "local"}}
+    assert srv.resolve_deploy(options, tmp_path, "dev") == "VM_01"
+    assert options["deploy"]["method"] == "ssh" and options["deploy"]["host"] == "10.0.0.5"
+    options = {"deploy": {"method": "docker"}}
+    assert srv.resolve_deploy(options, tmp_path, "dev", "VM_02") == "VM_02" and options["deploy"]["method"] == "docker"
+
     options = {"deploy": {"method": "ssh", "host": "10.9.9.9", "user": "x", "install": "systemd"}}
     assert srv.resolve_deploy(dict(options), tmp_path, "dev") is None  # an inline host in pskit.yml wins
     assert srv.resolve_deploy(options, tmp_path, "dev", ctl.LOCAL) is None  # --server local
