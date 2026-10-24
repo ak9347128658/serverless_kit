@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..providers.onprem_remote import _docker_install_block, _docker_ready_block, _docker_shell_header, _shq
 
@@ -63,6 +63,12 @@ def master_script(orchestrator: str, advertise: str, nomad_version: str = NOMAD_
         return (
             _header() + _docker_install_block() + _docker_ready_block()
             + "state=$(dk info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo inactive)\n"
+            + _swarm_locked_check()
+            + 'if [ "$state" = "pending" ] || [ "$state" = "error" ]; then\n'
+            + '  echo "pskit: leaving a half-joined swarm ($state) first"\n'
+            + "  dk swarm leave --force || true\n"
+            + "  state=inactive\n"
+            + "fi\n"
             + f'if [ "$state" != "active" ]; then dk swarm init --advertise-addr {addr}; fi\n'
             + "if [ \"$(dk info --format '{{.Swarm.ControlAvailable}}')\" != \"true\" ]; then\n"
             + '  echo "pskit: this server is a worker of another swarm; make its manager the master" >&2\n'
@@ -88,41 +94,75 @@ def master_script(orchestrator: str, advertise: str, nomad_version: str = NOMAD_
 
 
 def join_token_script(orchestrator: str) -> str:
-    """Runs on the master: prints ``PSKIT_TOKEN=<worker join token>`` (Nomad needs none)."""
+    """Runs on the master: prints ``PSKIT_TOKEN=<worker join token>`` (Nomad needs none). Swarm also prints
+    ``PSKIT_MEMBERS=<node ids>``, so the joining server can tell whether it is already a member."""
     if orchestrator == "swarm":
-        return _header() + "echo \"PSKIT_TOKEN=$(dk swarm join-token -q worker)\"\n"
+        return _header() + ("echo \"PSKIT_TOKEN=$(dk swarm join-token -q worker)\"\n"
+                            "echo \"PSKIT_MEMBERS=$(dk node ls -q | tr '\\n' ' ')\"\n")
     if orchestrator == "kubernetes":
         return _header() + "echo \"PSKIT_TOKEN=$(as_root cat /var/lib/rancher/k3s/server/node-token)\"\n"
     return _header() + "echo PSKIT_TOKEN=\n"
 
 
 def join_script(orchestrator: str, master: str, token: str, advertise: str,
-                nomad_version: str = NOMAD_VERSION) -> str:
-    """Install the orchestrator agent on a server and join the master's cluster; prints ``PSKIT_NODE=``."""
+                nomad_version: str = NOMAD_VERSION, members: Sequence[str] = ()) -> str:
+    """Install the orchestrator agent on a server and join the master's cluster; prints ``PSKIT_NODE=``.
+
+    Safe to repeat and to run on a server that was in a cluster before (removed while it was off, a join that
+    stopped half way, a master that was set up again): stale membership is left first. ``members``: the node ids
+    of the master's swarm (``join_token_script``). Only a server that manages another swarm with other nodes or
+    services is refused, since leaving it would break that swarm."""
     if orchestrator == "swarm":
         return (
             _header(secret=True) + _docker_install_block() + _docker_ready_block()
-            + "state=$(dk info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo inactive)\n"
-            + 'if [ "$state" = "active" ]; then\n'
-            + "  if dk info --format '{{range .Swarm.RemoteManagers}}{{.Addr}} {{end}}' | grep -q "
-            + _shq(f"{master}:2377") + "; then\n"
-            + '    echo "already in this swarm"\n'
-            + "  else\n"
-            + '    echo "pskit: this server is in another swarm. Leave it first: docker swarm leave --force" >&2\n'
-            + "    exit 1\n"
-            + "  fi\n"
+            + "info=$(dk info --format '{{.Swarm.LocalNodeState}} {{.Swarm.ControlAvailable}} {{.Swarm.NodeID}}'"
+            + " 2>/dev/null || echo inactive)\n"
+            + "set -- $info\n"
+            + 'state=${1:-inactive}; manager=${2:-false}; node_id=${3:-}\n'
+            + f"members={_shq(' '.join(members))}\n"
+            + 'case " $members " in *" $node_id "*) member=1 ;; *) member=0 ;; esac\n'
+            + '[ -n "$node_id" ] || member=0\n'
+            + _swarm_locked_check()
+            + 'if [ "$state" = "active" ] && [ "$member" = "1" ]; then\n'
+            + '  echo "already in this swarm"\n'
             + "else\n"
+            + '  if [ "$state" = "active" ] && [ "$manager" = "true" ]; then\n'
+            + '    others=$(dk node ls -q | grep -vx "$node_id" | wc -l)\n'
+            + "    services=$(dk service ls -q | wc -l)\n"
+            + '    if [ "$others" -gt 0 ] || [ "$services" -gt 0 ]; then\n'
+            + '      echo "pskit: this server manages another swarm ($others other node(s), $services service(s)).'
+            + ' Remove that cluster first, or run: docker swarm leave --force" >&2\n'
+            + "      exit 1\n"
+            + "    fi\n"
+            + "  fi\n"
+            + '  if [ "$state" != "inactive" ]; then\n'
+            + '    echo "pskit: leaving the old swarm ($state) first"\n'
+            + "    dk swarm leave --force || true\n"
+            + "  fi\n"
             + f"  dk swarm join --advertise-addr {_shq(advertise)} --token {_shq(token)} {_shq(master + ':2377')}\n"
             + "fi\n"
             + "echo \"PSKIT_NODE=$(dk info --format '{{.Name}}')\"\n"
+            + "echo \"PSKIT_NODE_ID=$(dk info --format '{{.Swarm.NodeID}}')\"\n"
         )
     if orchestrator == "kubernetes":
+        env = "/etc/systemd/system/k3s-agent.service.env"
+        url = "https://" + master + ":6443"
         return (
             _header(secret=True)
-            + "if need k3s; then\n"
-            + '  echo "k3s is already installed here"\n'
+            + "if [ -x /usr/local/bin/k3s-uninstall.sh ]; then\n"
+            + '  echo "pskit: this server runs a Kubernetes (k3s) server of its own. Remove that cluster first,'
+            + ' or run: /usr/local/bin/k3s-uninstall.sh" >&2\n'
+            + "  exit 1\n"
+            + "fi\n"
+            + f"if as_root grep -qF {_shq(url)} {env} 2>/dev/null && as_root grep -qF {_shq(token)} {env}"
+            + " && as_root systemctl is-active --quiet k3s-agent; then\n"
+            + '  echo "already in this cluster"\n'
             + "else\n"
-            + f"  curl -sfL {K3S_INSTALL} | as_root env K3S_URL={_shq('https://' + master + ':6443')}"
+            + "  if [ -x /usr/local/bin/k3s-agent-uninstall.sh ]; then\n"
+            + '    echo "pskit: removing the old k3s agent first"\n'
+            + "    as_root /usr/local/bin/k3s-agent-uninstall.sh || true\n"
+            + "  fi\n"
+            + f"  curl -sfL {K3S_INSTALL} | as_root env K3S_URL={_shq(url)}"
             + f" K3S_TOKEN={_shq(token)} INSTALL_K3S_EXEC={_shq('agent --node-external-ip ' + advertise)} sh -\n"
             + "fi\n"
             + "echo \"PSKIT_NODE=$(hostname | tr 'A-Z' 'a-z')\"\n"
@@ -168,6 +208,20 @@ def forget_script(orchestrator: str, node: str, node_id: str = "") -> str:
     if orchestrator == "kubernetes":
         return _header() + f"as_root k3s kubectl delete node {n} --ignore-not-found\n"
     return _header() + f"curl -fsS -X PUT http://127.0.0.1:4646/v1/node/{_shq(node_id)}/purge >/dev/null || true\n"
+
+
+def forget_stale_script(orchestrator: str, node: str, keep_id: str) -> str:
+    """Runs on the master after ``node`` (re)joined: remove older, down entries of the same host name, left when
+    the server was removed while unreachable or its swarm state was reset. Only Swarm keeps such entries."""
+    if orchestrator != "swarm" or not keep_id:
+        return _header()
+    return _header() + (
+        "for id in $(dk node ls -q); do\n"
+        f"  [ \"$id\" = {_shq(keep_id)} ] && continue\n"
+        "  set -- $(dk node inspect \"$id\" --format '{{.Description.Hostname}} {{.Status.State}}' 2>/dev/null)\n"
+        f"  if [ \"${{1:-}}\" = {_shq(node)} ] && [ \"${{2:-}}\" = down ]; then dk node rm --force \"$id\" || true; fi\n"
+        "done\n"
+    )
 
 
 def status_script(orchestrator: str, stack_prefix: str = "pskit-") -> str:
@@ -462,6 +516,17 @@ def scale_script(orchestrator: str, stack: str, replicas: int, nomad_job_now: Op
 
 
 # ---------------------------------------------------------------------------------------------- helpers
+def _swarm_locked_check() -> str:
+    """A locked swarm manager needs its unlock key; pskit never leaves it (that would drop the swarm's data)."""
+    return (
+        'if [ "$state" = "locked" ]; then\n'
+        '  echo "pskit: this server\'s swarm is locked. Run docker swarm unlock, or docker swarm leave --force,'
+        ' and retry" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+    )
+
+
 def _wait(check: str, seconds: int, message: str, *, fail: bool = True) -> str:
     """Retry ``check`` every 2 s for ``seconds``; then fail with ``message`` (or only warn)."""
     end = f'  echo "pskit: {message}" >&2\n' + ("  exit 1\n" if fail else "")

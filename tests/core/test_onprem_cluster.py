@@ -92,6 +92,8 @@ def test_every_script_is_valid_sh(orch):
         scripts.leave_script(orch),
         scripts.drain_script(orch, "node-b", "id-1"),
         scripts.forget_script(orch, "node-b", "id-1"),
+        scripts.forget_stale_script(orch, "node-b", "id-1"),
+        scripts.join_script(orch, "10.0.0.5", "tok", "10.0.0.6", members=["abc", "def"]),
         scripts.status_script(orch),
         scripts.image_load_script(orch, "img:1", "pskit-cluster/img.tar"),
         scripts.prune_script(orch, "pskit-shop-dev", "abc"),
@@ -118,6 +120,95 @@ def test_scripts_install_and_join_each_orchestrator():
     worker = scripts.join_script("nomad", "10.0.0.5", "", "10.0.0.6")
     assert "server {" not in worker and 'http = "10.0.0.6"' in worker
     assert scripts.stack_name("Shop_API", "Dev") == "pskit-shop-api-dev"
+
+
+def _run_swarm_join(tmp_path: Path, state: str, manager: str, node_id: str, members: List[str],
+                    others: int = 0, services: int = 0) -> Tuple[int, str, List[str]]:
+    """Run the swarm join script against a fake ``docker`` that reports the given swarm state."""
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("no POSIX sh here")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker.log"
+    fake = (
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{log.as_posix()}"\n'
+        'case "$1 $2" in\n'
+        f"  'info --format') case \"$3\" in *LocalNodeState*) echo '{state} {manager} {node_id}' ;;"
+        f" *NodeID*) echo new-id ;; *) echo node-x ;; esac ;;\n"
+        f"  'node ls') i=0; echo '{node_id}'; while [ $i -lt {others} ]; do echo other$i; i=$((i+1)); done ;;\n"
+        f"  'service ls') i=0; while [ $i -lt {services} ]; do echo svc$i; i=$((i+1)); done ;;\n"
+        "esac\nexit 0\n"
+    )
+    for name, text in (("docker", fake), ("curl", "#!/bin/sh\nexit 0\n")):
+        path = bin_dir / name
+        path.write_bytes(text.encode("utf-8"))
+        path.chmod(0o755)
+    script = tmp_path / "join.sh"
+    script.write_bytes(scripts.join_script("swarm", "10.0.0.5", "SWMTKN", "10.0.0.6", members=members)
+                       .encode("utf-8"))
+    env = {"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin", "HOME": tmp_path.as_posix()}
+    proc = subprocess.run([sh, script.as_posix()], capture_output=True, env=env, timeout=60)
+    calls = log.read_text("utf-8").splitlines() if log.exists() else []
+    return proc.returncode, proc.stdout.decode() + proc.stderr.decode(), calls
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+@pytest.mark.parametrize("state,manager,node_id,members,leaves,joins,ok", [
+    ("inactive", "false", "", ["m1"], False, True, True),         # fresh server
+    ("pending", "false", "old", ["m1"], True, True, True),        # a join that stopped half way
+    ("error", "false", "old", ["m1"], True, True, True),          # removed from the swarm while it was off
+    ("active", "false", "old", ["m1"], True, True, True),         # worker of a swarm set up again / another swarm
+    ("active", "false", "w1", ["m1", "w1"], False, False, True),  # already a member: nothing to do
+    ("active", "true", "solo", ["m1"], True, True, True),         # empty single-node swarm of its own
+    ("locked", "false", "x", ["m1"], False, False, False),        # needs its unlock key
+])
+def test_swarm_join_recovers_from_stale_membership(tmp_path, state, manager, node_id, members, leaves, joins, ok):
+    code, out, calls = _run_swarm_join(tmp_path, state, manager, node_id, members)
+    assert (code == 0) == ok, out
+    assert any(c.startswith("swarm leave") for c in calls) == leaves, calls
+    assert any(c.startswith("swarm join") for c in calls) == joins, calls
+    if ok:
+        assert "PSKIT_NODE_ID=new-id" in out
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_swarm_join_refuses_to_break_another_swarm(tmp_path):
+    code, out, calls = _run_swarm_join(tmp_path, "active", "true", "boss", ["m1"], others=2, services=1)
+    assert code == 1 and "manages another swarm (2 other node(s), 1 service(s))" in out
+    assert not any(c.startswith(("swarm leave", "swarm join")) for c in calls)
+
+
+def test_rejoin_scripts_clean_up_old_state():
+    master = scripts.master_script("swarm", "10.0.0.5")
+    assert "dk swarm leave --force" in master and '"$state" = "pending"' in master
+    k3s = scripts.join_script("kubernetes", "10.0.0.5", "K10abc", "10.0.0.6")
+    assert "k3s-agent-uninstall.sh" in k3s and "grep -qF 'K10abc'" in k3s and "k3s-uninstall.sh ]" in k3s
+    stale = scripts.forget_stale_script("swarm", "node-b", "id-1")
+    assert "dk node rm --force" in stale and "'id-1'" in stale
+    assert "node rm" not in scripts.forget_stale_script("kubernetes", "node-b", "id-1")
+    assert "PSKIT_MEMBERS=" in scripts.join_token_script("swarm")
+
+
+def test_join_server_passes_members_and_forgets_stale_nodes(servers):
+    class SSH(FakeSSH):
+        def __call__(self, argv, stdout):
+            command = argv[-1]
+            if command.startswith("sh pskit-cluster/token.sh"):
+                self.calls.append(argv)
+                return 0, "PSKIT_TOKEN=SWMTKN-1-secret\nPSKIT_MEMBERS=m-id w-old \n"
+            if command.startswith("sh pskit-cluster/join.sh"):
+                self.calls.append(argv)
+                return 0, "PSKIT_NODE=node-b\nPSKIT_NODE_ID=w-new\n"
+            return super().__call__(argv, stdout)
+
+    ssh = SSH()
+    clu.create_cluster(servers, "fun", "swarm", "edge1", lambda _m: None, run=ssh)
+    clu.join_server(servers, "fun", "edge2", lambda _m: None, run=ssh)
+    assert "members='m-id w-old'" in ssh.script("dk swarm join")
+    stale = ssh.script("dk node rm --force \"$id\"")
+    assert "'w-new'" in stale and "'node-b'" in stale
 
 
 def test_workloads_split_main_and_web():

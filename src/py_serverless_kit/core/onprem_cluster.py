@@ -257,13 +257,18 @@ def join_server(root: Path, name: str, server: str, emit: Emit, *, advertise: st
     emit(f"Asking {cluster['master']} for a join token ...")
     out = _script(master, scripts.join_token_script(orch), emit, run, label="token", show=False)
     token = (_values(out, "PSKIT_TOKEN") or [""])[-1]
+    members = (_values(out, "PSKIT_MEMBERS") or [""])[-1].split()
     if orch != "nomad" and not token:
         raise ClusterError(f"the master {cluster['master']} gave no join token: {out.strip()[-300:]}")
     emit(f"Installing {ORCHESTRATORS[orch]['label']} on {server} ({addr}) and joining {name} ...")
     version = str(cluster.get("nomad_version") or scripts.NOMAD_VERSION)
-    out = _script(target, scripts.join_script(orch, str(cluster["advertise"]), token, addr, version), emit, run,
-                  label="join")
+    out = _script(target, scripts.join_script(orch, str(cluster["advertise"]), token, addr, version, members), emit,
+                  run, label="join")
     node = (_values(out, "PSKIT_NODE") or [str(target["host"])])[-1]
+    node_id = (_values(out, "PSKIT_NODE_ID") or [""])[-1]
+    if orch == "swarm" and node_id:
+        _script(master, scripts.forget_stale_script(orch, node, node_id), emit, run, label="forget-stale",
+                show=False, check=False)
     deployments = dict(cluster.get("deployments") or {})
     for dep in (d for _k, d in sorted(deployments.items())):
         if dep.get("image"):
