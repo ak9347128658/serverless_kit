@@ -356,6 +356,8 @@ export interface OnPremServer {
 /** Where an on-prem stage was last deployed (`GET /api/onprem-servers?stage=`). */
 export interface OnPremDeployed {
   server: string | null;
+  /** A scaling cluster deploy: its name (server is then the master). */
+  cluster?: string | null;
   method: string;
   host: string | null;
   label: string;
@@ -402,7 +404,10 @@ export interface ResourcePage {
 }
 
 export interface OnPremTarget {
-  method: "local" | "ssh";
+  /** Absent for a cluster target ({cluster, server?}). */
+  method?: "local" | "ssh";
+  /** A scaling cluster: the resource runs on one of its servers (`server`, or the one with the most free memory). */
+  cluster?: string;
   host?: string;
   user?: string;
   port?: number;
@@ -531,6 +536,17 @@ export interface ClusterNodeStatus {
   availability: string;
   over: string[];
   full: boolean;
+  /** Keys of the on-prem services running on this server. */
+  resources?: string[];
+}
+
+export interface ClusterResource {
+  key: string;
+  service: string;
+  kind: string;
+  server: string;
+  address?: string;
+  port?: number;
 }
 
 export interface ClusterStatus {
@@ -539,6 +555,7 @@ export interface ClusterStatus {
   capacity: { cpu: number; memory: number; disk: number };
   nodes: ClusterNodeStatus[];
   workloads: { name: string; running: number; desired: number }[];
+  resources?: ClusterResource[];
   pending: string[];
   full: boolean;
   reasons: string[];

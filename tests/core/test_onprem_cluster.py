@@ -291,10 +291,100 @@ def test_send_alert_records_errors(servers, monkeypatch):
 
 
 # ------------------------------------------------------------------------------------------- deploy
+def test_deploy_target_is_one_server_or_a_cluster(servers):
+    from py_serverless_kit.core import onprem_control as ctl
+
+    clu.create_cluster(servers, "prod", "swarm", "edge1", lambda _l: None, run=FakeSSH())
+    # --cluster on a project without options.cluster; replicas from pskit.yml are kept when another name is given
+    options: dict = {"deploy": {"method": "local"}}
+    assert srv.resolve_deploy(options, servers, "dev", cluster="prod") == "edge1"
+    assert options["cluster"]["name"] == "prod" and options["deploy"]["method"] == "docker"
+    options = {"cluster": {"name": "old", "replicas": 4}}
+    srv.resolve_deploy(options, servers, "dev", cluster="prod")
+    assert options["cluster"]["replicas"] == 4 and options["cluster"]["name"] == "prod"
+    # --server wins over options.cluster: one machine
+    options = {"cluster": "prod", "deploy": {"python": "bundle"}}
+    assert srv.resolve_deploy(options, servers, "dev", "edge3") == "edge3"
+    assert "cluster" not in options and options["deploy"]["host"] == "10.0.0.7"
+    with pytest.raises(srv.ServerError, match="pick one"):
+        srv.resolve_deploy({}, servers, "dev", "edge2", "prod")
+
+    # the stage remembers the cluster of its last deploy
+    work = servers / ".pskit" / "onprem-dev"
+    (work / "onprem_app").mkdir(parents=True)
+    (work / "onprem_app" / "pskit_host.json").write_text(json.dumps(
+        {"port": 8080, "deploy": {"method": "cluster", "ssh": {"host": "10.0.0.5", "user": "root"}}}), "utf-8")
+    data = ctl.remember_deploy(work, "edge1", "prod")
+    assert srv.deployed_cluster(servers, "dev") == "prod" and srv.deployed_server(servers, "dev") == "edge1"
+    assert ctl.deployed_on(data["spec"], "edge1", "prod")["label"] == "cluster prod (master edge1 (10.0.0.5))"
+    options = {"deploy": {"method": "local"}}
+    assert srv.resolve_deploy(options, servers, "dev") == "edge1" and options["cluster"]["name"] == "prod"
+    options = {}
+    assert srv.resolve_deploy(options, servers, "dev", srv.LOCAL) is None and "cluster" not in options
+    clu.remove_cluster(servers, "prod", lambda _l: None)
+    with pytest.raises(srv.ServerError, match="no longer exists"):
+        srv.resolve_deploy({}, servers, "dev")
+
+
+def test_studio_passes_the_cluster_to_deploy():
+    from py_serverless_kit.studio.jobs import StudioError, build_argv
+
+    assert build_argv("deploy", "onprem", "dev", {"cluster": "prod"}) == ["deploy", "--provider", "onprem",
+                                                                          "--stage", "dev", "--cluster", "prod"]
+    with pytest.raises(StudioError):
+        build_argv("deploy", "onprem", "dev", {"cluster": "prod", "server": "edge1"})
+    with pytest.raises(StudioError):
+        build_argv("deploy", "onprem", "dev", {"cluster": "Bad Name"})
+
+
+def test_resources_are_placed_on_the_freest_cluster_server(servers):
+    from py_serverless_kit.core import onprem_services as svc
+
+    # edge1 90 % cpu (over), edge2 25 % memory, edge3 50 % memory
+    fake = FakeSSH({"10.0.0.5": (STAT_B, 3000000), "10.0.0.6": (STAT_A.replace("800", "900"), 3000000),
+                    "10.0.0.7": (STAT_A.replace("800", "900"), 2000000)})
+    clu.create_cluster(servers, "prod", "swarm", "edge1", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge2", lambda _l: None, run=fake, advertise="192.168.1.6")
+    clu.join_server(servers, "prod", "edge3", lambda _l: None, run=fake)
+    assert clu.place(servers, "prod", run=fake)["server"] == "edge2"
+    assert clu.place(servers, "prod", "edge3")["server"] == "edge3"
+    assert clu.place(servers, "prod", measure=False)["server"] == "edge1"  # the studio's quick check: no SSH
+    with pytest.raises(clu.ClusterError, match="not in cluster"):
+        clu.place(servers, "prod", "elsewhere")
+
+    req = svc.check_request({"key": "cache", "service": "redis", "target": {"cluster": "prod"}}, servers, None,
+                            run=fake)
+    assert req["target"]["server"] == "edge2" and req["target"]["cluster"] == "prod"
+    assert req["address"] == "192.168.1.6"  # the cluster address, reached by replicas on every server
+    assert svc.describe_target(req["target"]) == "edge2 (root@10.0.0.6:22) in cluster prod"
+    raw = {"provider": {"name": "onprem", "options": {"cluster": {"name": "prod", "replicas": 3}}}}
+    assert svc.default_target(raw) == {"cluster": "prod"}
+    assert svc.functions_target(raw, servers)["server"] == "edge1"
+
+    state = svc.load_state(servers)
+    state["services"]["cache"] = {"key": "cache", "service": "redis", "kind": "service", "target": req["target"],
+                                  "address": req["address"], "port": 6379}
+    svc.save_state(servers, state)
+    fake.status_out = ""
+    current = clu.status(servers, "prod", run=fake)
+    assert current["resources"] == [{"key": "cache", "service": "redis", "kind": "service", "server": "edge2",
+                                     "address": "192.168.1.6", "port": 6379}]
+    assert {n["server"]: n["resources"] for n in current["nodes"]}["edge2"] == ["cache"]
+
+    lines: List[str] = []
+    clu.leave_server(servers, "prod", "edge2", lines.append, run=fake)
+    assert "cluster" not in svc.load_state(servers)["services"]["cache"]["target"]  # keeps running on edge2
+    assert any("cache (redis) on edge2" in line for line in lines)
+
+    fake.nodes = {"10.0.0.5": (STAT_B, 3000000)}  # edge1 over the cpu limit, edge3 unreachable
+    with pytest.raises(clu.ClusterError, match="over a capacity limit"):
+        clu.place(servers, "prod", run=fake)
+
+
 def test_options_cluster_targets_the_master(servers):
     clu.create_cluster(servers, "prod", "swarm", "edge1", lambda _l: None, run=FakeSSH())
     options = {"cluster": {"name": "prod", "replicas": 3}, "deploy": {"server": "edge2", "python": "bundle"}}
-    assert srv.resolve_deploy(options, servers, "dev", "edge3") == "edge1"  # the cluster wins over --server
+    assert srv.resolve_deploy(options, servers, "dev") == "edge1"
     assert options["cluster"] == {"name": "prod", "orchestrator": "swarm", "replicas": 3, "cpu": 0.25, "memory": 256}
     assert options["deploy"] == {"method": "docker", "host": "10.0.0.5", "user": "root", "port": 22, "server": "edge1",
                                  "python": "bundle", "auth": "agent"}

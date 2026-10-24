@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 SERVERS_FILE = Path(".pskit") / "onprem-servers.json"
 SERVER_ENV = "PSKIT_DEPLOY_SERVER"
+CLUSTER_ENV = "PSKIT_DEPLOY_CLUSTER"  # ``--cluster NAME``: deploy to that scaling cluster
 LOCAL = "local"  # ``--server local``: this machine, whatever the last deploy used
 DEPLOYED_FILE = "onprem_deployed.json"  # .pskit/onprem-<stage>/: where the last successful deploy went
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,62}$")
@@ -149,25 +150,43 @@ _LOGIN_KEYS = ("host", "user", "port", "ssh_port", "pem", "identity", "identity_
                "known_hosts", "server")
 
 
-def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Optional[str] = None) -> Optional[str]:
-    """Pick the machine ``onprem-<stage>`` deploys to, in place on ``options.deploy``. Returns the server name.
+def _use_cluster(options: Dict[str, Any], root: Path, name: Optional[str] = None) -> str:
+    """Point ``options`` at a scaling cluster (``name`` replaces the one in pskit.yml, keeping its replicas / cpu /
+    memory). Returns the master's server name."""
+    from .onprem_cluster import ClusterError, deploy_spec
 
-    ``server`` (``--server`` / ``PSKIT_DEPLOY_SERVER``) wins; ``local`` means this machine. Next comes
-    ``options.deploy`` in pskit.yml (``server``, ``host``, or a ``method`` other than local). Otherwise the stage goes back to the
-    saved server it was last deployed to, so a deploy from the studio's machine picker sticks for later
-    deploys, triggers, tests and logs.
+    if name:
+        current = options.get("cluster")
+        settings = dict(current) if isinstance(current, dict) else {}
+        options["cluster"] = {**settings, "name": name}
+    try:
+        deploy_spec(root, options)
+    except ClusterError as exc:
+        raise ServerError(str(exc)) from None
+    return str(options["deploy"]["server"])
 
-    ``options.cluster`` (a scaling cluster, ``core/onprem_cluster.py``) wins over all of these: the functions go to
-    the cluster, and the cluster's master becomes the SSH target used by logs and tests.
+
+def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Optional[str] = None,
+                   cluster: Optional[str] = None) -> Optional[str]:
+    """Pick where ``onprem-<stage>`` deploys to, in place on ``options.deploy``. Returns the server name.
+
+    ``cluster`` (``--cluster`` / ``PSKIT_DEPLOY_CLUSTER``) or ``server`` (``--server`` / ``PSKIT_DEPLOY_SERVER``) wins;
+    ``local`` means this machine. Next comes pskit.yml: ``options.cluster`` (a scaling cluster,
+    ``core/onprem_cluster.py``), then ``options.deploy`` (``server``, ``host``, or a ``method`` other than local).
+    Otherwise the stage goes back to where it was last deployed (a saved server or a cluster), so a deploy from
+    the studio's machine picker sticks for later deploys, triggers, tests and logs.
+
+    On a cluster the functions run on its servers, and the cluster's master becomes the SSH target used by logs
+    and tests. An explicit ``server`` deploys to that one machine even when pskit.yml names a cluster.
     """
-    if options.get("cluster"):
-        from .onprem_cluster import ClusterError, deploy_spec
-
-        try:
-            deploy_spec(root, options)
-        except ClusterError as exc:
-            raise ServerError(str(exc)) from None
-        return str(options["deploy"]["server"])
+    if cluster and server:
+        raise ServerError("pick one: --cluster NAME (several servers) or --server NAME (one server)")
+    if cluster:
+        return _use_cluster(options, root, cluster)
+    if server:
+        options.pop("cluster", None)
+    elif options.get("cluster"):
+        return _use_cluster(options, root)
     if server == LOCAL:
         deploy = options.get("deploy")
         kept = {k: v for k, v in deploy.items() if k not in _LOGIN_KEYS} if isinstance(deploy, dict) else {}
@@ -183,6 +202,16 @@ def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Opti
     )
     if configured:
         return apply_to_deploy(options, root)
+    remembered_cluster = deployed_cluster(root, stage)
+    if remembered_cluster:
+        from .onprem_cluster import load_clusters
+
+        if remembered_cluster not in load_clusters(root):
+            raise ServerError(
+                f"onprem-{stage} was last deployed to cluster {remembered_cluster!r}, which no longer exists. "
+                f"Pick where: --cluster NAME, --server NAME, or --server {LOCAL} for this machine"
+            )
+        return _use_cluster(options, root, remembered_cluster)
     remembered = deployed_server(root, stage)
     if not remembered:
         return None
@@ -194,14 +223,24 @@ def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Opti
     return apply_to_deploy(options, root, remembered)
 
 
-def deployed_server(root: Path, stage: str) -> Optional[str]:
-    """The saved server ``onprem-<stage>`` was last deployed to (None: this machine, an inline host, or never)."""
+def _deployed(root: Path, stage: str, key: str) -> Optional[str]:
     try:
         data = json.loads((root / ".pskit" / f"onprem-{stage}" / DEPLOYED_FILE).read_text("utf-8"))
     except (OSError, ValueError):
         return None
-    server = data.get("server") if isinstance(data, dict) else None
-    return str(server) if server else None
+    value = data.get(key) if isinstance(data, dict) else None
+    return str(value) if value else None
+
+
+def deployed_server(root: Path, stage: str) -> Optional[str]:
+    """The saved server ``onprem-<stage>`` was last deployed to (None: this machine, an inline host, or never).
+    For a cluster deploy this is the cluster's master."""
+    return _deployed(root, stage, "server")
+
+
+def deployed_cluster(root: Path, stage: str) -> Optional[str]:
+    """The scaling cluster ``onprem-<stage>`` was last deployed to (None: one machine, or never)."""
+    return _deployed(root, stage, "cluster")
 
 
 def apply_to_deploy(options: Dict[str, Any], root: Path, server: Optional[str] = None) -> Optional[str]:

@@ -61,6 +61,9 @@ def project_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     @click.option("--server", "server", default=None,
                   help="On premises: use this saved SSH server (pskit resources onprem servers list); 'local' "
                        "for this machine. Default: the server the stage was last deployed to.")
+    @click.option("--cluster", "cluster", default=None,
+                  help="On premises: run the functions on this scaling cluster (pskit cluster list) instead of one "
+                       "server. Default: options.cluster, else where the stage was last deployed.")
     @click.option("-v", "--verbose", is_flag=True, help="Show tracebacks on errors.")
     @functools.wraps(fn)
     def wrapper(
@@ -70,15 +73,22 @@ def project_options(fn: Callable[..., Any]) -> Callable[..., Any]:
         stage: Optional[str],
         region: Optional[str],
         server: Optional[str],
+        cluster: Optional[str],
         verbose: bool,
         **kwargs: Any,
     ) -> Any:
         from ..core.project import Project
 
+        if server and cluster:
+            raise click.UsageError("pick one: --cluster NAME (several servers) or --server NAME (one server)")
         if server:
             from ..core.onprem_servers import SERVER_ENV
 
             os.environ[SERVER_ENV] = server
+        if cluster:
+            from ..core.onprem_servers import CLUSTER_ENV
+
+            os.environ[CLUSTER_ENV] = cluster
         try:
             project = Project.load(config_path, provider=provider, stage=stage, region=region)
             return fn(project, *args, **kwargs)
@@ -117,6 +127,7 @@ Deploy
   package     Build zip + Terraform only      pskit package -s dev
   plan        terraform plan                  pskit plan --destroy
   deploy      Package and apply               pskit deploy -s prod --confirm
+                                              pskit deploy --cluster prod   (on premises: on a scaling cluster)
   info        What is deployed (URLs, ids)    pskit info --refresh
   remove      Destroy the stage               pskit remove -s dev --yes
   tf          Any terraform command           pskit tf -- state list
@@ -715,6 +726,7 @@ def resources_onprem() -> None:
       pskit resources onprem create py --service python --ssh ubuntu@10.0.0.5 --pem key.pem
       pskit resources onprem servers add edge1 --ssh ubuntu@10.0.0.5 --pem key.pem
       pskit resources onprem create node --service nodejs --version 22 --server edge1
+      pskit resources onprem create cache --service redis --cluster prod   # the server with the most free memory
       pskit resources onprem console cache "INFO server"
       pskit resources onprem terminal --server edge1
       pskit resources onprem status jobs
@@ -795,6 +807,10 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--sudo", is_flag=True, help="Run docker / installs with sudo -n on the server.")
 @click.option("--local", "local", is_flag=True, help="Create it on this machine even if the functions deploy over SSH.")
 @click.option("--server", "server", default=None, help="A saved SSH server (pskit resources onprem servers list).")
+@click.option("--cluster", "cluster", default=None,
+              help="Run it on a server of this scaling cluster (default with options.cluster): the one with the most "
+                   "free memory, or --node.")
+@click.option("--node", "node", default=None, help="With --cluster: the cluster's saved server to run it on.")
 @click.option("--version", "version", default=None, help="Software version to install (nodejs 22 / 20 / 18, java 21, go ...).")
 @click.option("--user", "login", default=None, help="User to create (default: pskit; Redis / Valkey: default).")
 @click.option("--password", default=None, help="Password to set (default: a generated one). Prefer --password-env.")
@@ -832,6 +848,8 @@ def resources_onprem_create(  # noqa: PLR0913
     gui_login: Optional[str],
     gui_password_env: Optional[str],
     server: Optional[str],
+    cluster: Optional[str],
+    node: Optional[str],
     version: Optional[str],
     domains: Optional[str],
     functions_url: Optional[str],
@@ -845,8 +863,14 @@ def resources_onprem_create(  # noqa: PLR0913
 
     root, path, raw = _raw_project(config_path)
     target: Optional[dict] = None
+    if node and not cluster:
+        raise click.ClickException("--node goes with --cluster NAME")
+    if cluster and (local or server or ssh):
+        raise click.ClickException("pick one place: --cluster, --server, --ssh or --local")
     if local:
         target = {"method": "local"}
+    elif cluster:
+        target = {"cluster": cluster, **({"server": node} if node else {}), **({"sudo": True} if sudo else {})}
     elif server:
         target = {"server": server, **({"sudo": True} if sudo else {})}
     elif ssh:
@@ -1350,8 +1374,10 @@ def cluster() -> None:
       pskit cluster scale prod --replicas 6
       pskit cluster leave prod edge2
 
-    Functions use it with provider.options.cluster in pskit.yml (cluster: prod, or {name: prod, replicas: 3}).
-    Saved servers come from: pskit resources onprem servers add. Resources stay on one server.
+    Functions use it with provider.options.cluster in pskit.yml (cluster: prod, or {name: prod, replicas: 3}),
+    or per deploy: pskit deploy --cluster prod (the stage remembers it; pskit deploy --server NAME goes back to one
+    server). Resources run on one server of it: pskit resources onprem create cache --service redis --cluster prod.
+    Saved servers come from: pskit resources onprem servers add.
     """
 
 
@@ -1458,6 +1484,8 @@ def _print_cluster_status(current: dict) -> None:
     echo(f"  limits: cpu {cap['cpu']}%  memory {cap['memory']}%  disk {cap['disk']}%")
     for w in current["workloads"]:
         echo(f"  workload {w['name']}: {w['running']}/{w['desired']} running")
+    for r in current.get("resources") or []:
+        echo(f"  resource {r['key']} ({r['service']}) on {r['server']}  {r.get('address') or ''}:{r.get('port') or ''}")
     for item in current["pending"]:
         echo(f"  pending  {item}")
     if current["full"]:

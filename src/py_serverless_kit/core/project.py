@@ -16,14 +16,15 @@ WORK_DIR = ".pskit"
 
 
 def _apply_saved_server(options: Dict[str, Any], root: Path, stage: str) -> None:
-    """``--server NAME`` / ``deploy: {server: NAME}`` / the server of the last deploy becomes the deploy target."""
+    """``--server`` / ``--cluster`` / ``deploy: {server: NAME}`` / ``cluster: NAME`` / the last deploy's target becomes
+    the deploy target."""
     import os
 
     from ..config.loader import ConfigError
-    from .onprem_servers import SERVER_ENV, ServerError, resolve_deploy
+    from .onprem_servers import CLUSTER_ENV, SERVER_ENV, ServerError, resolve_deploy
 
     try:
-        resolve_deploy(options, root, stage, os.environ.get(SERVER_ENV) or None)
+        resolve_deploy(options, root, stage, os.environ.get(SERVER_ENV) or None, os.environ.get(CLUSTER_ENV) or None)
     except ServerError as exc:
         raise ConfigError(str(exc)) from None
 

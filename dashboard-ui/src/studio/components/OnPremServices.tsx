@@ -3,7 +3,7 @@ import { Drawer } from "../../components/Drawer";
 import { api, errorMessage } from "../api";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
-import type { JsonObject, OnPremCatalogItem, OnPremServer, OnPremService, OnPremServicesState, OnPremTarget } from "../types";
+import type { JsonObject, OnPremCatalogItem, OnPremCluster, OnPremServer, OnPremService, OnPremServicesState, OnPremTarget } from "../types";
 import { asObject, NAME_RE, uniqueName } from "../util";
 import { JobConsole } from "./Console";
 import { Markdown } from "./Markdown";
@@ -272,13 +272,27 @@ export function CreateDrawer({
   );
   const [key, setKey] = useState("");
   const [role, setRole] = useState("");
-  const [target, setTarget] = useState<OnPremTarget>(server || state.default_target.method === "ssh" ? { method: "ssh" } : { method: "local" });
+  const defaultCluster = !server && state.default_target.cluster ? state.default_target.cluster : "";
+  // Where: this machine, one SSH server, or a server of a scaling cluster (the functions' cluster by default).
+  const [where, setWhere] = useState<"local" | "ssh" | "cluster">(defaultCluster ? "cluster" : server || state.default_target.method === "ssh" ? "ssh" : "local");
+  const [target, setTarget] = useState<OnPremTarget>(where !== "local" ? { method: "ssh" } : { method: "local" });
   const [servers, setServers] = useState<OnPremServer[]>([]);
-  const [savedServer, setSavedServer] = useState<string>(server || state.default_target.server || "");
+  const [savedServer, setSavedServer] = useState<string>(server || (defaultCluster ? "" : state.default_target.server || ""));
+  const [clusters, setClusters] = useState<OnPremCluster[]>([]);
+  const [clusterName, setClusterName] = useState(defaultCluster);
+  const [clusterNode, setClusterNode] = useState("");
   const [version, setVersion] = useState("");
   useEffect(() => {
     api.onpremServers().then((r) => setServers(r.servers), () => undefined);
-  }, []);
+    api.clusters().then(
+      (r) => {
+        setClusters(r.clusters);
+        if (!defaultCluster && r.clusters.length === 1) setClusterName(r.clusters[0].name);
+      },
+      () => undefined,
+    );
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const cluster = clusters.find((c) => c.name === clusterName);
   const [ssh, setSsh] = useState<OnPremTarget>({ method: "ssh", user: "root", port: 22, ...(state.default_target.method === "ssh" ? state.default_target : {}) });
   const [port, setPort] = useState<number | undefined>(undefined);
   const [address, setAddress] = useState("");
@@ -327,7 +341,10 @@ export function CreateDrawer({
       ),
     );
     setVersion("");
-    if (c.kind === "runtime") setTarget(ssh);
+    if (c.kind === "runtime") {
+      setTarget(ssh);
+      setWhere((w) => (w === "local" ? "ssh" : w));
+    }
   };
   useEffect(() => {
     if (initial) choose(initial);
@@ -350,7 +367,11 @@ export function CreateDrawer({
   const loginError = login && !/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(login) ? "3-64 characters, starting with a letter" : null;
   const keyError = !NAME_RE.test(key) ? "letters, digits, - and _; start with a letter" : taken.includes(key) ? "already used" : null;
   const sshError =
-    target.method === "ssh" && savedServer
+    where === "cluster"
+      ? clusterName
+        ? null
+        : "pick a cluster (Scaling cluster page)"
+      : target.method === "ssh" && savedServer
       ? null
       : target.method === "ssh" && !(ssh.host || "").trim()
       ? "the server's host name or IP"
@@ -380,7 +401,14 @@ export function CreateDrawer({
     if (sshAuth !== "key") delete sshTarget.identity_file;
     if (sshAuth === "password" && sshPassword) sshTarget.password = sshPassword;
     if (sshAuth !== "password") delete sshTarget.password_file;
-    const chosen: OnPremTarget = target.method !== "ssh" ? { method: "local" } : savedServer ? { method: "ssh", server: savedServer } : sshTarget;
+    const chosen: OnPremTarget =
+      where === "cluster"
+        ? { cluster: clusterName, ...(clusterNode ? { server: clusterNode } : {}) }
+        : target.method !== "ssh"
+          ? { method: "local" }
+          : savedServer
+            ? { method: "ssh", server: savedServer }
+            : sshTarget;
     const body: JsonObject = { key, service: item.id, target: chosen as unknown as JsonObject };
     if (item.kind === "runtime" && version) body.version = version;
     if (role) body.role = role;
@@ -491,22 +519,60 @@ export function CreateDrawer({
           <FormRow
             label="Where"
             help={
-              target.method === "ssh"
+              where === "cluster"
+                ? "One server of a scaling cluster runs it (with its data volume), and the function replicas on every server of the cluster reach it at that server's cluster address. Not replicated: one instance, like on a single server."
+                : target.method === "ssh"
                 ? "Any server you can reach with OpenSSH: the functions' server or a different one. Docker is installed there when missing."
                 : "Docker on this machine. Functions deployed elsewhere cannot reach 127.0.0.1; use an SSH server for them."
             }
           >
             <Segmented
               label="Where"
-              value={target.method}
-              onChange={(m) => setTarget(m === "ssh" ? ssh : { method: "local" })}
+              value={where}
+              onChange={(m) => {
+                const next = m as "local" | "ssh" | "cluster";
+                setWhere(next);
+                setTarget(next === "local" ? { method: "local" } : ssh);
+              }}
               options={[
                 { value: "local", label: "This machine", disabled: item.kind === "runtime" },
-                { value: "ssh", label: "SSH server" },
+                { value: "ssh", label: "One SSH server" },
+                { value: "cluster", label: "Scaling cluster", disabled: !clusters.length && !defaultCluster },
               ]}
             />
           </FormRow>
-          {target.method === "ssh" && (
+          {where === "cluster" && (
+            <>
+              <FormRow label="Cluster" error={clusterName ? null : sshError} help={!clusters.length ? "Create one on the Scaling cluster page first." : undefined}>
+                <EnumSelect
+                  value={clusterName}
+                  onChange={(v) => {
+                    setClusterName(v);
+                    setClusterNode("");
+                  }}
+                  options={[
+                    ...(clusterName ? [] : [{ value: "", label: "Pick a cluster…" }]),
+                    ...clusters.map((c) => ({ value: c.name, label: `${c.name} (${c.orchestrator_label}, ${c.nodes.length} server${c.nodes.length === 1 ? "" : "s"})` })),
+                    ...(clusterName && !cluster ? [{ value: clusterName, label: `${clusterName} (not found)` }] : []),
+                  ]}
+                />
+              </FormRow>
+              <FormRow
+                label="Server in the cluster"
+                help="Auto picks the reachable server with the most free memory that is under every capacity limit, when the job starts. Pick one to keep it next to other services."
+              >
+                <EnumSelect
+                  value={clusterNode}
+                  onChange={setClusterNode}
+                  options={[
+                    { value: "", label: "Auto: the server with the most free memory" },
+                    ...(cluster?.nodes || []).map((n) => ({ value: n.server, label: `${n.server} (${n.role}, ${n.address})` })),
+                  ]}
+                />
+              </FormRow>
+            </>
+          )}
+          {where === "ssh" && (
             <FormRow label="Server" help="A saved server (Servers below), or a new connection typed here.">
               <EnumSelect
                 value={savedServer}
@@ -528,7 +594,7 @@ export function CreateDrawer({
               </div>
             </FormRow>
           )}
-          {target.method === "ssh" && !savedServer && (
+          {where === "ssh" && !savedServer && (
             <div className="driver-box card card-pad">
               <FormRow label="Host" required error={sshError}>
                 <TextInput mono value={ssh.host || ""} placeholder="10.0.0.5" onChange={(v) => setSsh((s) => ({ ...s, host: v }))} />
@@ -699,7 +765,7 @@ export function CreateDrawer({
               <details className="advanced">
                 <summary>Advanced</summary>
                 <FormRow label="Address functions use" help="Default: the SSH host, or 127.0.0.1 here. Set a private IP or DNS name if different.">
-                  <TextInput mono value={address} onChange={setAddress} placeholder={target.method === "ssh" ? ssh.host || "" : "127.0.0.1"} />
+                  <TextInput mono value={address} onChange={setAddress} placeholder={where === "cluster" ? "the server's cluster address" : target.method === "ssh" ? ssh.host || "" : "127.0.0.1"} />
                 </FormRow>
                 <FormRow label="Docker image">
                   <TextInput mono value={image} onChange={setImage} placeholder={item.image || ""} />

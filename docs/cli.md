@@ -204,6 +204,10 @@ Scale on-prem functions over a master plus joined servers (Docker Swarm, Kuberne
 | `cluster scale NAME --replicas N [--stack S] [-s STAGE]` | web replicas now (keep it in `options.cluster.replicas`) |
 | `cluster list [--json]` / `cluster remove NAME [--yes]` | list / forget clusters |
 
+`pskit deploy | package | plan | remove | info --cluster NAME` runs the functions on that cluster instead of one server
+(`--server NAME` goes back to one server; the stage remembers either). `pskit resources onprem create KEY --service S
+--cluster NAME [--node SERVER]` places a resource on a server of the cluster.
+
 ## `pskit client`
 
 Call the deployed on-prem host from scripts. Details: [client.md](client.md).

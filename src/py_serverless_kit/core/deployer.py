@@ -228,11 +228,14 @@ class Deployer:
         """Keep the machine this stage now runs on: trigger, logs, test and the next deploy default to it."""
         from .onprem_control import deployed_on, remember_deploy
 
-        deploy = self.project.config.provider.options.get("deploy")
+        options = self.project.config.provider.options
+        deploy = options.get("deploy")
         server = str(deploy.get("server") or "") if isinstance(deploy, dict) else ""
-        data = remember_deploy(self.project.work_dir, server or None)
+        cluster = options.get("cluster")
+        name = str(cluster.get("name") or "") if isinstance(cluster, dict) else ""
+        data = remember_deploy(self.project.work_dir, server or None, name or None)
         if data is not None:
-            record["deployed_on"] = deployed_on(data["spec"], data["server"])
+            record["deployed_on"] = deployed_on(data["spec"], data["server"], data.get("cluster"))
 
     def load_record(self) -> Optional[Dict[str, Any]]:
         path = self.project.work_dir / RECORD_FILE

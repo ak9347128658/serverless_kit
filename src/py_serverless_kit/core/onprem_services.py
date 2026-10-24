@@ -650,11 +650,16 @@ def catalog() -> List[Dict[str, Any]]:
 
 
 def default_target(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """The functions' SSH server when ``provider.options.deploy`` targets one, else this machine."""
+    """The functions' scaling cluster (``provider.options.cluster``) or SSH server (``options.deploy``), else this
+    machine. A cluster target (``{"cluster": NAME}``) is placed on one of its servers by :func:`check_request`."""
     provider = (raw or {}).get("provider") or {}
     options = provider.get("options") if provider.get("name") == "onprem" else None
     if options is None:
         options = ((((raw or {}).get("providers") or {}).get("onprem") or {}).get("provider") or {}).get("options")
+    cluster = (options or {}).get("cluster") if isinstance(options, dict) else None
+    name = cluster.get("name") if isinstance(cluster, dict) else cluster
+    if isinstance(name, str) and name:
+        return {"cluster": name}
     deploy = (options or {}).get("deploy") if isinstance(options, dict) else None
     if isinstance(deploy, dict) and deploy.get("server") and not deploy.get("host"):
         return {"method": "ssh", "server": str(deploy["server"])}      # a saved server, resolved with the root
@@ -832,8 +837,41 @@ def install_ssh_key(
 def describe_target(target: Dict[str, Any]) -> str:
     if target.get("method") == "ssh":
         where = f"{target.get('user')}@{target.get('host')}:{target.get('port', 22)}"
-        return f"{target['server']} ({where})" if target.get("server") else where
+        label = f"{target['server']} ({where})" if target.get("server") else where
+        return f"{label} in cluster {target['cluster']}" if target.get("cluster") else label
+    if target.get("cluster"):
+        return f"cluster {target['cluster']}"
     return "this machine"
+
+
+def functions_target(raw: Optional[Dict[str, Any]], root: Path) -> Dict[str, Any]:
+    """Where the functions' host answers from pskit.yml: its SSH server, a cluster's master, or this machine."""
+    target = default_target(raw)
+    if target.get("cluster"):
+        from .onprem_cluster import ClusterError, get_cluster
+
+        try:
+            master = str(get_cluster(root, str(target["cluster"]))["master"])
+        except ClusterError as exc:
+            raise ServiceError(str(exc)) from None
+        return normalize_target({"server": master}, root)
+    return normalize_target(target, root)
+
+
+def cluster_target(root: Path, raw: Dict[str, Any], *, run: Optional[RunFn] = None,
+                   measure: bool = True) -> Tuple[Dict[str, Any], str]:
+    """``{"cluster": NAME, "server": optional member}`` -> the saved server it runs on (tagged with the cluster) and
+    that server's cluster address. Without a server the one with the most free memory is picked."""
+    from .onprem_cluster import ClusterError, place
+
+    name = str(raw.get("cluster") or "")
+    try:
+        spot = place(root, name, str(raw.get("server") or ""), run=run, measure=measure)
+    except ClusterError as exc:
+        raise ServiceError(str(exc)) from None
+    target = normalize_target({"server": spot["server"], "sudo": raw.get("sudo")}, root)
+    target["cluster"] = name
+    return target, str(spot["address"] or "")
 
 
 def _ssh_argv(target: Dict[str, Any], command: str) -> List[str]:
@@ -984,15 +1022,23 @@ def _container_name(project: str, key: str) -> str:
     return base[:120]
 
 
-def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Validate a create request and fill in defaults. Raises :class:`ServiceError`."""
+def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]], *, run: Optional[RunFn] = None,
+                  place: bool = True) -> Dict[str, Any]:
+    """Validate a create request and fill in defaults. Raises :class:`ServiceError`.
+
+    A cluster target is placed on one of its servers (``place=False``: names checked only, no SSH)."""
     key = str(body.get("key") or "").strip()
     if not _NAME.match(key):
         raise ServiceError("key must start with a letter and use letters, digits, - or _ (max 63)")
     service = str(body.get("service") or "")
     if service not in SERVICES and service not in RUNTIMES:
         raise ServiceError(f"service must be one of {', '.join([*SERVICES, *RUNTIMES])}")
-    target = normalize_target(body.get("target") or default_target(raw), root)
+    wanted = body.get("target") or default_target(raw)
+    cluster_address = ""
+    if isinstance(wanted, dict) and wanted.get("cluster"):
+        target, cluster_address = cluster_target(root, wanted, run=run, measure=place)
+    else:
+        target = normalize_target(wanted, root)
     if service in RUNTIMES:
         if target["method"] != "ssh":
             raise ServiceError(f"{RUNTIMES[service]['label']} is installed on an SSH server; set target.method: ssh")
@@ -1020,7 +1066,8 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
     if address and (not _HOST.match(address) or address.startswith("-")):
         raise ServiceError("address must be a host name or IP address")
     if not address:
-        address = target["host"] if target["method"] == "ssh" else "127.0.0.1"
+        # On a cluster: the server's cluster address, which the replicas on every server reach.
+        address = cluster_address or (target["host"] if target["method"] == "ssh" else "127.0.0.1")
     bind = str(body.get("bind") or ("0.0.0.0" if target["method"] == "ssh" else "127.0.0.1"))  # noqa: S104
     if bind not in ("0.0.0.0", "127.0.0.1") and not re.match(r"^[0-9.]{7,15}$", bind):  # noqa: S104
         raise ServiceError("bind must be 0.0.0.0, 127.0.0.1 or an IPv4 address of the server")
@@ -1458,7 +1505,7 @@ def create(
     wait_seconds: float = 90,
 ) -> Dict[str, Any]:
     """Start the service (or install the runtime) and record it. Returns the state entry."""
-    req = check_request(body, root, raw)
+    req = check_request(body, root, raw, run=run)
     sh = _Runner(emit, run)
     target = req["target"]
     if run is None:

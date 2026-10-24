@@ -100,7 +100,8 @@ def _deployed_on(root: Path, stage: str) -> Optional[Dict[str, Any]]:
     data = deployed_host(root, stage)
     if data is None:
         return None
-    return {**deployed_on(data["spec"], data.get("server")), "deployed_at": data.get("deployed_at")}
+    return {**deployed_on(data["spec"], data.get("server"), data.get("cluster")),
+            "deployed_at": data.get("deployed_at")}
 
 
 def _obj(body: Any) -> Dict[str, Any]:
@@ -464,7 +465,7 @@ def make_handler(app: Studio) -> type:
                 if not rest and method == "POST":
                     body = _obj(self._body())
                     raw = app.raw_config()
-                    svc.check_request(body, root, raw)  # fail fast with a 400, not a failed job
+                    svc.check_request(body, root, raw, place=False)  # fail fast with a 400, not a failed job
                     label = f"Create {body.get('service')} {body.get('key')}"
 
                     def create(job: Any) -> int:

@@ -71,6 +71,13 @@ def build_argv(
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,62}", str(server)):
             raise StudioError(400, "invalid server name")
         common += ["--server", str(server)]
+    cluster = args.get("cluster")
+    if cluster and command in ("package", "plan", "deploy", "remove", "info"):
+        if server:
+            raise StudioError(400, "pick a server or a cluster, not both")
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", str(cluster)):
+            raise StudioError(400, "invalid cluster name")
+        common += ["--cluster", str(cluster)]
     if command == "validate":
         return ["validate", *common]
     if command == "info":

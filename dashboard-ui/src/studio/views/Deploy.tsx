@@ -8,8 +8,9 @@ import { DeployedBadge, ServerSelect, useServerChoice } from "../components/Serv
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
 import { compatProblems, overridesOn, restoreTriggersOn, setEnabledOn, skipTriggersOn, type CompatProblem } from "../compat";
-import type { Job, Json, JsonObject } from "../types";
-import { asObject, normalizeEvent, asArray } from "../util";
+import type { Job, Json, JsonObject, OnPremCluster } from "../types";
+import { asObject, normalizeEvent, asArray, str } from "../util";
+import { href } from "../route";
 import { relative } from "../../format";
 
 const ACTIONS = [
@@ -34,6 +35,28 @@ export function DeployView() {
   const problems = targetMeta ? compatProblems(draft, targetMeta) : [];
   const onprem = target.provider === "onprem";
   const { servers, deployed, server: machine, setServer: setMachine, reload: reloadDeployed } = useServerChoice(onprem, target.stage);
+  // One machine (the picker above) or a scaling cluster: --server NAME or --cluster NAME.
+  const [clusters, setClusters] = useState<OnPremCluster[]>([]);
+  useEffect(() => {
+    if (!onprem) return;
+    api.clusters().then(
+      (r) => setClusters(r.clusters),
+      () => setClusters([]),
+    );
+  }, [onprem]);
+  const rawCluster = asObject(asObject(draft.provider).options).cluster;
+  const ymlCluster = typeof rawCluster === "string" ? rawCluster : str(asObject(rawCluster).name);
+  const ymlReplicas = typeof rawCluster === "object" && rawCluster ? asObject(rawCluster).replicas : undefined;
+  const [runOn, setRunOn] = useState<"" | "server" | "cluster">("");
+  const [clusterPick, setClusterPick] = useState("");
+  useEffect(() => {
+    setRunOn("");
+    setClusterPick("");
+  }, [target.stage]);
+  const onCluster = (runOn || (deployed?.cluster || ymlCluster ? "cluster" : "server")) === "cluster";
+  const chosenCluster = clusterPick || deployed?.cluster || ymlCluster || clusters[0]?.name || "";
+  // Back to one machine from a cluster: the default ("where it was deployed" / pskit.yml) would be the cluster again.
+  const needsMachine = onprem && !onCluster && !machine && !!(deployed?.cluster || ymlCluster);
   // A finished deploy / remove changes where the stage runs: show it and keep the picker on it.
   const finished = job.status !== "running" && job.status !== "idle";
   useEffect(() => {
@@ -146,17 +169,57 @@ export function DeployView() {
       });
       if (ok !== "confirm") return;
     } else if (command === "deploy") {
-      const where = !onprem ? "" : machine === "local" ? " on this machine" : machine ? ` on ${machine}` : deployed ? ` on ${deployed.label}` : "";
-      const moving = onprem && deployed && machine && machine !== (deployed.server || "") && !(machine === "local" && deployed.method === "local");
+      const where = !onprem
+        ? ""
+        : onCluster
+          ? ` on cluster ${chosenCluster}`
+          : machine === "local"
+            ? " on this machine"
+            : machine
+              ? ` on ${machine}`
+              : deployed
+                ? ` on ${deployed.label}`
+                : "";
+      const movingFrom =
+        !onprem || !deployed
+          ? ""
+          : onCluster
+            ? deployed.cluster !== chosenCluster
+              ? deployed.label
+              : ""
+            : deployed.cluster || (machine && machine !== (deployed.server || "") && !(machine === "local" && deployed.method === "local"))
+              ? deployed.label
+              : "";
       const ok = await confirm({
         title: `Deploy to ${target.provider}/${target.stage}${where}?`,
-        body: moving ? <p>This stage is deployed on <b>{deployed.label}</b> now. Deploying it on <b>{machine === "local" ? "this machine" : machine}</b> moves it there.</p> : undefined,
+        body: movingFrom ? (
+          <p>
+            This stage is deployed on <b>{movingFrom}</b> now. Deploying it on <b>{onCluster ? `cluster ${chosenCluster}` : machine === "local" ? "this machine" : machine}</b> moves it
+            there (remove it from the old place first if it should no longer run there).
+          </p>
+        ) : undefined,
         confirmLabel: "Deploy",
       });
       if (ok !== "confirm") return;
     }
+    const placed = ["package", "plan", "deploy", "remove", "info"].includes(command);
+    if (placed && onprem && onCluster && !chosenCluster) {
+      toast("Pick a cluster, or create one on the Scaling cluster page.", "warn");
+      return;
+    }
+    if (placed && needsMachine && ["package", "plan", "deploy"].includes(command)) {
+      toast("Pick the machine to run this stage on (it is on a cluster now).", "warn");
+      return;
+    }
     try {
-      const withMachine = onprem && machine && ["package", "plan", "deploy", "remove", "info"].includes(command) ? { ...(args || {}), server: machine } : args;
+      const withMachine =
+        !onprem || !placed
+          ? args
+          : onCluster
+            ? { ...(args || {}), cluster: chosenCluster }
+            : machine
+              ? { ...(args || {}), server: machine }
+              : args;
       const r = await api.startJob(command, target.provider, target.stage, withMachine);
       setJobId(r.job_id);
     } catch (exc) {
@@ -184,7 +247,37 @@ export function DeployView() {
       <CompatPanel provider={target.provider} problems={problems} onDisableAll={() => replace(disableAll())} />
       {onprem && (
         <div className="card card-pad row-gap wrap deploy-machine">
-          <b>Machine</b>
+          <b>Run on</b>
+          <Segmented
+            label="Run on"
+            value={onCluster ? "cluster" : "server"}
+            onChange={(v) => setRunOn(v as "server" | "cluster")}
+            options={[
+              { value: "server", label: "One machine" },
+              { value: "cluster", label: "Scaling cluster", disabled: !clusters.length && !onCluster },
+            ]}
+          />
+          {onCluster ? (
+            <>
+              <select className="select" value={chosenCluster} onChange={(e) => setClusterPick(e.target.value)} aria-label="Cluster">
+                {!chosenCluster && <option value="">No cluster yet</option>}
+                {clusters.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name} ({c.orchestrator_label}, {c.nodes.length} server{c.nodes.length === 1 ? "" : "s"}){deployed?.cluster === c.name ? " · deployed here" : ""}
+                  </option>
+                ))}
+                {chosenCluster && !clusters.some((c) => c.name === chosenCluster) && <option value={chosenCluster}>{chosenCluster} (not found)</option>}
+              </select>
+              <DeployedBadge deployed={deployed} />
+              <span className="muted small">
+                The functions run as 1 main replica on the master plus {typeof ymlReplicas === "number" ? ymlReplicas : 2} web replicas spread over the
+                cluster&apos;s servers (<code className="mono">provider.options.cluster.replicas</code>). The same as{" "}
+                <code className="mono">pskit deploy --cluster {chosenCluster || "NAME"}</code>; the stage remembers it. Join servers, scale and watch capacity on the{" "}
+                <a href={href("cluster", chosenCluster)}>Scaling cluster</a> page.
+              </span>
+            </>
+          ) : (
+            <>
           <ServerSelect
             value={machine}
             onChange={setMachine}
@@ -194,11 +287,14 @@ export function DeployView() {
             emptyLabel={deployed ? `Same as the last deploy: ${deployed.label}` : "From pskit.yml (provider.options.deploy)"}
           />
           <DeployedBadge deployed={deployed} />
+          {needsMachine && <span className="small">This stage is on a cluster now: pick the machine to move it to.</span>}
           <span className="muted small">
             The stage remembers the machine of its last deploy: Test, Logs and <code className="mono">pskit trigger</code> / <code className="mono">pskit logs</code> use it, and the next deploy goes there unless you pick another (<code className="mono">--server local</code> for this machine).{" "}
             Saved servers come from <b>Resources → On-prem services → Servers</b>. The same as <code className="mono">pskit deploy --server NAME</code>; to make it permanent per stage set{" "}
             <code className="mono">provider.options.deploy.server</code>. Use one stage per machine to keep their deployments apart.
           </span>
+            </>
+          )}
         </div>
       )}
       <div className="action-grid">

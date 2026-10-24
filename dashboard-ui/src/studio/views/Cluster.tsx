@@ -44,7 +44,8 @@ export function ClusterView({ rest }: { rest: string[] }) {
             Run this project&apos;s functions on several servers with <b>Docker Swarm</b>, <b>Kubernetes (k3s)</b> or <b>HashiCorp Nomad</b>: pick a master
             server, join more servers whenever you need (also while functions run), watch every server&apos;s CPU, memory and disk, and get an alert
             (one of your functions, e.g. a mail to DevOps, and / or a webhook) when every server is full. Without a cluster the functions run on one
-            server as before; resources always stay on one server.
+            server as before. Resources (Redis, Postgres, ...) can run on one server of the cluster too: <i>Where → Scaling cluster</i> when you create
+            them.
           </>
         }
         actions={
@@ -288,6 +289,7 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
       </div>
 
       <Workloads cluster={cluster} status={status} onScale={(stack, replicas) => void startJob("scale", { stack, replicas })} />
+      <ClusterResources status={status} />
       {jobId && <JobConsole job={job} />}
       <AlertSettings cluster={cluster} onSaved={reload} />
       {joining && (
@@ -387,6 +389,48 @@ function ProjectBinding({ cluster }: { cluster: OnPremCluster }) {
           </span>
         </div>
       )}
+    </div>
+  );
+}
+
+/** On-prem services placed on a server of this cluster (one instance each, with its data on that server). */
+function ClusterResources({ status }: { status: ClusterStatus | null }) {
+  const items = status?.resources || [];
+  return (
+    <div className="card card-pad">
+      <h3>Resources on this cluster</h3>
+      {!items.length ? (
+        <p className="muted small">
+          None yet. Create one under <a href={href("resources")}>Resources → On-prem services</a> with <i>Where → Scaling cluster</i> (or{" "}
+          <code className="mono">pskit resources onprem create cache --service redis --cluster {status?.name || "NAME"}</code>): it runs on the server with the
+          most free memory, or the one you pick.
+        </p>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Resource</th>
+              <th>Service</th>
+              <th>Server</th>
+              <th>Address</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((r) => (
+              <tr key={r.key}>
+                <td className="mono">{r.key}</td>
+                <td>{r.service}</td>
+                <td className="mono">{r.server}</td>
+                <td className="mono small">{r.address && r.port ? `${r.address}:${r.port}` : r.address || "–"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p className="muted small">
+        A resource is one instance on one server, not replicated; every function replica reaches it at that server&apos;s cluster address. When its server
+        leaves the cluster it keeps running there as a one-server resource.
+      </p>
     </div>
   );
 }

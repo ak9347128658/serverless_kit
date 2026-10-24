@@ -68,7 +68,7 @@ def admin_token(raw: Optional[Dict[str, Any]], root: Path, env_file: str) -> str
 
 def check(body: Dict[str, Any], raw: Optional[Dict[str, Any]], root: Path, target: Dict[str, Any]) -> Dict[str, Any]:
     """Validated smtp settings of a create request: domains, functions_url, hostname, max_size_mb, network."""
-    from .onprem_services import ServiceError, default_target, normalize_target
+    from .onprem_services import ServiceError, functions_target
 
     domains = body.get("domains") or []
     if isinstance(domains, str):
@@ -94,7 +94,7 @@ def check(body: Dict[str, Any], raw: Optional[Dict[str, Any]], root: Path, targe
         raise ServiceError("functions_url must be the pskit host's URL, e.g. http://10.0.0.5:8080")
     if not url:
         port = int(_onprem_options(raw).get("port") or 8080)
-        functions = normalize_target(default_target(raw), root)
+        functions = functions_target(raw, root)
         if target["method"] == "local":
             if functions["method"] != "local":
                 raise ServiceError("the functions run on an SSH server: create the SMTP server there, or set "

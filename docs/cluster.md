@@ -11,9 +11,17 @@ run by one of three orchestrators:
 | **HashiCorp Nomad** (`nomad`) | Docker plus the Nomad agent ([releases.hashicorp.com](https://releases.hashicorp.com/nomad/), 1.11.3 by default) as a systemd unit | One web replica per server on the port; put your load balancer (nginx, HAProxy, Traefik) in front of all servers | Teams that use Nomad / Consul |
 
 pskit does everything over SSH from your machine: it installs the orchestrator, joins servers, copies the function
-image to every server (**no container registry needed**), deploys, and watches capacity. **Resources** (Redis,
-Postgres, MinIO, the SMTP server, ... from *Resources → On-prem services*) still run on one server each, exactly
-as before.
+image to every server (**no container registry needed**), deploys, and watches capacity.
+
+Every deploy and every resource picks where it runs:
+
+| | One server (as before) | A scaling cluster |
+|---|---|---|
+| **Functions** | `pskit deploy --server edge1` / `options.deploy.server` | `pskit deploy --cluster prod` / `options.cluster: prod` |
+| **Resources** (Redis, Postgres, MinIO, SMTP, ...) | `pskit resources onprem create cache --service redis --server edge1` | `... --cluster prod` (the server with the most free memory) or `--cluster prod --node edge2` |
+
+In the studio: *Deploy → Run on: One machine / Scaling cluster*, and *Create a service → Where: This machine / One
+SSH server / Scaling cluster*.
 
 ## How the functions run in a cluster
 
@@ -93,9 +101,43 @@ Your handler code does not change.
    waits until `/__pskit/health` answers. `pskit remove` deletes the workloads. The main replica's data stays on
    the master: a Docker volume for Swarm, `/var/lib/pskit/<stack>` for Kubernetes and Nomad.
 
-With `options.cluster` set, `options.deploy` and `--server` are ignored for this project. The master becomes the
+### One server or the cluster, per deploy
+
+Where a deploy goes, first match wins:
+
+1. `pskit deploy --cluster NAME` (studio: *Run on → Scaling cluster*): that cluster. The replicas / cpu / memory of
+   `options.cluster` are kept when it names another cluster.
+2. `pskit deploy --server NAME` or `--server local` (studio: *Run on → One machine*): that one machine, even when
+   pskit.yml has `options.cluster`.
+3. `options.cluster` in pskit.yml, then `options.deploy` (`server`, `host`, ...).
+4. Where the stage was last deployed: a cluster or a saved server. The stage remembers it, like a server.
+
+So `pskit deploy --cluster prod` once moves a stage to the cluster, and `pskit deploy --server edge1` once moves it
+back to one server. The old place keeps running until you `pskit remove` it there. On a cluster the master is the
 SSH target that `pskit logs`, `pskit trigger`, the dashboard and the studio use when the port is closed to your
-machine.
+machine; `pskit info` shows `deployed on: cluster prod (master edge1 (10.0.0.5))`.
+
+## Resources on a cluster
+
+A resource can run on one server of a cluster:
+
+```bash
+pskit resources onprem create cache --service redis --cluster prod                # auto placement
+pskit resources onprem create orders-db --service postgres --cluster prod --node edge2
+```
+
+* **Auto placement** measures every server of the cluster (as `pskit cluster status` does) and picks the reachable
+  one with the most free memory that is under every capacity limit. When every server is over a limit the create
+  fails with "join a server", the same signal as the capacity alert.
+* The address written to the env file is that server's **cluster address** (its `--advertise` address), which the
+  function replicas on every server reach.
+* It is a plain Docker container with a data volume on that server, as on one server: status, logs, backups, the
+  web UI and the data browser work the same. It is **one instance, not replicated**: the orchestrator does not
+  move it. Use a managed or replicated database when that matters.
+* With `options.cluster` in pskit.yml, *Create a service* and `pskit resources onprem create` default to the
+  cluster.
+* `pskit cluster status` and the studio's cluster page list the resources and the server each runs on. When that
+  server leaves the cluster (or the cluster is forgotten) the resource keeps running there as a one-server resource.
 
 ### Ports to open
 
@@ -216,6 +258,8 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 | `pskit cluster alerts NAME [--function F] [--stage S] [--webhook URL] [--cooldown M] [--cpu/--memory/--disk %] [--test]` | alert settings |
 | `pskit cluster scale NAME --replicas N [--stack S]` | web replicas now (until the next deploy) |
 | `pskit cluster list` / `pskit cluster remove NAME` | list / forget a cluster |
+| `pskit deploy --cluster NAME` / `pskit deploy --server NAME` | deploy the functions to the cluster / to one server |
+| `pskit resources onprem create KEY --service S --cluster NAME [--node SERVER]` | a resource on a server of the cluster |
 
 ## Limits and notes
 

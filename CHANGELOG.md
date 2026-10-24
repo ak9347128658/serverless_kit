@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-24
+
+### Added
+- **One server or a scaling cluster, per deploy**: `pskit deploy | package | plan | remove | info --cluster NAME`, and
+  in the studio *Deploy → Run on: One machine / Scaling cluster*. The stage remembers the cluster of its last deploy
+  like a server (`deployed on: cluster prod (master edge1 (...))`); `--server NAME` moves it back to one machine.
+- **Resources on a cluster**: `pskit resources onprem create KEY --service S --cluster NAME [--node SERVER]`, and
+  *Where → Scaling cluster* in the studio's create form. Without `--node` the reachable server with the most free
+  memory under every capacity limit runs it (a full cluster refuses, asking for another server); its env values use
+  that server's cluster address. With `options.cluster` in pskit.yml new resources default to the cluster.
+  `pskit cluster status` and the studio's cluster page list them per server; a server that leaves keeps them as
+  one-server resources.
+
+### Changed
+- `--server NAME` now wins over `options.cluster` in pskit.yml (deploys to that one machine); before, the cluster
+  always won.
+
 ## [1.8.0] - 2026-10-24
 
 ### Added

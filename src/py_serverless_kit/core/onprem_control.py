@@ -314,13 +314,15 @@ def deployed_host(
     return data if isinstance(data, dict) and isinstance(data.get("spec"), dict) else None
 
 
-def remember_deploy(work_dir: Path, server: Optional[str]) -> Optional[Dict[str, Any]]:
-    """After a successful deploy: keep where the host runs, so trigger / logs / test and the next deploy use it."""
+def remember_deploy(work_dir: Path, server: Optional[str], cluster: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """After a successful deploy: keep where the host runs, so trigger / logs / test and the next deploy use it.
+    On a scaling cluster ``server`` is its master and ``cluster`` its name."""
     spec = rendered_spec(work_dir)
     if spec is None:
         return None
     data = {
         "server": server or None,
+        "cluster": cluster or None,
         "deployed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "spec": {k: spec[k] for k in _SPEC_KEYS if k in spec},
     }
@@ -330,15 +332,17 @@ def remember_deploy(work_dir: Path, server: Optional[str]) -> Optional[Dict[str,
     return data
 
 
-def deployed_on(spec: Dict[str, Any], server: Optional[str]) -> Dict[str, Any]:
+def deployed_on(spec: Dict[str, Any], server: Optional[str], cluster: Optional[str] = None) -> Dict[str, Any]:
     """The ``deployed_on`` summary kept in ``deployment.json`` (shown by deploy, info and the studio)."""
     deploy = spec.get("deploy") or {}
     method = str(deploy.get("method") or "local")
     ssh_host = str((deploy.get("ssh") or {}).get("host") or "")
     where = "this machine" if method == "local" or not ssh_host else ssh_host
     label = f"{server} ({where})" if server else where
-    return {"server": server or None, "method": method, "host": ssh_host or None, "label": label,
-            "endpoint": spec.get("endpoint")}
+    if cluster:
+        label = f"cluster {cluster} (master {label})"
+    return {"server": server or None, "cluster": cluster or None, "method": method, "host": ssh_host or None,
+            "label": label, "endpoint": spec.get("endpoint")}
 
 
 def control_url(spec: Dict[str, Any], record: Optional[Dict[str, Any]] = None) -> str:

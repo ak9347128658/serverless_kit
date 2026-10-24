@@ -6,8 +6,9 @@ image to every server (no registry), deploys it, shows each server's CPU / memor
 server is full can call one of your functions (and / or a webhook) so DevOps hears about it and adds a server.
 
 Functions use a cluster with ``provider.options.cluster`` in pskit.yml (``cluster: prod`` or
-``{name: prod, replicas: 3, cpu: 0.25, memory: 256}``); without it nothing changes: the host runs on one
-machine. Resources (``pskit resources onprem create``) stay on one server either way.
+``{name: prod, replicas: 3, cpu: 0.25, memory: 256}``, or ``pskit deploy --cluster prod``); without it nothing
+changes: the host runs on one machine. Resources (``pskit resources onprem create``) run on one server, or on one
+server of a cluster (``--cluster prod``: the server with the most free memory, or ``--node``); see :func:`place`.
 
 Stored in ``.pskit/onprem-clusters.json`` (out of git): orchestrator, master, joined servers, capacity limits,
 alert settings, recent alerts and what is deployed. Logins stay in the saved servers.
@@ -274,6 +275,7 @@ def leave_server(root: Path, name: str, server: str, emit: Emit, *, run: Optiona
         emit(f"  {server} did not answer ({exc}); removing it from the cluster anyway")
     _script(master, scripts.forget_script(orch, node_name, node_id), emit, run, label="forget", check=False)
     _update(root, name, lambda c: (c.get("nodes") or {}).pop(server, None))
+    _untag_resources(root, name, server, emit)
     emit(f"{server} left {name}.")
     return public(name, get_cluster(root, name))
 
@@ -285,6 +287,7 @@ def remove_cluster(root: Path, name: str, emit: Emit) -> None:
         if clusters.pop(str(name), None) is None:
             raise ClusterError(_unknown(root, name))
         _save(root, clusters)
+    _untag_resources(root, name, None, emit)
     emit(f"Forgot cluster {name}. The servers keep running; remove deployments first with pskit remove.")
 
 
@@ -567,6 +570,74 @@ def node_metrics(target: Dict[str, Any], run: Optional[RunFn] = None) -> Dict[st
     return out
 
 
+def place(root: Path, name: str, server: str = "", *, run: Optional[RunFn] = None,
+          measure: bool = True) -> Dict[str, Any]:
+    """The cluster server a resource (Redis, Postgres, ...) runs on: ``server`` when given (it must be in the
+    cluster), else the reachable server with the most free memory under every capacity limit. Returns
+    ``{server, address, metrics}``; ``address`` is the server's cluster address, which every replica reaches.
+
+    ``measure=False`` only checks the names (the master stands in): the studio's fast check before the job."""
+    cluster = get_cluster(root, name)
+    nodes = dict(cluster.get("nodes") or {})
+    if server:
+        if server not in nodes:
+            raise ClusterError(f"{server!r} is not in cluster {name} (servers: {', '.join(sorted(nodes))})")
+        return {"server": server, "address": str(nodes[server].get("address") or ""), "metrics": None}
+    if not measure:
+        master = str(cluster["master"])
+        return {"server": master, "address": str((nodes.get(master) or {}).get("address") or ""), "metrics": None}
+    capacity = {**DEFAULT_CAPACITY, **(cluster.get("capacity") or {})}
+    targets = {}
+    for member in nodes:
+        try:
+            targets[member] = _target(root, member)
+        except ClusterError:
+            continue
+    with ThreadPoolExecutor(max_workers=min(16, len(targets) + 1)) as pool:
+        metrics = dict(zip(targets, pool.map(lambda t: node_metrics(t, run), targets.values())))
+
+    def free(member: str) -> Tuple[float, float, float]:
+        m = metrics[member]
+        return (float(m.get("memory") or 0), float(m.get("cpu") or 0), float(m.get("disk") or 0))
+
+    usable = [s for s, m in metrics.items() if m.get("reachable")
+              and not any(isinstance(m.get(k), (int, float)) and m[k] >= capacity[k] for k in capacity)]
+    if not usable:
+        raise ClusterError(f"every server of cluster {name} is unreachable or over a capacity limit. Join a server "
+                           f"(pskit cluster join {name} SERVER) or pick one of its servers")
+    best = min(sorted(usable), key=free)
+    return {"server": best, "address": str(nodes[best].get("address") or ""), "metrics": metrics[best]}
+
+
+def resources_of(root: Path, name: str) -> List[Dict[str, Any]]:
+    """The on-prem services (Redis, Postgres, ...) placed on cluster ``name``, with the server each runs on."""
+    from .onprem_services import load_state
+
+    out = []
+    for key, entry in sorted(load_state(root)["services"].items()):
+        target = entry.get("target") if isinstance(entry, dict) else None
+        if isinstance(target, dict) and target.get("cluster") == name:
+            out.append({"key": key, "service": entry.get("service"), "kind": entry.get("kind"),
+                        "server": target.get("server"), "address": entry.get("address"), "port": entry.get("port")})
+    return out
+
+
+def _untag_resources(root: Path, name: str, server: Optional[str], emit: Emit) -> None:
+    """Resources on a server that leaves (or on a forgotten cluster) keep running there as one-server resources."""
+    from .onprem_services import load_state, save_state
+
+    state = load_state(root)
+    moved = []
+    for key, entry in state["services"].items():
+        target = entry.get("target") if isinstance(entry, dict) else None
+        if isinstance(target, dict) and target.get("cluster") == name and server in (None, target.get("server")):
+            target.pop("cluster", None)
+            moved.append(f"{key} ({entry.get('service')}) on {target.get('server')}")
+    if moved:
+        save_state(root, state)
+        emit("These resources keep running on their server, now outside the cluster: " + ", ".join(moved))
+
+
 def _sections(text: str) -> Dict[str, str]:
     found: Dict[str, List[str]] = {}
     current = ""
@@ -678,6 +749,7 @@ def status(root: Path, name: str, run: Optional[RunFn] = None) -> Dict[str, Any]
         futures = {s: pool.submit(node_metrics, t, run) for s, t in targets.items()}
         metrics = {s: f.result() for s, f in futures.items()}
         view = orch_future.result()
+    resources = resources_of(root, name)
     rows = []
     for server, node in sorted(servers.items(), key=lambda kv: (kv[1].get("role") != "master", kv[0])):
         m = metrics.get(server) or {"reachable": False, "error": errors.get(server, "no saved server")}
@@ -687,6 +759,7 @@ def status(root: Path, name: str, run: Optional[RunFn] = None) -> Dict[str, Any]
             "server": server, "role": node.get("role"), "node": node.get("node"), "address": node.get("address"),
             **m, "ready": bool(o.get("ready")), "state": o.get("state") or ("unknown" if view.get("error") else "missing"),
             "availability": o.get("availability") or "", "over": over, "full": bool(over),
+            "resources": [r["key"] for r in resources if r["server"] == server],
         })
     usable = [r for r in rows if r.get("reachable") and r["ready"] and r["availability"] in ("Active", "")]
     pending = list(view.get("pending") or [])
@@ -702,7 +775,8 @@ def status(root: Path, name: str, run: Optional[RunFn] = None) -> Dict[str, Any]
         reasons.append(f"the master did not answer: {view['error']}")
     return {
         "name": name, "orchestrator": orch, "capacity": capacity, "nodes": rows,
-        "workloads": view.get("workloads") or [], "pending": pending, "full": full or bool(pending) or not usable,
+        "workloads": view.get("workloads") or [], "resources": resources, "pending": pending,
+        "full": full or bool(pending) or not usable,
         "reasons": reasons, "orchestrator_error": view.get("error"), "checked_at": _now(),
     }
 
