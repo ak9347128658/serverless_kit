@@ -377,3 +377,104 @@ def test_ensured_drivers_create_once_and_after_a_restart():
     assert Ensured(inner, lambda: 409, "x")._ensure() is None   # already exists is fine
     with pytest.raises(RuntimeError, match="could not create"):
         Ensured(inner, lambda: 403, "x")._ensure()
+
+
+def _server(tmp_path, data_dir="/home/azureuser"):
+    from py_serverless_kit.core.onprem_servers import save_server
+
+    save_server(tmp_path, "box", {"host": "10.0.0.5", "user": "azureuser", "auth": "agent", "sudo": True,
+                                  "data_dir": data_dir})
+
+
+def test_minio_named_volume_is_chowned_to_uid_1001(tmp_path):
+    fake = FakeDocker()
+    _create(tmp_path, fake, key="files", service="minio")
+    chown = next(c for c in fake.calls if "--entrypoint" in c and "chown" in c)
+    assert chown[chown.index("--entrypoint") + 1] == "chown"
+    assert "--user" in chown and chown[chown.index("--user") + 1] == "0"
+    assert "pskit-shop-files-data:/bitnami/minio/data" in chown
+    assert "1001:1001" in chown
+    service = next(c for c in fake.calls if c[:2] == ["docker", "run"] and "-d" in c)
+    assert "bitnamilegacy/minio:2025.7.23" in service
+    assert fake.calls.index(chown) < fake.calls.index(service)
+
+
+def test_rustfs_bind_mount_is_chowned_and_probed_on_the_server(tmp_path):
+    _server(tmp_path)
+    fake = FakeDocker()
+    notes = []
+    entry = svc.create(
+        tmp_path, {"key": "files", "service": "rustfs", "target": {"server": "box"}}, RAW, notes.append, run=fake
+    )
+    assert entry["resource"]["options"]["driver"] == "s3"
+    joined = [" ".join(c) for c in fake.calls]
+    assert any("chown -R '10001:10001' '/home/azureuser/pskit-shop-files'" in line for line in joined)
+    probe = next(line for line in joined if "127.0.0.1:9000/health" in line)
+    assert "%{http_code}" in probe and "10.0.0.5:9000" not in probe
+    run = next(line for line in joined if "'run'" in line and "rustfs/rustfs:latest" in line)
+    assert "RUSTFS_ADDRESS=:9000" in run and "/home/azureuser/pskit-shop-files:/data" in run
+    assert any("owned by 10001:10001" in line for line in notes)
+
+
+def test_bind_mount_owner_comes_from_the_image_user(tmp_path):
+    _server(tmp_path, "/data/pskit")
+
+    class Users(FakeDocker):
+        def __call__(self, argv, stdout):
+            if "{{.Config.User}}" in " ".join(argv):
+                return 0, "472"
+            return super().__call__(argv, stdout)
+
+    class Named(FakeDocker):
+        def __call__(self, argv, stdout):
+            text = " ".join(argv)
+            if "{{.Config.User}}" in text:
+                return 0, "nobody"
+            if "awk" in text and "nobody" in text:
+                return 0, "65534:65534"
+            return super().__call__(argv, stdout)
+
+    grafana = Users()
+    svc.create(tmp_path, {"key": "dash", "service": "grafana", "target": {"server": "box"}}, RAW, lambda _l: None,
+               run=grafana)
+    assert any("chown -R '472:472' '/data/pskit/pskit-shop-dash'" in " ".join(c) for c in grafana.calls)
+
+    prom = Named()
+    svc.create(tmp_path, {"key": "metrics", "service": "prometheus", "target": {"server": "box"}}, RAW,
+               lambda _l: None, run=prom)
+    assert any("chown -R '65534:65534' '/data/pskit/pskit-shop-metrics'" in " ".join(c) for c in prom.calls)
+
+
+def test_restarting_container_reports_its_logs(tmp_path):
+    class Crash:
+        def __call__(self, argv, stdout):
+            if "logs" in argv:
+                return 0, "[FATAL] Server runtime failed: Io error: Permission denied (os error 13)"
+            if "inspect" in argv:
+                return 0, "restarting"
+            if "version" in argv:
+                return 0, "27.1.0"
+            return 0, ""
+
+    with pytest.raises(svc.ServiceError, match="Permission denied") as raised:
+        svc.create(tmp_path, {"key": "files", "service": "rustfs"}, RAW, lambda _l: None, run=Crash(), wait_seconds=30)
+    message = str(raised.value)
+    assert "keeps restarting" in message and "not writable" in message
+    assert svc.list_services(tmp_path) == []
+
+
+def test_readiness_timeout_includes_the_container_logs(tmp_path):
+    class Slow:
+        def __call__(self, argv, stdout):
+            if "logs" in argv:
+                return 0, "still starting"
+            if "exec" in argv:
+                return 1, "not yet"
+            if "inspect" in argv:
+                return 0, "running"
+            if "version" in argv:
+                return 0, "27.1.0"
+            return 0, ""
+
+    with pytest.raises(svc.ServiceError, match="still starting"):
+        svc.create(tmp_path, {"key": "jobs", "service": "redis"}, RAW, lambda _l: None, run=Slow(), wait_seconds=0)

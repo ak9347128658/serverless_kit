@@ -575,7 +575,8 @@ Data directories are copied while the service runs. For Kafka and NATS, stop pro
 | `Docker is not installed on <host>` | create the `docker` runtime first, or let *Create* install it (needs sudo or root) |
 | `pull access denied` | the image moved; set *Advanced → Docker image* (`--image`) to a mirror you can pull |
 | `port is already allocated` | pick another *Port* (`--port`) |
-| `did not become ready within 90 s` | `pskit resources onprem logs <key>`; on small servers Kafka needs about 1 GB of RAM |
+| `did not become ready within 90 s` | the message includes the container's last log lines. On a small server Kafka needs about 1 GB of RAM. `pskit resources onprem logs <key>` shows the rest |
+| `keeps restarting` or `Permission denied` in those logs | the data directory was not writable by the user the container runs as. Create the service again: pskit chowns the directory (MinIO 1001, RustFS 10001, and the image's user for the others) |
 | a script times out (`TimeoutError`, `ConnectTimeoutError`, `ECONNREFUSED`) | the port is closed from your machine: `pskit resources onprem tunnel <key>`, open it to your IP, or use the pskit client through the host ([client.md](../../client.md#when-connections-time-out)) |
 | `is not reachable from this machine; check the firewall` | the service runs; open the port from the functions' server |
 | `sqs: ... QueueDoesNotExist` (ElasticMQ) | ElasticMQ forgets queues on restart; redeploy so the sqs driver gets `create_queue` (the default for non-AWS endpoints since 1.3.1) |

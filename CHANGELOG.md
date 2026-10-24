@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.10.5] - 2026-10-24
+
+### Fixed
+- **MinIO and RustFS did not become ready** (`did not become ready within 90 s`). The data directory on the server
+  is created as the SSH user, and these images run as their own user (MinIO uid 1001, RustFS uid 10001), so the
+  process cannot write it and exits with `Permission denied`. pskit now gives that directory to the container user
+  before start (other images that do not run as root get the same, from the image's user). A container that keeps
+  restarting fails at once and the error includes its last log lines. On an SSH server, an HTTP readiness check
+  runs on the server (`127.0.0.1`), so a firewall in front of the service port is not reported as a failed start.
+
 ## [1.10.4] - 2026-10-24
 
 ### Added

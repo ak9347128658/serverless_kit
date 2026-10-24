@@ -78,6 +78,8 @@ def _svc(
     generate: Optional[Dict[str, str]] = None,
     group: str = "",
     ready_path: str = "",
+    data_owner: str = "",
+    chown_volume: bool = False,
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "init": init,
@@ -103,6 +105,13 @@ def _svc(
     }
     if ready_path:
         out["ready_path"] = ready_path
+    # uid:gid the process runs as. A bind-mounted data directory is created as the SSH user, which this
+    # user cannot write; chown it before start. chown_volume: a Docker named volume needs the same fix
+    # because the directory in the image is not already owned by that user.
+    if data_owner:
+        out["data_owner"] = data_owner
+    if chown_volume:
+        out["chown_volume"] = True
     return out
 
 
@@ -153,6 +162,14 @@ _BAO_START = (
     "  touch /openbao/file/pskit-ready\n"
     "fi\n"
     "wait $pid\n"
+)
+
+# Bitnami's entrypoint is pid 1 while it provisions (it even starts a temporary server, then stops it).
+# /minio/health/ready during that window is not the server that keeps running. Wait until pid 1 is MinIO.
+_MINIO_HEALTH = (
+    "grep -q entrypoint /proc/1/cmdline && exit 1; "
+    "grep -q setup.sh /proc/1/cmdline && exit 1; "
+    "curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null"
 )
 
 SERVICES: Dict[str, Dict[str, Any]] = {
@@ -275,8 +292,11 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         ("storage",),
         extra_ports=(9001,),
         data="/bitnami/minio/data",
+        # The image's USER is 1001, and its entrypoint only chowns the data directory when it is root.
+        data_owner="1001:1001",
+        chown_volume=True,
         env={"MINIO_ROOT_USER": "{user}", "MINIO_ROOT_PASSWORD": "{password}", "MINIO_DEFAULT_BUCKETS": "{bucket}"},
-        health="curl -fs http://127.0.0.1:9000/minio/health/ready >/dev/null",
+        health=_MINIO_HEALTH,
         init='mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null '
         "&& mc mb --ignore-existing local/{bucket}",
         backup="tar czf - -C /bitnami/minio/data .",
@@ -466,9 +486,14 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         ("storage",),
         extra_ports=(9001,),
         data="/data",
+        # The image runs as user rustfs (uid 10001). A host directory owned by the SSH user is not writable.
+        data_owner="10001:10001",
+        ready_path="/health",
         env={
             "RUSTFS_ACCESS_KEY": "{user}",
             "RUSTFS_SECRET_KEY": "{password}",
+            "RUSTFS_ADDRESS": ":9000",
+            "RUSTFS_CONSOLE_ADDRESS": ":9001",
             "RUSTFS_CONSOLE_ENABLE": "true",
         },
         notes="An S3-compatible object store with a web console (port 9001), an alternative to MinIO: the s3 driver, "
@@ -499,8 +524,7 @@ SERVICES: Dict[str, Dict[str, Any]] = {
     ),
 }
 
-for _name, _path in (("azurite", "/"), ("rustfs", "/"), ("fake-gcs", "/storage/v1/b"), ("elasticmq", "/"),
-                     ("mailpit", "/")):
+for _name, _path in (("azurite", "/"), ("fake-gcs", "/storage/v1/b"), ("elasticmq", "/"), ("mailpit", "/")):
     SERVICES[_name]["ready_path"] = _path
 
 SERVICES.update(apps(_svc))
@@ -1600,7 +1624,7 @@ def create(
         _start_sidecars(req, spec, target, sh, password, emit, wait_seconds)
     sh(docker_argv(target, ["pull", req["image"]]))
     if req["volume"]:
-        _make_volume(target, sh, req["volume"])
+        _prepare_volume(req, spec, target, sh, emit)
     sh(docker_argv(target, run_args(req, password)))
     if req["service"] == "smtp":
         emit("installing smtp-server and mailparser in the container (once, about a minute)...")
@@ -1663,13 +1687,106 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _make_volume(target: Dict[str, Any], sh: _Runner, volume: str) -> None:
-    """A Docker volume, or the bind-mounted folder under the server's data directory."""
+_OWNER_PAIR = re.compile(r"^[0-9]{1,10}:[0-9]{1,10}$")
+_OWNER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,31}")
+
+
+def _numeric_owner(user: str) -> Tuple[bool, str]:
+    """``(understood, uid:gid)``. A name (``rustfs``, ``nobody``) is not understood here.
+
+    An empty owner means the image runs as root and chowns its own data directory.
+    """
+    if user in ("", "0", "root", "0:0", "root:root"):
+        return True, ""
+    if re.fullmatch(r"[0-9]{1,10}", user):
+        return True, user + ":" + user
+    if _OWNER_PAIR.match(user):
+        return True, user
+    return False, ""
+
+
+def _image_owner(target: Dict[str, Any], sh: _Runner, image: str) -> str:
+    """The uid:gid of the image's ``USER``, or ``""`` when it runs as root (or it cannot be read)."""
+    out = sh(docker_argv(target, ["inspect", "-f", "{{.Config.User}}", image]), check=False, show=False)
+    named = ""
+    for line in (ln.strip() for ln in out.splitlines()):
+        if not line or " " in line:
+            continue
+        understood, owner = _numeric_owner(line)
+        if understood:
+            return owner
+        if _OWNER_NAME.fullmatch(line):
+            named = line
+            break
+    if not named:
+        return ""
+    script = "awk -F: '$1==\"" + named + "\" {print $3 \":\" $4; exit}' /etc/passwd"
+    lookup = ["run", "--rm", "--network", "none", "--user", "0", "--entrypoint", "sh", image, "-c", script]
+    looked = sh(docker_argv(target, lookup), check=False, show=False)
+    for line in reversed([ln.strip() for ln in looked.splitlines()]):
+        understood, owner = _numeric_owner(line)
+        if understood:
+            return owner
+    return ""
+
+
+def _data_owner(spec: Dict[str, Any], target: Dict[str, Any], sh: _Runner, image: str) -> str:
+    declared = str(spec.get("data_owner") or "")
+    if declared:
+        understood, owner = _numeric_owner(declared)
+        if understood and owner:
+            return owner
+        raise ServiceError(f"invalid data directory owner {declared!r}")
+    if not spec.get("data"):
+        return ""
+    return _image_owner(target, sh, image)
+
+
+def _prepare_volume(req: Dict[str, Any], spec: Dict[str, Any], target: Dict[str, Any], sh: _Runner, emit: Emit) -> None:
+    """Create the data volume and, when the image is not root, give that user the directory."""
+    volume = req["volume"]
+    host_path = volume.startswith("/")
+    owner = ""
+    if host_path or spec.get("chown_volume"):
+        owner = _data_owner(spec, target, sh, req["image"])
+    _make_volume(target, sh, volume, owner if host_path else "")
+    if owner and not host_path and spec.get("chown_volume"):
+        _chown_named_volume(target, sh, volume, str(spec["data"]), owner, req["image"])
+    if owner:
+        where = volume if host_path else volume + " (Docker volume)"
+        emit(f"data directory {where} owned by {owner} (the user the container runs as)")
+
+
+def _chown_named_volume(target: Dict[str, Any], sh: _Runner, volume: str, mount: str, owner: str, image: str) -> None:
+    if not _OWNER_PAIR.match(owner):
+        raise ServiceError(f"invalid data directory owner {owner!r}")
+    sh(
+        docker_argv(
+            target,
+            ["run", "--rm", "--user", "0", "--network", "none", "--entrypoint", "chown", "-v", f"{volume}:{mount}",
+             image, "-R", owner, mount],
+        ),
+        show=False,
+    )
+
+
+def _make_volume(target: Dict[str, Any], sh: _Runner, volume: str, owner: str = "") -> None:
+    """A Docker volume, or the bind-mounted folder under the server's data directory.
+
+    ``owner`` (``uid:gid``) is applied to a bind mount. Images that do not run as root cannot write a
+    directory created as the SSH user, and the process then exits with permission denied.
+    """
     if not volume.startswith("/"):
         sh(docker_argv(target, ["volume", "create", volume]), show=False)
         return
+    if owner and not _OWNER_PAIR.match(owner):
+        raise ServiceError(f"invalid data directory owner {owner!r}")
     path = _shq(volume)
-    sh(_ssh_argv(target, f"mkdir -p {path} 2>/dev/null || sudo -n mkdir -p {path}"), show=False)
+    command = f"mkdir -p {path} 2>/dev/null || sudo -n mkdir -p {path}"
+    if owner:
+        who = _shq(owner)
+        command += f" && (chown -R {who} {path} 2>/dev/null || sudo -n chown -R {who} {path})"
+    sh(_ssh_argv(target, command), show=False)
 
 
 def _drop_volume(target: Dict[str, Any], sh: _Runner, volume: str) -> None:
@@ -1719,6 +1836,40 @@ def _install_runtime(name: str, target: Dict[str, Any], sh: _Runner, *, version:
         sh(_ssh_argv(target, f"sh {remote}; code=$?; rm -f {remote}; exit $code"))
 
 
+def _container_logs(target: Dict[str, Any], sh: _Runner, container: str) -> str:
+    return sh(docker_argv(target, ["logs", "--tail", "40", container]), check=False, show=False)
+
+
+def _fail_ready(spec: Dict[str, Any], why: str, logs: str) -> None:
+    text = (logs or "").strip() or "(no logs)"
+    hint = ""
+    low = text.lower()
+    if "permission denied" in low or "os error 13" in low:
+        hint = (
+            "\nThe data directory is not writable by the user the container runs as. "
+            "Create the service again so pskit can fix the directory owner."
+        )
+    raise ServiceError(f"{spec['label']} {why}. Last log lines:\n{text}{hint}")
+
+
+def _remote_http_ok(target: Dict[str, Any], sh: _Runner, port: int, path: str) -> bool:
+    """True when the server itself gets any HTTP answer from the service (a firewall here does not matter)."""
+    url = "http://127.0.0.1:" + str(int(port)) + path
+    quoted = _shq(url)
+    script = (
+        "url=" + quoted + "; "
+        "if command -v curl >/dev/null 2>&1; then "
+        "code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \"$url\" || true); "
+        "case \"$code\" in [1-5][0-9][0-9]) exit 0;; esac; "
+        "fi; "
+        "if command -v wget >/dev/null 2>&1; then "
+        "wget -S -O /dev/null --timeout=3 \"$url\" 2>&1 | grep -q HTTP/; "
+        "else exit 1; fi"
+    )
+    code, _out = sh.run_fn(_ssh_argv(target, script), None)
+    return code == 0
+
+
 def _wait_ready(
     req: Dict[str, Any], spec: Dict[str, Any], target: Dict[str, Any], sh: _Runner, timeout: float, emit: Emit
 ) -> None:
@@ -1731,8 +1882,14 @@ def _wait_ready(
             docker_argv(target, ["inspect", "-f", "{{.State.Status}}", req["container"]]), check=False, show=False
         ).strip()
         if state and state not in ("running", "created", "restarting"):
-            logs = sh(docker_argv(target, ["logs", "--tail", "30", req["container"]]), check=False, show=False)
-            raise ServiceError(f"the container stopped ({state}). Last log lines:\n{logs.strip()}")
+            _fail_ready(spec, f"the container stopped ({state})", _container_logs(target, sh, req["container"]))
+        if state == "restarting":
+            # The process already exited and Docker is starting it again. Waiting out the timeout only hides the cause.
+            _fail_ready(
+                spec,
+                "keeps restarting, so it is not accepting connections",
+                _container_logs(target, sh, req["container"]),
+            )
         if state == "running":
             if health:
                 code, _out = sh.run_fn(docker_argv(target, ["exec", req["container"], "sh", "-c", health]), None)
@@ -1740,7 +1897,11 @@ def _wait_ready(
                     return
             elif spec.get("ready_path"):
                 # Docker's port proxy accepts TCP before the app listens: wait for an HTTP answer.
-                if _http_answers(f"http://{req['address']}:{req['port']}{spec['ready_path']}"):
+                # On an SSH server the check runs there. The port is often closed from this machine.
+                path = str(spec["ready_path"])
+                if target.get("method") == "ssh" and _remote_http_ok(target, sh, int(req["port"]), path):
+                    return
+                if _http_answers(f"http://{req['address']}:{req['port']}{path}"):
                     return
             elif _tcp_open(req["address"], req["port"]):
                 return
@@ -1748,8 +1909,12 @@ def _wait_ready(
                 # The port may be firewalled from here but open to the functions' server.
                 emit(f"note: {req['address']}:{req['port']} is not reachable from this machine; check the firewall")
                 return
-        if time.monotonic() > deadline:
-            raise ServiceError(f"{spec['label']} did not become ready within {int(timeout)} s")
+        if time.monotonic() >= deadline:
+            _fail_ready(
+                spec,
+                f"did not become ready within {int(timeout)} s",
+                _container_logs(target, sh, req["container"]),
+            )
         time.sleep(2)
 
 
