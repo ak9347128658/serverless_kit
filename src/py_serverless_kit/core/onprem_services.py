@@ -682,14 +682,18 @@ def default_target(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {"method": "local"}
 
 
-def normalize_target(raw: Any, root: Path) -> Dict[str, Any]:
+CONFIG_SERVER = "pskit.yml provider.options.deploy.server"
+
+
+def normalize_target(raw: Any, root: Path, *, origin: str = "") -> Dict[str, Any]:
+    """``origin``: where a saved server's name came from, named when that server no longer exists."""
     if not isinstance(raw, dict):
         raw = {"method": "local"}
     if raw.get("server"):
         from .onprem_servers import ServerError, server_target
 
         try:
-            saved = server_target(root, str(raw["server"]))
+            saved = server_target(root, str(raw["server"]), origin=origin)
         except ServerError as exc:
             raise ServiceError(str(exc)) from None
         if "sudo" in raw and raw.get("sudo") is not None:
@@ -855,7 +859,19 @@ def functions_target(raw: Optional[Dict[str, Any]], root: Path) -> Dict[str, Any
         except ClusterError as exc:
             raise ServiceError(str(exc)) from None
         return normalize_target({"server": master}, root)
-    return normalize_target(target, root)
+    return normalize_target(target, root, origin=CONFIG_SERVER)
+
+
+def default_target_problem(raw: Optional[Dict[str, Any]], root: Path) -> str:
+    """Why pskit.yml's deploy target cannot be used as the default (a saved server that no longer exists), or ""."""
+    target = default_target(raw)
+    if not target.get("server"):
+        return ""
+    from .onprem_servers import load_servers, missing_server_message
+
+    servers = load_servers(root)
+    name = str(target["server"])
+    return "" if name in servers else missing_server_message(name, servers, CONFIG_SERVER)
 
 
 def cluster_target(root: Path, raw: Dict[str, Any], *, run: Optional[RunFn] = None,
@@ -1038,7 +1054,7 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
     if isinstance(wanted, dict) and wanted.get("cluster"):
         target, cluster_address = cluster_target(root, wanted, run=run, measure=place)
     else:
-        target = normalize_target(wanted, root)
+        target = normalize_target(wanted, root, origin="" if body.get("target") else CONFIG_SERVER)
     if service in RUNTIMES:
         if target["method"] != "ssh":
             raise ServiceError(f"{RUNTIMES[service]['label']} is installed on an SSH server; set target.method: ssh")

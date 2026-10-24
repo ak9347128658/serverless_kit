@@ -265,12 +265,29 @@ def metrics_command() -> str:
     )
 
 
-def image_load_script(orchestrator: str, image: str, tar: str) -> str:
-    """Load the host image from ``tar`` into the node's container runtime, then delete the file."""
-    t = _shq(tar)
+def image_load_script(orchestrator: str, parts_dir: str, sha256: str, stale_glob: str = "") -> str:
+    """Join the gzip parts in ``parts_dir`` (``part-00000`` ...), check them against ``sha256``, load the image into
+    the node's container runtime and delete the parts. A damaged copy is deleted and the script fails, so the
+    next attempt sends it again. ``stale_glob``: part folders of older images of the same deployment, removed."""
+    d = _shq(parts_dir)
+    check = (
+        "need gunzip || pkg_install gzip\n"
+        f"got=$(cat {d}/part-* | sha256sum | cut -d' ' -f1)\n"
+        f'if [ "$got" != {_shq(sha256)} ]; then\n'
+        '  echo "pskit: the copied image is damaged (checksum differs); it is copied again" >&2\n'
+        f"  rm -rf {d}\n"
+        "  exit 1\n"
+        "fi\n"
+    )
     if orchestrator == "kubernetes":
-        return _header() + f"as_root k3s ctr images import {t}\nrm -f {t}\n"
-    return _header() + _docker_ready_block() + f"dk load -i {t}\nrm -f {t}\n"
+        load = (f"cat {d}/part-* | gunzip > {d}/image.tar\n"
+                f"as_root k3s ctr images import {d}/image.tar\n")
+    else:
+        load = _docker_ready_block() + f"cat {d}/part-* | gunzip | dk load\n"
+    clean = f"rm -rf {d}\n"
+    if stale_glob:
+        clean += f"for x in {stale_glob}; do [ -d \"$x\" ] && rm -rf \"$x\"; done\n"
+    return _header() + check + load + clean
 
 
 def has_image_command(orchestrator: str, image: str) -> str:

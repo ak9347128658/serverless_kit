@@ -463,6 +463,8 @@ export interface OnPremServicesState {
   catalog: OnPremCatalogItem[];
   services: OnPremService[];
   default_target: OnPremTarget;
+  /** Set when pskit.yml names a saved server that no longer exists. */
+  default_target_problem?: string;
   env_file: string;
 }
 

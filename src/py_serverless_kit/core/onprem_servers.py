@@ -73,17 +73,62 @@ def list_servers(root: Path) -> List[Dict[str, Any]]:
     ]
 
 
-def get_server(root: Path, name: str) -> Dict[str, Any]:
-    server = load_servers(root).get(str(name))
+def get_server(root: Path, name: str, *, origin: str = "") -> Dict[str, Any]:
+    """A saved server. ``origin``: where the name came from (e.g. pskit.yml's ``provider.options.deploy.server``),
+    named in the error so a server that was renamed or removed is easy to fix."""
+    servers = load_servers(root)
+    server = servers.get(str(name))
     if server is None:
-        known = ", ".join(sorted(load_servers(root))) or "none yet"
-        raise ServerError(f"no saved SSH server {name!r} (saved: {known}). Add it: pskit resources onprem servers add")
+        raise ServerError(missing_server_message(str(name), servers, origin))
     return dict(server)
 
 
-def server_target(root: Path, name: str) -> Dict[str, Any]:
+def close_servers(name: str, servers: Dict[str, Any]) -> List[str]:
+    """Saved names that look like ``name`` (``VM_01`` -> ``VM_01_2cpu``, ``VM_01_4cpu``), at most three."""
+    import difflib
+
+    known = sorted(servers)
+    low = name.lower()
+    close = [s for s in known if s.lower().startswith(low) or low.startswith(s.lower())]
+    close += [s for s in difflib.get_close_matches(name, known, n=3, cutoff=0.6) if s not in close]
+    return close[:3]
+
+
+def missing_server_message(name: str, servers: Dict[str, Any], origin: str = "") -> str:
+    """``no saved SSH server 'X' ...`` with close names and how to fix it."""
+    close = close_servers(name, servers)
+    where = f" ({origin} names it)" if origin else ""
+    text = f"no saved SSH server {name!r}{where}; saved: {', '.join(sorted(servers)) or 'none yet'}."
+    if close:
+        text += f" Did you mean {' or '.join(close)}?"
+    if origin:
+        text += f" Change {origin} to a saved server (studio: Overview -> Deploy to), or save {name!r} again:"
+        return text + " pskit resources onprem servers add"
+    return text + " Add it: pskit resources onprem servers add"
+
+
+def server_references(root: Path, name: str, raw: Optional[Dict[str, Any]] = None) -> Dict[str, List[str]]:
+    """Where saved server ``name`` is still used: ``clusters`` it belongs to, and ``other`` places (pskit.yml,
+    created resources) that would point at a server that no longer exists once it is removed."""
+    from .onprem_cluster import load_clusters
+    from .onprem_services import load_state
+
+    clusters = sorted(c for c, item in load_clusters(root).items() if name in (item.get("nodes") or {}))
+    other: List[str] = []
+    options = ((raw or {}).get("provider") or {}).get("options") if isinstance(raw, dict) else None
+    deploy = options.get("deploy") if isinstance(options, dict) else None
+    if isinstance(deploy, dict) and str(deploy.get("server") or "") == name:
+        other.append("pskit.yml provider.options.deploy.server")
+    for key, entry in sorted(load_state(root).get("services", {}).items()):
+        target = entry.get("target") if isinstance(entry, dict) else None
+        if isinstance(target, dict) and target.get("server") == name:
+            other.append(f"resource {key}")
+    return {"clusters": clusters, "other": other}
+
+
+def server_target(root: Path, name: str, *, origin: str = "") -> Dict[str, Any]:
     """The service target (``method: ssh``) of a saved server."""
-    return {"method": "ssh", **get_server(root, name), "server": str(name)}
+    return {"method": "ssh", **get_server(root, name, origin=origin), "server": str(name)}
 
 
 _SERVER_PATH = re.compile(r"^/[A-Za-z0-9._/-]*$")
@@ -149,16 +194,25 @@ def save_server(root: Path, name: str, raw: Dict[str, Any], *, description: str 
     return item
 
 
-def remove_server(root: Path, name: str) -> None:
+def remove_server(root: Path, name: str, raw: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Forget a saved server. Refused while it is in a cluster (the cluster would lose a node it cannot reach);
+    returns warnings for the other places that still name it (``raw``: pskit.yml)."""
     servers = load_servers(root)
-    item = servers.pop(str(name), None)
-    if item is None:
-        raise ServerError(f"no saved SSH server {name!r}")
+    if str(name) not in servers:
+        raise ServerError(missing_server_message(str(name), servers))
+    refs = server_references(root, str(name), raw)
+    if refs["clusters"]:
+        first = refs["clusters"][0]
+        raise ServerError(f"{name!r} is in cluster {', '.join(refs['clusters'])}; take it out first: "
+                          f"pskit cluster leave {first} {name} (or remove the cluster)")
+    item = servers.pop(str(name))
     _write(root, servers)
+    warnings = [f"{place} still names {name!r}: point it at another saved server" for place in refs["other"]]
     secret = str(item.get("password_file") or "")
     still_used = any(s.get("password_file") == secret for s in servers.values())
     if secret and not still_used and Path(secret).parent == root / ".pskit" / "ssh" and os.path.isfile(secret):
         os.remove(secret)
+    return warnings
 
 
 def test_server(root: Path, name: str, *, run: Optional[RunFn] = None) -> Dict[str, Any]:
@@ -251,9 +305,12 @@ def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Opti
     remembered = deployed_server(root, stage)
     if not remembered:
         return None
-    if remembered not in load_servers(root):
+    servers = load_servers(root)
+    if remembered not in servers:
+        close = close_servers(remembered, servers)
+        hint = f"Did you mean {' or '.join(close)}? " if close else ""
         raise ServerError(
-            f"onprem-{stage} was last deployed to saved server {remembered!r}, which no longer exists. "
+            f"onprem-{stage} was last deployed to saved server {remembered!r}, which no longer exists. {hint}"
             f"Pick the machine: --server NAME, or --server {LOCAL} for this machine"
         )
     return apply_to_deploy(options, root, remembered)
@@ -290,7 +347,7 @@ def apply_to_deploy(options: Dict[str, Any], root: Path, server: Optional[str] =
     name = server or (deploy.get("server") if isinstance(deploy, dict) else None)
     if not name:
         return None
-    item = get_server(root, str(name))
+    item = get_server(root, str(name), origin="" if server else "pskit.yml provider.options.deploy.server")
     if not isinstance(deploy, dict):
         deploy = {"method": str(deploy)} if isinstance(deploy, str) and deploy in ("ssh", "scp", "docker") else {}
     deploy = dict(deploy)

@@ -94,7 +94,11 @@ def check(body: Dict[str, Any], raw: Optional[Dict[str, Any]], root: Path, targe
         raise ServiceError("functions_url must be the pskit host's URL, e.g. http://10.0.0.5:8080")
     if not url:
         port = int(_onprem_options(raw).get("port") or 8080)
-        functions = functions_target(raw, root)
+        try:
+            functions = functions_target(raw, root)
+        except ServiceError as exc:
+            raise ServiceError(f"{exc} Or set functions_url to the pskit host's URL (e.g. http://10.0.0.5:8080) "
+                               "so the SMTP server knows where to send mail events") from None
         if target["method"] == "local":
             if functions["method"] != "local":
                 raise ServiceError("the functions run on an SSH server: create the SMTP server there, or set "

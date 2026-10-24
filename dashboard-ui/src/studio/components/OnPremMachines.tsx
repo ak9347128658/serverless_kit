@@ -44,7 +44,8 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
     const ok = await confirm({ title: `Forget server ${name}?`, body: "Services already created there keep running; pskit only forgets the connection.", confirmLabel: "Forget", danger: true });
     if (ok !== "confirm") return;
     try {
-      await api.onpremServerRemove(name);
+      const result = await api.onpremServerRemove(name);
+      (result.warnings || []).forEach((w) => toast(w, "err"));
       load();
     } catch (exc) {
       toast(errorMessage(exc), "err");

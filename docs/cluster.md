@@ -78,6 +78,9 @@ Your handler code does not change.
    ```
 
    pskit installs the agent, joins it, and copies the images already deployed, so replicas can start there at once.
+   Joining again is safe. A server left half-joined by a failed join, removed while it was off, or still in an
+   old swarm leaves that membership first. pskit refuses only a server that manages another swarm with nodes or
+   services, or whose swarm is locked.
 
 4. **Point the functions at the cluster** in `pskit.yml` (studio: the *Deploy this project's functions to …*
    switch on the cluster page):
@@ -100,6 +103,12 @@ Your handler code does not change.
    copies it to every server that does not have it yet, applies the stack / manifest / job on the master, and
    waits until `/__pskit/health` answers. `pskit remove` deletes the workloads. The main replica's data stays on
    the master: a Docker volume for Swarm, `/var/lib/pskit/<stack>` for Kubernetes and Nomad.
+
+   The image is sent gzip-compressed in 16 MB parts, each with a checksum. A dropped connection (`scp: Couldn't
+   send packet: Broken pipe`) is retried up to 6 times with growing pauses. Each retry sends only the parts that
+   are missing, and parts already copied stay on the server, so running `pskit deploy` again resumes the copy. The
+   deploy stops only if the master cannot get the image. A worker that fails gets a warning, and replicas placed on
+   it start once a later deploy finishes the copy.
 
 ### One server or the cluster, per deploy
 

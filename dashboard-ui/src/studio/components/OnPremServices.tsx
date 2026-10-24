@@ -283,7 +283,14 @@ export function CreateDrawer({
   const [clusterNode, setClusterNode] = useState("");
   const [version, setVersion] = useState("");
   useEffect(() => {
-    api.onpremServers().then((r) => setServers(r.servers), () => undefined);
+    api.onpremServers().then(
+      (r) => {
+        setServers(r.servers);
+        // pskit.yml may name a server that was removed or renamed: never send a name the picker cannot show.
+        setSavedServer((cur) => (cur && !r.servers.some((s) => s.name === cur) ? (r.servers.length === 1 ? r.servers[0].name : "") : cur));
+      },
+      () => undefined,
+    );
     api.clusters().then(
       (r) => {
         setClusters(r.clusters);
@@ -580,6 +587,9 @@ export function CreateDrawer({
                 options={[{ value: "", label: "New connection…" }, ...servers.map((s) => ({ value: s.name, label: `${s.name} (${s.label})` }))]}
               />
             </FormRow>
+          )}
+          {where === "ssh" && state.default_target_problem && (
+            <div className="hint-box">{state.default_target_problem}</div>
           )}
           {item.kind === "runtime" && (item.versions || []).length > 0 && (
             <FormRow label="Version" help={`Default ${(item.versions || [])[0]}. Any version number works (e.g. 1.23.4 for Go).`}>

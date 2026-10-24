@@ -1187,12 +1187,14 @@ def resources_onprem_servers_remove(name: str, config_path: Optional[str]) -> No
     """Forget server NAME (services already created there keep running)."""
     from ..core import onprem_servers as srv
 
-    root, _path, _raw = _raw_project(config_path)
+    root, _path, raw = _raw_project(config_path)
     try:
-        srv.remove_server(root, name)
+        warnings = srv.remove_server(root, name, raw)
     except srv.ServerError as exc:
         raise click.ClickException(str(exc)) from None
     ok(f"Removed server {name}")
+    for line in warnings:
+        click.secho(f"  WARNING: {line}", fg="yellow")
 
 
 # ----------------------------------------------------------------------------- consoles and terminals

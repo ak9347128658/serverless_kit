@@ -30,6 +30,9 @@ class FakeSSH:
 
     def __call__(self, argv: List[str], stdout: Optional[Path]) -> Tuple[int, str]:
         self.calls.append(argv)
+        if argv[:3] == ["docker", "save", "-o"]:
+            Path(argv[3]).write_bytes(b"image layers " * 1000)
+            return 0, ""
         if argv[0] in ("scp", "sshpass") and any(a.endswith(".sh") for a in argv):
             local = next(a for a in argv if a.endswith(".sh") and Path(a).is_file())
             self.scripts.append((argv[-1].split("@")[-1].split(":")[0], Path(local).read_text("utf-8")))
@@ -95,7 +98,7 @@ def test_every_script_is_valid_sh(orch):
         scripts.forget_stale_script(orch, "node-b", "id-1"),
         scripts.join_script(orch, "10.0.0.5", "tok", "10.0.0.6", members=["abc", "def"]),
         scripts.status_script(orch),
-        scripts.image_load_script(orch, "img:1", "pskit-cluster/img.tar"),
+        scripts.image_load_script(orch, "pskit-cluster/img.parts", "ab" * 32, "pskit-cluster/img-*.parts"),
         scripts.prune_script(orch, "pskit-shop-dev", "abc"),
         scripts.apply_script(orch, "pskit-shop-dev", manifests[orch], 8080),
         scripts.destroy_script(orch, "pskit-shop-dev"),
@@ -539,7 +542,7 @@ def test_deploy_builds_ships_applies_and_records(servers, tmp_path):
     record = clu.deploy(app, spec, lines.append, run=run)
     assert record["image"] == "pskit-shop-dev:0123456789ab" and record["replicas"] == 3
     assert ["docker", "save", "-o"] == next(c for c in fake.calls if c[:2] == ["docker", "save"])[:3]
-    loads = [s for s in fake.scripts if "dk load -i" in s[1]]
+    loads = [s for s in fake.scripts if "gunzip | dk load" in s[1]]
     assert len(loads) == 2  # the master and the joined server
     applied = fake.script("dk stack deploy")
     assert "dk stack deploy --prune --resolve-image never -c pskit-cluster/pskit-shop-dev.json 'pskit-shop-dev'" in applied
@@ -552,6 +555,121 @@ def test_deploy_builds_ships_applies_and_records(servers, tmp_path):
     clu.destroy(app, spec, lines.append, run=fake)
     assert "dk stack rm 'pskit-shop-dev'" in fake.script("stack rm")
     assert clu.get_cluster(servers, "prod").get("deployments") == {}
+
+
+class FlakySCP(FakeSSH):
+    """scp of image parts breaks ``breaks[host]`` times per host; the server "keeps" every part that arrived."""
+
+    def __init__(self, breaks: dict, have: Optional[dict] = None) -> None:
+        super().__init__()
+        self.breaks = dict(breaks)
+        self.have = have or {}  # host -> {part name: sha256}
+        self.sent: List[Tuple[str, str]] = []
+        self.local: dict = {}
+
+    def __call__(self, argv, stdout):
+        if argv[0] == "scp" and ".parts/part-" in argv[-1]:
+            host = argv[-1].split("@")[-1].split(":")[0]
+            part = argv[-1].rsplit("/", 1)[-1]
+            if self.breaks.get(host, 0) > 0:
+                self.breaks[host] -= 1
+                return 255, "scp: Couldn't send packet: Broken pipe"
+            import hashlib
+            self.have.setdefault(host, {})[part] = hashlib.sha256(Path(argv[-2]).read_bytes()).hexdigest()
+            self.sent.append((host, part))
+            return 0, ""
+        if "sha256sum part-*" in argv[-1]:
+            host = next(a.split("@")[-1] for a in argv if "@" in a)
+            return 0, "".join(f"{sha}  {name}\n" for name, sha in sorted(self.have.get(host, {}).items()))
+        return super().__call__(argv, stdout)
+
+
+def _targets(root: Path, *names: str) -> dict:
+    return {n: clu._target(root, n) for n in names}
+
+
+def test_image_copy_resumes_after_broken_pipe(servers, tmp_path, monkeypatch):
+    monkeypatch.setattr(clu, "RETRY_DELAY", 0)
+    monkeypatch.setattr(clu, "CHUNK_BYTES", 1024)
+    tar = tmp_path / "image.tar"
+    tar.write_bytes(bytes(range(256)) * 64)  # ~16 KB, compresses to several 1 KB parts
+    fake = FlakySCP({"10.0.0.5": 2})
+    lines: List[str] = []
+    assert clu.ship_image("swarm", "pskit-shop-dev:abc", _targets(servers, "edge1", "edge2"), lines.append, fake,
+                          tar=tar, required=("edge1",)) == []
+    sent = [p for h, p in fake.sent if h == "10.0.0.5"]
+    assert len(sent) == len(set(sent))  # a part that arrived is never sent again
+    assert any("copy interrupted" in m and "attempt 2 of" in m for m in lines)
+    assert any("edge1: loaded pskit-shop-dev:abc" in m for m in lines)
+    load = fake.script("gunzip | dk load")
+    assert "sha256sum" in load and "pskit-cluster/pskit-shop-dev-abc.parts" in load
+
+    # A later deploy finds the parts already on the server and sends nothing again.
+    again = FlakySCP({}, have={h: dict(p) for h, p in fake.have.items()})
+    clu.ship_image("swarm", "pskit-shop-dev:abc", _targets(servers, "edge1"), lines.append, again, tar=tar)
+    assert again.sent == []
+
+
+def test_image_copy_failure_on_a_worker_only_warns(servers, tmp_path, monkeypatch):
+    monkeypatch.setattr(clu, "RETRY_DELAY", 0)
+    tar = tmp_path / "image.tar"
+    tar.write_bytes(b"x" * 5000)
+    fake = FlakySCP({"10.0.0.6": 100})
+    lines: List[str] = []
+    failed = clu.ship_image("swarm", "img:1", _targets(servers, "edge1", "edge2"), lines.append, fake, tar=tar,
+                            required=("edge1",))
+    assert failed == ["edge2"]
+    assert any("WARNING: edge2:" in m and "run the deploy again" in m for m in lines)
+
+    with pytest.raises(clu.ServiceError, match="could not copy the image to edge1.*parts already copied are kept"):
+        clu.ship_image("swarm", "img:1", _targets(servers, "edge1", "edge2"), lines.append,
+                       FlakySCP({"10.0.0.5": 100}), tar=tar, required=("edge1",))
+
+
+def test_pack_image_is_reproducible(tmp_path, monkeypatch):
+    monkeypatch.setattr(clu, "CHUNK_BYTES", 4096)
+    tar = tmp_path / "image.tar"
+    tar.write_bytes(bytes(range(256)) * 400)
+    first = clu._pack_image(tar, tmp_path / "a")
+    second = clu._pack_image(tar, tmp_path / "b")
+    assert [p[2] for p in first[0]] == [p[2] for p in second[0]] and first[1] == second[1]
+    import gzip
+    joined = b"".join(p[1].read_bytes() for p in first[0])
+    assert gzip.decompress(joined) == tar.read_bytes() and len(joined) == first[2]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX sh")
+def test_image_load_script_checks_and_loads(tmp_path):
+    import gzip
+    import hashlib
+    payload = gzip.compress(b"layers" * 100, mtime=0)
+    parts = tmp_path / "img.parts"
+    parts.mkdir()
+    (parts / "part-00000").write_bytes(payload[:50])
+    (parts / "part-00001").write_bytes(payload[50:])
+    stale = tmp_path / "img-old.parts"
+    stale.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    loaded = tmp_path / "loaded"
+    (bin_dir / "docker").write_bytes(f'#!/bin/sh\n[ "$1" = load ] && cat > "{loaded.as_posix()}"\nexit 0\n'.encode())
+    (bin_dir / "docker").chmod(0o755)
+    (bin_dir / "curl").write_bytes(b"#!/bin/sh\nexit 0\n")
+    (bin_dir / "curl").chmod(0o755)
+    env ={"PATH": f"{bin_dir.as_posix()}:/usr/bin:/bin", "HOME": tmp_path.as_posix()}
+
+    def run(sha: str) -> int:
+        script = tmp_path / "load.sh"
+        script.write_bytes(scripts.image_load_script("swarm", parts.as_posix(), sha,
+                                                     f"{tmp_path.as_posix()}/img-*.parts").encode())
+        return subprocess.run([shutil.which("sh"), script.as_posix()], env=env, capture_output=True).returncode
+
+    assert run("0" * 64) == 1 and not parts.exists()  # damaged copy: deleted, so it is sent again
+    parts.mkdir()
+    (parts / "part-00000").write_bytes(payload[:50])
+    (parts / "part-00001").write_bytes(payload[50:])
+    assert run(hashlib.sha256(payload).hexdigest()) == 0
+    assert loaded.read_bytes() == b"layers" * 100 and not parts.exists() and not stale.exists()
 
 
 def test_nomad_scale_re_registers_the_job(servers):

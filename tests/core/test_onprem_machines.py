@@ -410,3 +410,70 @@ def test_host_control_for_a_chosen_server(tmp_path, monkeypatch):
     assert isinstance(log_backend(record, tmp_path, "edge2"), OnPremLogs)
     with pytest.raises(ValueError, match="no saved SSH server"):
         control_for(record, tmp_path, "nope")
+
+
+# ----------------------------------------------------------------------------- a removed / renamed saved server
+STALE_RAW = {**RAW, "provider": {"name": "onprem", "runtime": "python3.12",
+                                 "options": {"port": 8080, "deploy": {"method": "ssh", "server": "VM_01"}}}}
+
+
+def _vm_servers(root: Path) -> None:
+    for name, host in (("VM_01_2cpu", "10.0.0.5"), ("VM_01_4cpu", "10.0.0.6"), ("VM_02_2cpu", "10.0.0.7")):
+        srv.save_server(root, name, {"host": host, "user": "azureuser", "auth": "agent"})
+
+
+def test_missing_server_names_close_matches_and_where_it_came_from(tmp_path):
+    _vm_servers(tmp_path)
+    with pytest.raises(srv.ServerError) as exc:
+        srv.get_server(tmp_path, "VM_01", origin=svc.CONFIG_SERVER)
+    text = str(exc.value)
+    assert "Did you mean VM_01_2cpu or VM_01_4cpu?" in text and "VM_02_2cpu" not in text.split("Did you mean")[1]
+    assert "pskit.yml provider.options.deploy.server names it" in text and "Change pskit.yml" in text
+    assert srv.close_servers("vm_02_2CPU", srv.load_servers(tmp_path))[0] == "VM_02_2cpu"
+    assert srv.close_servers("other", srv.load_servers(tmp_path)) == []
+
+    options = {"deploy": {"method": "ssh", "server": "VM_01"}}
+    with pytest.raises(srv.ServerError, match="pskit.yml provider.options.deploy.server names it"):
+        srv.resolve_deploy(options, tmp_path, "dev")
+
+
+def test_picked_server_works_while_pskit_yml_names_a_removed_one(tmp_path):
+    _vm_servers(tmp_path)
+    assert "Did you mean VM_01_2cpu" in svc.default_target_problem(STALE_RAW, tmp_path)
+    assert svc.default_target_problem(RAW, tmp_path) == ""
+    fake = FakeDocker()
+    entry = svc.create(tmp_path, {"key": "jobs", "service": "redis", "target": {"method": "ssh", "server": "VM_01_2cpu"}},
+                       STALE_RAW, lambda _l: None, run=fake, wait_seconds=1)
+    assert entry["target"]["server"] == "VM_01_2cpu"
+    # No target picked: the error says pskit.yml names the removed server.
+    with pytest.raises(svc.ServiceError, match="names it.*Did you mean VM_01_2cpu"):
+        svc.check_request({"key": "cache", "service": "redis"}, tmp_path, STALE_RAW, place=False)
+
+
+def test_smtp_with_a_removed_functions_server_says_how_to_fix(tmp_path):
+    _vm_servers(tmp_path)
+    body = {"key": "mail", "service": "smtp", "domains": ["inbound.example.com"],
+            "target": {"method": "ssh", "server": "VM_01_2cpu"}}
+    with pytest.raises(svc.ServiceError, match="Did you mean VM_01_2cpu.*Or set functions_url"):
+        svc.check_request(body, tmp_path, STALE_RAW, place=False)
+    ok = svc.check_request({**body, "functions_url": "http://10.0.0.5:8080"}, tmp_path, STALE_RAW, place=False)
+    assert ok["smtp"]["functions_url"] == "http://10.0.0.5:8080"
+
+
+def test_remove_server_in_a_cluster_is_refused_and_warns_about_references(tmp_path):
+    from py_serverless_kit.core import onprem_cluster as clu
+
+    _vm_servers(tmp_path)
+    with clu._LOCK:
+        clu._save(tmp_path, {"fun": {"orchestrator": "swarm", "master": "VM_01_2cpu", "advertise": "10.0.0.5",
+                                     "nodes": {"VM_01_2cpu": {"role": "master"}, "VM_02_2cpu": {"role": "worker"}}}})
+    with pytest.raises(srv.ServerError, match="is in cluster fun; take it out first: pskit cluster leave fun VM_02_2cpu"):
+        srv.remove_server(tmp_path, "VM_02_2cpu")
+    assert "VM_02_2cpu" in srv.load_servers(tmp_path)
+
+    raw = {**RAW, "provider": {"name": "onprem", "options": {"deploy": {"server": "VM_01_4cpu"}}}}
+    warnings = srv.remove_server(tmp_path, "VM_01_4cpu", raw)
+    assert warnings == ["pskit.yml provider.options.deploy.server still names 'VM_01_4cpu': point it at another "
+                        "saved server"]
+    with pytest.raises(srv.ServerError, match="Did you mean VM_01_2cpu"):
+        srv.remove_server(tmp_path, "VM_01")

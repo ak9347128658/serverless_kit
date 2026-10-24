@@ -226,7 +226,7 @@ export const api = {
   onpremServerSave: (name: string, target: JsonObject, description?: string) =>
     request<{ name: string }>("POST", "/api/onprem-servers", { name, target, description }),
   onpremServerTest: (name: string) => request<OnPremServerTest>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/test`, {}),
-  onpremServerRemove: (name: string) => request<{ removed: string }>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/remove`, {}),
+  onpremServerRemove: (name: string) => request<{ removed: string; warnings?: string[] }>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/remove`, {}),
   onpremServerShell: (name: string, line: string) =>
     request<OnPremConsoleResult>("POST", `/api/onprem-servers/${encodeURIComponent(name)}/shell`, { line }),
   onpremTerminals: () => request<{ terminals: OnPremTerminal[] }>("GET", "/api/onprem-terminals"),

@@ -367,41 +367,122 @@ def save_settings(root: Path, name: str, body: Dict[str, Any]) -> Dict[str, Any]
 
 
 # ----------------------------------------------------------------------------------------------- images
-def ship_image(orchestrator: str, image: str, targets: Dict[str, Dict[str, Any]], emit: Emit,
-               run: Optional[RunFn] = None, *, tar: Optional[Path] = None) -> None:
-    """Copy ``image`` (built on this machine) to every server that does not have it yet, in parallel."""
-    from ..providers.onprem_remote import scp_argv
+CHUNK_BYTES = 16 * 1024 * 1024  # one scp per part: a dropped connection costs one part, not the whole image
+COPY_ATTEMPTS = 6
+RETRY_DELAY = 5.0  # seconds before the first retry; doubles each time (max 60)
 
+
+def ship_image(orchestrator: str, image: str, targets: Dict[str, Dict[str, Any]], emit: Emit,
+               run: Optional[RunFn] = None, *, tar: Optional[Path] = None, required: Tuple[str, ...] = ()) -> List[str]:
+    """Copy ``image`` (built on this machine) to every server that does not have it yet, in parallel.
+
+    The image goes gzip-compressed in parts with checksums. A server gets only the parts it does not already
+    have, so a broken connection is retried from where it stopped (also by the next ``pskit deploy``). Returns
+    the servers that still could not get it; raises when one of ``required`` (the master) or every server failed.
+    """
     runner = _Runner(emit, run)
     fn = run or _default_run
     missing = {s: t for s, t in targets.items() if fn(_ssh_argv(t, scripts.has_image_command(orchestrator, image)), None)[0]}
     if not missing:
         emit(f"  every server already has {image}")
-        return
+        return []
     with tempfile.TemporaryDirectory(prefix="pskit-image-") as tmp:
         archive = tar or Path(tmp) / "image.tar"
         if tar is None:
             runner(["docker", "save", "-o", str(archive), image])
-        size = archive.stat().st_size / 1e6 if archive.is_file() else 0.0
-        name = re.sub(r"[^A-Za-z0-9._-]+", "-", image) + ".tar"
+        if not archive.is_file():
+            raise ServiceError(f"docker save wrote no {archive.name} for {image}")
+        parts, digest, size = _pack_image(archive, Path(tmp) / "parts")
+        emit(f"  compressed to {size / 1e6:.0f} MB in {len(parts)} part(s)")
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", image)
+        repo = re.sub(r"[^A-Za-z0-9._-]+", "-", image.rsplit(":", 1)[0])
 
         def one(server: str) -> Optional[str]:
             target = missing[server]
-            remote = f"{_workdir(target)}/{name}"
-            try:
-                runner(_ssh_argv(target, _mkdir_command(target)), show=False)
-                runner(scp_argv(ssh_options(target), str(archive), remote), show=False)
-                _script(target, scripts.image_load_script(orchestrator, image, remote), emit, run, label="load",
-                        show=False)
-            except ServiceError as exc:
-                return f"{server}: {exc}"
-            emit(f"  {server}: loaded {image} ({size:.0f} MB)")
-            return None
+            parts_dir = f"{_workdir(target)}/{slug}.parts"
+            stale = f"{_workdir(target)}/{repo}-{'?' * 12}.parts"  # older tags of this stack only
+            load = scripts.image_load_script(orchestrator, parts_dir, digest, stale_glob=stale)
+            delay = RETRY_DELAY
+            error: Optional[ServiceError] = None
+            for attempt in range(1, COPY_ATTEMPTS + 1):
+                try:
+                    _send_parts(target, server, parts_dir, parts, size, runner, fn, emit)
+                    _script(target, load, emit, run, label="load", show=False)
+                    emit(f"  {server}: loaded {image}")
+                    return None
+                except ServiceError as exc:
+                    error = exc
+                if attempt < COPY_ATTEMPTS:
+                    emit(f"  {server}: copy interrupted ({error}); resuming in {delay:.0f} s"
+                         f" (attempt {attempt + 1} of {COPY_ATTEMPTS})")
+                    time.sleep(delay)
+                    delay = min(60.0, delay * 2)
+            return f"{server}: {error}"
 
         with ThreadPoolExecutor(max_workers=min(8, len(missing))) as pool:
-            errors = [e for e in pool.map(one, sorted(missing)) if e]
-    if errors:
-        raise ServiceError("could not copy the image to " + "; ".join(errors))
+            results = dict(zip(sorted(missing), pool.map(one, sorted(missing))))
+    failed = {s: e for s, e in results.items() if e}
+    if failed and (len(failed) == len(missing) or any(s in failed for s in required)):
+        raise ServiceError("could not copy the image to " + "; ".join(failed.values())
+                           + ". Check the connection and run the deploy again: parts already copied are kept")
+    for error in failed.values():
+        emit(f"  WARNING: {error}. Replicas placed on that server cannot start until the image is there:"
+             " run the deploy again to finish the copy")
+    return sorted(failed)
+
+
+def _pack_image(archive: Path, out: Path) -> Tuple[List[Tuple[str, Path, str, int]], str, int]:
+    """gzip ``archive`` (reproducibly) into ``out/part-NNNNN`` files of ``CHUNK_BYTES``.
+    Returns ``[(name, path, sha256, bytes)]``, the sha256 of the whole gzip and its size."""
+    import gzip
+    import hashlib
+    import shutil
+
+    out.mkdir(parents=True, exist_ok=True)
+    packed = out / "image.tar.gz"
+    with open(archive, "rb") as src, open(packed, "wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=6, mtime=0) as gz:
+            shutil.copyfileobj(src, gz, 1024 * 1024)
+    whole = hashlib.sha256()
+    parts: List[Tuple[str, Path, str, int]] = []
+    with open(packed, "rb") as handle:
+        while True:
+            chunk = handle.read(CHUNK_BYTES)
+            if not chunk and parts:
+                break
+            name = f"part-{len(parts):05d}"
+            path = out / name
+            path.write_bytes(chunk)
+            whole.update(chunk)
+            parts.append((name, path, hashlib.sha256(chunk).hexdigest(), len(chunk)))
+            if not chunk:
+                break
+    size = packed.stat().st_size
+    packed.unlink()
+    return parts, whole.hexdigest(), size
+
+
+def _send_parts(target: Dict[str, Any], server: str, parts_dir: str, parts: List[Tuple[str, Path, str, int]],
+                size: int, runner: _Runner, fn: RunFn, emit: Emit) -> None:
+    """scp the parts the server does not have yet (checked by sha256), reporting progress."""
+    from ..providers.onprem_remote import _shq, scp_argv
+
+    runner(_ssh_argv(target, f"{_mkdir_command(target)} && mkdir -p {_shq(parts_dir)}"), show=False)
+    _code, listing = fn(_ssh_argv(target, f"cd {_shq(parts_dir)} && sha256sum part-* 2>/dev/null || true"), None)
+    have = {}
+    for line in listing.splitlines():
+        bits = line.split()
+        if len(bits) == 2:
+            have[bits[1].lstrip("*")] = bits[0]
+    todo = [p for p in parts if have.get(p[0]) != p[2]]
+    done = size - sum(p[3] for p in todo)
+    if done and todo:
+        emit(f"  {server}: {done / 1e6:.0f} of {size / 1e6:.0f} MB already there, sending the rest")
+    for index, (name, path, _sha, length) in enumerate(todo, 1):
+        runner(scp_argv(ssh_options(target), str(path), f"{parts_dir}/{name}"), show=False)
+        done += length
+        if index == len(todo) or index % 4 == 0:
+            emit(f"  {server}: {done / 1e6:.0f} of {size / 1e6:.0f} MB")
 
 
 # ----------------------------------------------------------------------------------------------- deploy
@@ -483,7 +564,7 @@ def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn]
     master_server = str(info["master"])
     master = nodes[master_server]
     emit(f"Copying {image} to {len(nodes)} server(s) ...")
-    ship_image(orch, image, {s: n["target"] for s, n in nodes.items()}, emit, run)
+    ship_image(orch, image, {s: n["target"] for s, n in nodes.items()}, emit, run, required=(master_server,))
     replicas = int(info["replicas"])
     data_root = str((master.get("target") or {}).get("data_dir") or "")
     common: Dict[str, Any] = {"port": port, "replicas": replicas, "master_node": str(master["node"]),

@@ -17,6 +17,21 @@ All notable changes to this project are documented here. The format follows [Kee
   whose swarm is locked. Older *down* entries for the same host are removed from the master after the rejoin. The
   swarm master setup also recovers from a half-joined state. Kubernetes (k3s) agents are reinstalled when they
   point at a different master or token, and a server running its own k3s server is refused with a clear message.
+- **Copying the function image to cluster servers**: a dropped connection (`scp: Couldn't send packet: Broken
+  pipe`) no longer fails the whole deploy. The image is gzip-compressed, often to a third of its size or less,
+  and sent in 16 MB parts with checksums. Each retry sends only the parts that are missing, up to 6 attempts with
+  growing pauses, and parts already copied stay on the server, so the next `pskit deploy` resumes the copy. The
+  joined image is checked against its checksum before it is loaded, and a damaged copy is sent again. Progress is
+  shown per server. Only a failure on the master stops the deploy; a worker that fails gets a warning instead.
+- **A saved server that was removed or renamed** (pskit.yml still saying `deploy.server: VM_01` after it became
+  `VM_01_2cpu`):
+  - The studio's *Create service* dialog no longer pre-selects a server that is not saved. Before, the picker
+    showed *New connection…* but the request still sent the old name. The dialog now explains what is wrong.
+  - Every *"no saved SSH server"* error says where the name came from (pskit.yml, the last deploy) and suggests
+    close matches (*Did you mean VM_01_2cpu or VM_01_4cpu?*).
+  - Creating an SMTP server with a stale functions server suggests `functions_url`.
+  - `pskit resources onprem servers remove` (and the studio's *Forget*) refuses a server that is still in a
+    cluster, and warns when pskit.yml or a created resource still names it.
 
 ## [1.10.0] - 2026-10-24
 

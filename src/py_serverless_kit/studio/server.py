@@ -460,6 +460,7 @@ def make_handler(app: Studio) -> type:
                         "catalog": svc.catalog(),
                         "services": svc.list_services(root),
                         "default_target": svc.default_target(raw),
+                        "default_target_problem": svc.default_target_problem(raw, root),
                         "env_file": svc.env_file_of(raw),
                     }
                 if not rest and method == "POST":
@@ -653,8 +654,8 @@ def make_handler(app: Studio) -> type:
                     if action == "test":
                         return 200, srv.test_server(root, name)
                     if action == "remove":
-                        srv.remove_server(root, name)
-                        return 200, {"removed": name}
+                        warnings = srv.remove_server(root, name, app.raw_config())
+                        return 200, {"removed": name, "warnings": warnings}
                     if action == "shell":
                         body = _obj(self._body())
                         return 200, con.run_server(srv.server_target(root, name), str(body.get("line") or ""))
