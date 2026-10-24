@@ -130,6 +130,13 @@ def test_logs_and_counts_reach_main(pair):
     assert len(via_web) == len(entries)
     assert web.ship_logs() is True  # nothing new: nothing sent twice
     assert len(_json("GET", main_base + "/__pskit/logs?function=hello&limit=50")[1]["entries"]) == len(entries)
+    # The web replica's own buffer is readable without going through main.
+    status, local = _json("GET", web_base + "/__pskit/logs/local?function=hello&limit=50")
+    assert status == 200 and local["role"] == "web" and local["replica"] == "node-b-1"
+    assert len(local["entries"]) == len(entries)
+    _json("POST", main_base + "/__pskit/invoke/step", {"x": 1})
+    local_after = _json("GET", web_base + "/__pskit/logs/local?limit=50")[1]["entries"]
+    assert all(entry.get("function") != "step" for entry in local_after)
 
 
 def test_workflow_started_on_web_runs_on_main(pair):

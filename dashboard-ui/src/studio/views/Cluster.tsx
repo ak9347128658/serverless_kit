@@ -9,8 +9,9 @@ import { ServerForm } from "../components/OnPremMachines";
 import { useJob } from "../jobs";
 import { href, navigate } from "../route";
 import { useStudio } from "../store";
-import type { ClusterNodeStatus, ClusterRequest, ClusterStatus, JsonObject, OnPremCluster, OnPremClustersState, Orchestrator } from "../types";
+import type { ClusterBalance, ClusterNodeStatus, ClusterRequest, ClusterStatus, JsonObject, OnPremCluster, OnPremClustersState, Orchestrator } from "../types";
 import { asObject } from "../util";
+import { DeployedLogs } from "./Logs";
 
 const NAME_RE = /^[a-z][a-z0-9-]{0,30}$/;
 const REFRESH_MS = 30000;
@@ -290,6 +291,7 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
 
       <Workloads cluster={cluster} status={status} onScale={(stack, replicas) => void startJob("scale", { stack, replicas })} />
       <LiveRequests cluster={cluster} />
+      <ClusterLogs cluster={cluster} />
       <ClusterResources status={status} />
       {jobId && <JobConsole job={job} />}
       <AlertSettings cluster={cluster} onSaved={reload} />
@@ -405,6 +407,7 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
   const [stack, setStack] = useState(stacks[0] || "");
   const [live, setLive] = useState(true);
   const [items, setItems] = useState<ClusterRequest[]>([]);
+  const [shape, setShape] = useState<ClusterBalance | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [onScreen, setOnScreen] = useState(false);
   const [tabVisible, setTabVisible] = useState(() => document.visibilityState === "visible");
@@ -430,6 +433,7 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
   useEffect(() => {
     since.current = 0;
     setItems([]);
+    setShape(null);
   }, [stack]);
 
   const active = live && onScreen && tabVisible && !!stack;
@@ -442,6 +446,7 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
         const page = await api.clusterRequests(cluster.name, stack, since.current);
         if (stopped) return;
         since.current = page.next || since.current;
+        if (page.balance) setShape(page.balance);
         if (page.items.length) setItems((old) => [...old, ...page.items].slice(-LIVE_MAX));
         setError(null);
       } catch (exc) {
@@ -457,9 +462,11 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
   }, [active, cluster.name, stack]);
 
   const shown = filter ? items.filter((r) => r.server === filter) : items;
-  const perServer: Record<string, number> = {};
-  for (const r of items) perServer[r.server || "?"] = (perServer[r.server || "?"] || 0) + 1;
-  const top = Math.max(1, ...Object.values(perServer));
+  const httpCounts: Record<string, number> = {};
+  for (const r of items) if (r.method) httpCounts[r.server || "?"] = (httpCounts[r.server || "?"] || 0) + 1;
+  const balanceRows = (shape?.servers || []).map((row) => ({ ...row, requests: httpCounts[row.server] || 0 }));
+  const httpTotal = balanceRows.reduce((sum, row) => sum + row.requests, 0) || Object.values(httpCounts).reduce((sum, n) => sum + n, 0);
+  const top = Math.max(1, ...balanceRows.map((row) => row.requests), ...Object.values(httpCounts));
 
   return (
     <div className="card card-pad" ref={box}>
@@ -486,28 +493,50 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
         <>
           <p className="muted small">
             Every request to <span className="mono">{cluster.deployments[stack]?.endpoint}</span> and which server and replica handled it (the main replica
-            on the master runs schedules, queue / storage / topic triggers and workflows). Updates every 2 s while this card is on screen; the same as{" "}
-            <code className="mono">pskit cluster requests {cluster.name} --follow</code>.
+            on the master runs schedules, queue / storage / topic triggers and workflows). The table lists every server, including ones with no traffic yet.
+            Updates every 2 s while this card is on screen; the same as <code className="mono">pskit cluster requests {cluster.name} --follow</code>.
           </p>
-          {Object.keys(perServer).length > 0 && (
-            <div className="live-servers">
-              {Object.entries(perServer)
-                .sort((a, b) => b[1] - a[1])
-                .map(([server, count]) => (
-                  <button
-                    key={server}
-                    type="button"
-                    className={`live-server${filter === server ? " active" : ""}`}
-                    onClick={() => setFilter(filter === server ? "" : server)}
-                    title={filter === server ? "Show every server" : `Only ${server}`}
-                  >
-                    <span className="mono">{server}</span>
-                    <span className="live-bar">
-                      <span style={{ width: `${(100 * count) / top}%` }} />
-                    </span>
-                    <span className="small">{count}</span>
-                  </button>
-                ))}
+          {shape && <p className="muted small">{shape.note}</p>}
+          {balanceRows.length > 0 && (
+            <div className="live-table">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Server</th>
+                    <th>Answers</th>
+                    <th>HTTP</th>
+                    <th>Share</th>
+                    <th>URL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {balanceRows.map((row) => {
+                    const share = httpTotal ? (100 * row.requests) / httpTotal : 0;
+                    return (
+                      <tr key={row.server}>
+                        <td>
+                          <button
+                            type="button"
+                            className={`btn btn-sm${filter === row.server ? " btn-primary" : ""}`}
+                            onClick={() => setFilter(filter === row.server ? "" : row.server)}
+                          >
+                            {row.server}
+                          </button>
+                        </td>
+                        <td>{row.serves === "main" ? "main replica" : "web replica"}</td>
+                        <td>
+                          <span className="live-bar" style={{ display: "inline-block", width: 80, verticalAlign: "middle" }}>
+                            <span style={{ width: `${(100 * row.requests) / top}%` }} />
+                          </span>{" "}
+                          {row.requests}
+                        </td>
+                        <td className="small">{share.toFixed(1)}%</td>
+                        <td className="mono small">{row.url}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
           {error && <div className="form-error small">{error}</div>}
@@ -545,6 +574,50 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
               </table>
             </div>
           )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Live logs of one deployment on this cluster, the same tail as the Logs page and `pskit logs -f`. */
+function ClusterLogs({ cluster }: { cluster: OnPremCluster }) {
+  const { draft } = useStudio();
+  const stacks = Object.keys(cluster.deployments).sort();
+  const stackKey = stacks.join("\n");
+  const [stack, setStack] = useState(stacks[0] || "");
+  useEffect(() => {
+    const names = stackKey.split("\n").filter(Boolean);
+    setStack((current) => (names.includes(current) ? current : names[0] || ""));
+  }, [stackKey]);
+  const dep = stack ? cluster.deployments[stack] : undefined;
+  const functions = Object.keys(asObject(draft.functions));
+  return (
+    <div className="card card-pad">
+      <div className="row-gap wrap">
+        <h3>Live logs</h3>
+        {stacks.length > 1 && (
+          <select className="select" value={stack} onChange={(e) => setStack(e.target.value)} aria-label="Deployment logs">
+            {stacks.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+      {!dep ? (
+        <p className="muted small">Nothing deployed on this cluster yet. Deploy with Run on → Scaling cluster and the log tail shows here, the same as on one machine.</p>
+      ) : (
+        <>
+          <p className="muted small">
+            Logs of every replica of <span className="mono">{stack}</span>
+            {cluster.orchestrator === "nomad"
+              ? ", read from each server so a web replica's lines show with the main replica."
+              : ". Web replicas send their lines to the main replica, and this tail reads them there."}{" "}
+            Same as <code className="mono">pskit logs -f</code>.
+          </p>
+          <DeployedLogs provider="onprem" stage={dep.stage || "dev"} functions={functions} />
         </>
       )}
     </div>

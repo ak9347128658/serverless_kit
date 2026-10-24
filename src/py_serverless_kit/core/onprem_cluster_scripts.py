@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..providers.onprem_remote import _docker_install_block, _docker_ready_block, _docker_shell_header, _shq
 
@@ -437,11 +437,16 @@ def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, mas
 def nomad_job(stack: str, image: str, *, port: int, replicas: int, master_node: str, master_addr: str, cpu: float,
               memory_mb: int, data_root: Optional[str] = None) -> Dict[str, Any]:
     """A Nomad job (jobs API JSON). ``main`` holds ``port`` on the master; ``web`` holds it on each other server
-    (one per server: put your load balancer in front of every server's ``port``)."""
+    (one per server). Nomad does not load-balance: each of those servers answers on ``port`` itself. A load
+    balancer in front of them is optional, and only for a single URL."""
     seconds = 10**9
 
     def group(role: str, count: int, env: Dict[str, str], constraints: List[Dict[str, str]]) -> Dict[str, Any]:
-        config: Dict[str, Any] = {"image": image, "ports": ["http"], "force_pull": False}
+        # Group mode "host" is not enough. The Docker driver stays on its own bridge unless network_mode
+        # is host, and then the published port is not on the server's loopback. /__pskit/health is checked
+        # there. Host networking lets the process bind 0.0.0.0:<port> on the server itself. `ports` would
+        # ask Docker to publish a port, which conflicts with host networking.
+        config: Dict[str, Any] = {"image": image, "network_mode": "host", "force_pull": False}
         if role == "main":
             config["volumes"] = [f"{data_root or DATA_ROOT}/{stack}:/var/pskit/data"]
         return {
@@ -502,10 +507,27 @@ def apply_script(orchestrator: str, stack: str, manifest: Dict[str, Any], port: 
                f"{k} rollout status deployment/{stack}-main -n {NAMESPACE} --timeout={timeout}s\n"
                f"{k} rollout status deployment/{stack}-web -n {NAMESPACE} --timeout={timeout}s || true\n")
     else:
-        run = ("curl -fsS -X POST -H 'Content-Type: application/json' --data @" + path
-               + " http://127.0.0.1:4646/v1/jobs\necho\n")
+        # Stop the previous job first. Main and web each bind this port on the host, so a new allocation
+        # cannot start beside the old one. A missing job is fine (the DELETE fails and is ignored).
+        run = (
+            "export NOMAD_ADDR=http://127.0.0.1:4646\n"
+            f"curl -fsS -X DELETE 'http://127.0.0.1:4646/v1/job/{stack}' >/dev/null 2>&1 || true\n"
+            "pskit_stop=0\n"
+            'while [ "$pskit_stop" -lt 30 ]; do\n'
+            "  pskit_live=$(nomad job allocs -t "
+            "'{{range .}}{{if eq .ClientStatus \"running\"}}x{{end}}{{end}}' "
+            f"{_shq(stack)} 2>/dev/null || true)\n"
+            '  [ -z "$pskit_live" ] && break\n'
+            "  pskit_stop=$((pskit_stop + 1))\n"
+            "  sleep 2\ndone\n"
+            "curl -fsS -X POST -H 'Content-Type: application/json' --data @" + path
+            + " http://127.0.0.1:4646/v1/jobs\necho\n"
+        )
     health = f"curl -fsS -m 3 http://127.0.0.1:{port}/__pskit/health >/dev/null 2>&1"
-    return _header() + write + run + _wait(health, timeout, f"no answer on http://127.0.0.1:{port}/__pskit/health")
+    progress, on_fail = _apply_progress(orchestrator, stack)
+    waited = _wait(health, timeout, f"no answer on http://127.0.0.1:{port}/__pskit/health",
+                   progress=progress, on_fail=on_fail)
+    return _header() + write + run + waited
 
 
 def destroy_script(orchestrator: str, stack: str) -> str:
@@ -545,15 +567,83 @@ def _swarm_locked_check() -> str:
     )
 
 
-def _wait(check: str, seconds: int, message: str, *, fail: bool = True) -> str:
-    """Retry ``check`` every 2 s for ``seconds``; then fail with ``message`` (or only warn)."""
-    end = f'  echo "pskit: {message}" >&2\n' + ("  exit 1\n" if fail else "")
+def _wait(check: str, seconds: int, message: str, *, fail: bool = True, progress: str = "",
+          on_fail: str = "") -> str:
+    """Retry ``check`` every 2 s for ``seconds``; then fail with ``message`` (or only warn).
+
+    ``progress`` runs on the first miss and every 10 s after that, so a long wait shows what the orchestrator
+    is doing instead of sitting silent. ``on_fail`` runs once when the wait gives up."""
+    tick = ""
+    if progress:
+        tick = (
+            '  if [ $((pskit_i % 5)) -eq 1 ]; then\n'
+            f'    echo "pskit: waiting ({message})"\n'
+            + _indent(progress, 4)
+            + "  fi\n"
+        )
+    end = f'  echo "pskit: {message}" >&2\n'
+    if on_fail:
+        end += _indent(on_fail, 2)
+    if fail:
+        end += "  exit 1\n"
     return (
         "pskit_ok=0\npskit_i=0\n"
         f'while [ "$pskit_i" -lt {max(1, seconds // 2)} ]; do\n'
         f"  if {check}; then pskit_ok=1; break; fi\n"
-        "  pskit_i=$((pskit_i + 1))\n  sleep 2\ndone\n"
+        "  pskit_i=$((pskit_i + 1))\n"
+        + tick
+        + "  sleep 2\ndone\n"
         f'if [ "$pskit_ok" != "1" ]; then\n{end}fi\n'
+    )
+
+
+def _indent(text: str, spaces: int) -> str:
+    pad = " " * spaces
+    return "".join(pad + line + "\n" for line in text.strip("\n").split("\n"))
+
+
+def _apply_progress(orchestrator: str, stack: str) -> Tuple[str, str]:
+    """Shell run while a deploy waits for ``/__pskit/health``, and (for Nomad) the dump printed if it never answers."""
+    if orchestrator == "swarm":
+        filt = _shq("label=com.docker.stack.namespace=" + stack)
+        return f"dk service ls --filter {filt} || true\n", ""
+    if orchestrator == "kubernetes":
+        return (f"as_root k3s kubectl get pods -n {NAMESPACE} -l app={stack} -o wide || true\n", "")
+    return _nomad_watch(stack), (
+        'echo "pskit: this check is the main replica on the master (127.0.0.1), not a load balancer" >&2\n'
+        'echo "pskit: Nomad does not load-balance. Each server answers on its own port." >&2\n'
+        f"nomad job status {_shq(stack)} >&2 || true\n"
+        + _nomad_watch(stack)
+    )
+
+
+def _nomad_watch(stack: str) -> str:
+    """One snapshot: every allocation, then events and recent logs for main and for anything not running.
+
+    The main replica is the one ``/__pskit/health`` on the master is waiting for. A web replica on another
+    server does not open that port."""
+    quoted = _shq(stack)
+    table = (
+        "nomad job allocs -t "
+        r"""'{{range .}}{{printf "  %-8s %-12s %s\n" .TaskGroup .ClientStatus .NodeName}}{{end}}' """
+        + quoted
+    )
+    ids = (
+        "nomad job allocs -t "
+        "'{{range .}}{{if or (ne .ClientStatus \"running\") (eq .TaskGroup \"main\")}}"
+        "{{println .ID}}{{end}}{{end}}' "
+        + quoted
+    )
+    awk = "'f { print; c++; if (c == 8) exit } /Recent Events/ { f = 1; c = 0; print }'"
+    return (
+        f'echo "pskit: Nomad allocations for {stack}:"\n'
+        f"{table} 2>&1 || true\n"
+        f"for pskit_alloc in $({ids} 2>/dev/null || true); do\n"
+        '  echo "pskit: allocation $pskit_alloc"\n'
+        f'  nomad alloc status "$pskit_alloc" 2>/dev/null | awk {awk} || true\n'
+        '  nomad alloc logs -stderr -tail -n 20 "$pskit_alloc" host 2>/dev/null || true\n'
+        '  nomad alloc logs -stdout -tail -n 10 "$pskit_alloc" host 2>/dev/null || true\n'
+        "done\n"
     )
 
 

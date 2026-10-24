@@ -246,8 +246,15 @@ def test_workloads_split_main_and_web():
     assert web_g["Count"] == 2 and {c["Operand"] for c in web_g["Constraints"]} == {"!=", "distinct_hosts"}
     assert web_g["Tasks"][0]["Env"]["PSKIT_MAIN_URL"] == "http://10.0.0.5:8080"
     assert web_g["Tasks"][0]["Resources"] == {"CPU": 500, "MemoryMB": 256}
+    assert web_g["Tasks"][0]["Config"]["network_mode"] == "host"
+    assert "ports" not in web_g["Tasks"][0]["Config"]
+    assert main_g["Tasks"][0]["Config"]["network_mode"] == "host"
     apply = scripts.apply_script("nomad", "pskit-shop-dev", {"Job": job}, 8080)
     assert "<<'PSKIT_MANIFEST'" in apply and "--data @pskit-cluster/pskit-shop-dev.json" in apply
+    assert "network_mode" in apply and "nomad job allocs" in apply and "nomad alloc logs" in apply
+    assert "DELETE 'http://127.0.0.1:4646/v1/job/pskit-shop-dev'" in apply
+    assert "not a load balancer" in apply
+    _sh_ok(apply)
 
 
 # ------------------------------------------------------------------------------------------- parsing
@@ -743,8 +750,119 @@ def test_requests_feed_maps_nodes_to_servers(servers):
     assert [i["server"] for i in page["items"]] == ["edge2", "edge1", "edge2"]
     assert page["servers"] == {"edge2": 2, "edge1": 1} and page["next"] == 42 and page["stack"] == "pskit-shop-dev"
     assert control.calls == [("GET", "/__pskit/requests", {"since": 7, "limit": 200})]
+    balance = page["balance"]
+    assert balance["mode"] == "mesh" and balance["spreads"] is True and balance["port"] == 8080
+    by_server = {row["server"]: row for row in balance["servers"]}
+    assert set(by_server) == {"edge1", "edge2"}  # every server, including one with no HTTP requests
+    assert by_server["edge2"]["requests"] == 2 and by_server["edge2"]["share"] == 100.0
+    assert by_server["edge1"]["requests"] == 0 and by_server["edge1"]["serves"] == "web"
+    assert by_server["edge2"]["url"] == "http://10.0.0.6:8080"
     with pytest.raises(clu.ClusterError, match="not deployed"):
         clu.requests_feed(servers, "prod", "other", control=control)
+
+
+def test_nomad_balance_lists_every_server_and_its_url(servers):
+    fake = FakeSSH()
+    clu.create_cluster(servers, "prod", "nomad", "edge1", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge2", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge3", lambda _l: None, run=fake)
+    clu._update(servers, "prod", lambda c: c.setdefault("deployments", {}).__setitem__(
+        "pskit-shop-dev", {"stage": "dev", "endpoint": "http://10.0.0.5:8080", "port": 8080}))
+    control = FakeControl([
+        {"seq": 1, "method": "GET", "path": "/hello", "replica": "node-10.0.0.6-1", "node": "node-10.0.0.6"},
+        {"seq": 2, "event_type": "schedule", "replica": "main", "node": ""},
+    ])
+    page = clu.requests_feed(servers, "prod", control=control)
+    balance = page["balance"]
+    assert balance["mode"] == "per-server" and balance["spreads"] is False
+    by_server = {row["server"]: row for row in balance["servers"]}
+    assert [row["server"] for row in balance["servers"]] == ["edge1", "edge2", "edge3"]
+    assert by_server["edge1"]["serves"] == "main" and by_server["edge1"]["url"] == "http://10.0.0.5:8080"
+    assert by_server["edge2"]["serves"] == "web" and by_server["edge2"]["requests"] == 1
+    assert by_server["edge3"]["requests"] == 0 and by_server["edge3"]["url"] == "http://10.0.0.7:8080"
+    assert by_server["edge1"]["requests"] == 0  # the schedule is not an HTTP request
+
+
+def test_nomad_logs_feed_merges_every_server(servers):
+    fake = FakeSSH()
+    clu.create_cluster(servers, "prod", "nomad", "edge1", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge2", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge3", lambda _l: None, run=fake)
+    pages = {
+        "edge1": {"entries": [
+            {"seq": 1, "ts": "2026-10-24T12:00:00.000+00:00", "message": "main up", "level": "INFO",
+             "fields": {"replica": "main"}},
+            {"seq": 2, "ts": "2026-10-24T12:00:01.000+00:00", "message": "shipped hello", "level": "INFO",
+             "fields": {"replica": "node-b-1"}},
+            {"seq": 3, "ts": "2026-10-24T12:00:03.000+00:00", "message": "kept from a quiet server", "level": "INFO",
+             "fields": {"replica": "node-c-1"}},
+        ]},
+        "edge2": {"entries": [
+            {"seq": 5, "ts": "2026-10-24T12:00:01.000+00:00", "message": "shipped hello", "level": "INFO",
+             "fields": {"replica": "node-b-1"}},
+            {"seq": 6, "ts": "2026-10-24T12:00:02.000+00:00", "message": "web only", "level": "INFO", "fields": {}},
+        ]},
+        "edge3": {"error": "no answer"},
+    }
+    page = clu.logs_feed(servers, "prod", ["edge1", "edge2", "edge3"], master="edge1", port=8080,
+                         read=lambda server: pages[server])
+    assert [entry["message"] for entry in page["entries"]] == ["main up", "shipped hello", "web only",
+                                                               "kept from a quiet server"]
+    hello = next(entry for entry in page["entries"] if entry["message"] == "shipped hello")
+    assert hello["fields"]["server"] == "edge2"  # the web replica's own line, not the copy on main
+    assert page["partial"] == ["edge3: no answer"]
+    assert clu.logs_feed(servers, "prod", ["edge1", "edge2", "edge3"], master="edge1", port=8080, since=page["next"],
+                         read=lambda server: pages[server])["entries"] == []
+    with pytest.raises(clu.ClusterError, match="no replica on cluster prod"):
+        clu.logs_feed(servers, "prod", ["edge2"], master="edge1", port=8080, read=lambda _s: {"error": "down"})
+
+
+def test_nomad_log_backend_reads_every_server(servers, monkeypatch):
+    from py_serverless_kit.core.cloud_logs import OnPremLogs
+    from py_serverless_kit.core.onprem_control import HostControl
+
+    fake = FakeSSH()
+    clu.create_cluster(servers, "prod", "nomad", "edge1", lambda _l: None, run=fake)
+    work = servers / ".pskit" / "onprem-dev"
+    work.mkdir(parents=True)
+    deployed = work / "onprem_deployed.json"
+    deployed.write_text(json.dumps({
+        "server": "edge1", "cluster": "prod",
+        "spec": {"port": 8080, "admin_token": "tok", "deploy": {"method": "cluster", "ssh": {"host": "10.0.0.5", "user": "root"}}},
+    }), "utf-8")
+    seen: dict = {}
+
+    def fake_feed(_root, name, members, **kw):
+        seen["name"] = name
+        seen["servers"] = list(members)
+        seen["port"] = kw["port"]
+        seen["token"] = kw["token"]
+        return {"entries": [{"seq": 4, "message": "from web", "level": "INFO"}], "next": 4}
+
+    monkeypatch.setattr(clu, "logs_feed", fake_feed)
+    record = {"provider": "onprem", "stage": "dev"}
+    control = HostControl("http://10.0.0.5:8080", token="tok", ssh={"host": "10.0.0.5", "user": "root"}, server="edge1")
+    page = OnPremLogs(record, control, servers).query(since=3, limit=10)
+    assert page["supported"] is True and page["entries"][0]["message"] == "from web"
+    assert seen == {"name": "prod", "servers": ["edge1"], "port": 8080, "token": "tok"}
+
+    clu.join_server(servers, "prod", "edge2", lambda _l: None, run=fake)
+    control.server = "edge2"  # the server picker asked for one worker
+    OnPremLogs(record, control, servers).query()
+    assert seen["servers"] == ["edge2"]
+
+    clu.create_cluster(servers, "mesh", "swarm", "edge3", lambda _l: None, run=fake)
+    deployed.write_text(json.dumps({"server": "edge3", "cluster": "mesh", "spec": {"port": 9090, "admin_token": "tok",
+                           "deploy": {"method": "cluster"}}}), "utf-8")
+
+    class One:
+        ssh = {"host": "10.0.0.7"}
+        server = "edge3"
+
+        def logs(self, **_kw):
+            return {"entries": [{"seq": 1, "message": "mesh"}], "next": 1}
+
+    assert OnPremLogs(record, One(), servers).query()["entries"][0]["message"] == "mesh"
 
 
 def test_manifests_tell_replicas_their_node():

@@ -946,6 +946,25 @@ def _default_run(argv: List[str], stdout: Optional[Path]) -> Tuple[int, str]:
     return proc.returncode, proc.stdout.decode("utf-8", "replace")
 
 
+def _stream_run(argv: List[str], emit: Emit) -> Tuple[int, str]:
+    """Run ``argv`` and emit each line as it arrives. A cluster apply waits for minutes; buffering that until
+    the SSH session ends hides the allocation status the script is printing."""
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - explicit argv, no shell
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return 127, f"command not found: {argv[0]}. Install it on this machine and retry."
+    lines: List[str] = []
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        lines.append(line)
+        if line:
+            emit("  " + line)
+    return proc.wait(), "\n".join(lines)
+
+
 class _Runner:
     def __init__(self, emit: Emit, run: Optional[RunFn]) -> None:
         self.emit = emit
@@ -954,11 +973,15 @@ class _Runner:
     def __call__(self, argv: List[str], *, check: bool = True, show: bool = True, stdout: Optional[Path] = None) -> str:
         if show:
             self.emit("$ " + " ".join(_mask(a) for a in argv))
-        code, out = self.run_fn(argv, stdout)
+        if show and stdout is None and self.run_fn is _default_run:
+            code, out = _stream_run(argv, self.emit)
+        else:
+            code, out = self.run_fn(argv, stdout)
+            text = out.strip()
+            if text and show:
+                for line in text.splitlines()[-40:]:
+                    self.emit("  " + line)
         text = out.strip()
-        if text and show:
-            for line in text.splitlines()[-40:]:
-                self.emit("  " + line)
         if check and code:
             last = text.splitlines()[-1] if text else "no output"
             raise ServiceError(f"command failed ({code}): {_mask(last)}")

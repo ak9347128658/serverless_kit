@@ -19,7 +19,9 @@ path you already have instead.
   inspect and control runs; records live under ``<data_dir>/executions``.
 * ``GET /__pskit/logs?since=&limit=&level=&function=&q=&source=&before=`` returns
   captured logs (handler logging, print output, one entry per invocation, host
-  notes); ``GET /__pskit/logs/streams`` summarises them per function and
+  notes). A web replica forwards that route to the main replica.
+  ``GET /__pskit/logs/local`` is this replica's own buffer.
+  ``GET /__pskit/logs/streams`` summarises them per function and
   ``DELETE /__pskit/logs[?function=]`` clears them. ``GET /__pskit/stats``
   returns per-function invocation counters.
 
@@ -88,6 +90,7 @@ ENV_FILE = "host.env"
 # that run HTTP and invoke() and hand everything stateful to the main replica (PSKIT_MAIN_URL).
 ROLES = ("all", "main", "web")
 # /__pskit/... calls a web replica answers itself; every other one goes to the main replica.
+# GET /__pskit/logs/local is also local (see _route): it is this replica's own buffer.
 _WEB_LOCAL = ("health", "invoke")
 
 
@@ -1663,6 +1666,8 @@ class Host:
                     url = urlsplit(self.path)
                     if url.path == "/__pskit/health" or url.path == "/__pskit":
                         return self._json(200, host.health())
+                    if url.path == "/__pskit/logs/local":
+                        return self._local_logs(url)
                     # AWS-compatible APIs: existing boto3 / AWS SDK code only changes endpoint_url.
                     if url.path.startswith("/2015-03-31/functions/"):
                         return self._lambda(url.path)
@@ -1763,6 +1768,29 @@ class Host:
                 if parts and parts[0] == "workflows" and len(parts) == 2:
                     return self._workflow(parts[1], raw, query)
                 self._json(404, {"error": "unknown on-prem endpoint"})
+
+            def _local_logs(self, url: Any) -> None:
+                """This process's buffer. A web replica does not forward this route."""
+                if self.command != "GET":
+                    self._read()
+                    return self._json(405, {"error": "GET this replica's logs"})
+                if not self._admin_ok():
+                    self._read()
+                    return self._json(401, {"error": "admin token required"})
+                query = dict(parse_qsl(url.query, keep_blank_values=True))
+                result = host.logs.query(
+                    since=_int_arg(query, "since", 0),
+                    limit=_int_arg(query, "limit", 200),
+                    level=query.get("level") or None,
+                    function=query.get("function") or None,
+                    q=query.get("q") or None,
+                    source=query.get("source") or None,
+                    before=_int_arg(query, "before", 0) or None,
+                )
+                result["replica"] = host.replica
+                result["node"] = host.node
+                result["role"] = host.role
+                self._json(200, result)
 
             def _logs(self, query: Dict[str, str]) -> None:
                 if self.command == "DELETE":

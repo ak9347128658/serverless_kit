@@ -192,10 +192,49 @@ class OnPremLogs(LogBackend):
     mode = "seq"
     can_delete = True
 
-    def __init__(self, record: Dict[str, Any], control: Any) -> None:
+    def __init__(self, record: Dict[str, Any], control: Any, root: Optional[Path] = None) -> None:
         super().__init__(record)
         self.control = control
+        self.root = root
         self.console = None
+
+    def _nomad_logs(
+        self,
+        since: int,
+        limit: int,
+        level: Optional[str],
+        function: Optional[str],
+        q: Optional[str],
+        source: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Nomad keeps a log buffer on every server. Read them all, unless this client has no SSH login
+        (a host on this machine) or the stage was not deployed to a Nomad cluster."""
+        if self.root is None or not getattr(self.control, "ssh", None):
+            return None
+        from .onprem_cluster import ClusterError, get_cluster, logs_feed
+        from .onprem_control import deployed_host
+
+        deployed = deployed_host(self.root, str(self.record.get("stage") or ""), self.record) or {}
+        name = str(deployed.get("cluster") or "")
+        if not name:
+            return None
+        try:
+            cluster = get_cluster(self.root, name)
+        except ClusterError:
+            return None
+        if str(cluster.get("orchestrator") or "") != "nomad":
+            return None
+        spec = deployed.get("spec") if isinstance(deployed.get("spec"), dict) else {}
+        port = int((spec or {}).get("port") or 8080)
+        token = str((spec or {}).get("admin_token") or "")
+        master = str(cluster.get("master") or "")
+        nodes = list((cluster.get("nodes") or {}).keys())
+        chosen = getattr(self.control, "server", None)
+        servers = [str(chosen)] if chosen and chosen != master and chosen in nodes else nodes
+        return logs_feed(
+            self.root, name, servers, master=master, port=port, token=token, since=since, limit=limit,
+            level=level, function=function, q=q, source=source,
+        )
 
     def query(
         self,
@@ -206,9 +245,13 @@ class OnPremLogs(LogBackend):
         q: Optional[str] = None,
         source: Optional[str] = None,
     ) -> Dict[str, Any]:
-        result = dict(
-            self.control.logs(since=since, limit=limit, level=level, function=function, q=q, source=source) or {}
-        )
+        merged = self._nomad_logs(since, limit, level, function, q, source)
+        if merged is None:
+            result = dict(
+                self.control.logs(since=since, limit=limit, level=level, function=function, q=q, source=source) or {}
+            )
+        else:
+            result = dict(merged)
         result.setdefault("entries", [])
         result.setdefault("next", 0)
         result.update(self.info())
@@ -661,7 +704,7 @@ def log_backend(record: Dict[str, Any], root: Path, server: Optional[str] = None
         control = control_for(record, root, server)
         if control is None:
             return UnsupportedLogs(record, "the on-premises host address is unknown; run `pskit deploy` first")
-        return OnPremLogs(record, control)
+        return OnPremLogs(record, control, root)
     if record.get("status") in _NOT_DEPLOYED:
         return UnsupportedLogs(record, "not deployed yet; run `pskit deploy` to read its logs")
     console_hint = " Open the function's console link instead."

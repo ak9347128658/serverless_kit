@@ -8,7 +8,7 @@ run by one of three orchestrators:
 |---|---|---|---|
 | **Docker Swarm** (`swarm`) | Docker on every server; `swarm init` on the master, `swarm join` on the others | The routing mesh: the functions' port answers on **every** server | The simplest setup; Docker you already know |
 | **Kubernetes** (`kubernetes`) | [k3s](https://k3s.io) (lightweight Kubernetes, no Docker needed) | k3s ServiceLB: the functions' port answers on **every** server | Teams that use `kubectl`, or want to grow into Kubernetes |
-| **HashiCorp Nomad** (`nomad`) | Docker plus the Nomad agent ([releases.hashicorp.com](https://releases.hashicorp.com/nomad/), 1.11.3 by default) as a systemd unit | One web replica per server on the port; put your load balancer (nginx, HAProxy, Traefik) in front of all servers | Teams that use Nomad / Consul |
+| **HashiCorp Nomad** (`nomad`) | Docker plus the Nomad agent ([releases.hashicorp.com](https://releases.hashicorp.com/nomad/), 1.11.3 by default) as a systemd unit | No load balancer. The main replica answers on the master's port; each web replica answers on its own server's port. Add nginx, HAProxy or Traefik only when you want one URL for all of them | Teams that use Nomad / Consul |
 
 pskit does everything over SSH from your machine: it installs the orchestrator, joins servers, copies the function
 image to every server (**no container registry needed**), deploys, and watches capacity.
@@ -28,7 +28,7 @@ SSH server / Scaling cluster*.
 Each deployment (`pskit-<service>-<stage>`) runs the function host image as two workloads:
 
 ```
-                      users ──► :8080 on any server (Swarm mesh / k3s ServiceLB / your LB for Nomad)
+                      users ──► :8080 (Swarm mesh / k3s ServiceLB / each Nomad server)
                                    │
               ┌────────────────────┼────────────────────┐
               ▼                    ▼                    ▼
@@ -51,6 +51,20 @@ Each deployment (`pskit-<service>-<stage>`) runs the function host image as two 
 * Resources with a driver (Redis, SQS, S3, MinIO, ...) are used directly by every replica, as on one server.
 
 Your handler code does not change.
+
+### Nomad does not need a load balancer
+
+Swarm and k3s publish the functions' port on every server and spread HTTP across the web replicas. Nomad does not.
+The main replica listens on the master's port. Each web replica listens on its own server's port, one per server.
+`pskit deploy` waits until the main replica answers `http://127.0.0.1:<port>/__pskit/health` on the master. That
+check does not go through a load balancer, and the deploy succeeds without one.
+
+Send traffic to the master and the main replica handles it. Send traffic to another server and that server's web
+replica handles it. Put nginx, HAProxy or Traefik in front of the servers only when you want a single URL that
+spreads requests across the web replicas.
+
+While that wait runs, the deploy prints each Nomad allocation and the main replica's logs every 10 seconds, as
+they happen. If the port never answers, the output ends with `nomad job status` and those logs.
 
 ## Set up
 
@@ -169,13 +183,13 @@ pskit resources onprem create orders-db --service postgres --cluster prod --node
 | Swarm | 2377/tcp, 7946/tcp+udp, 4789/udp |
 | Kubernetes (k3s) | 6443/tcp (to the master), 8472/udp, 10250/tcp |
 | Nomad | 4646-4648/tcp, 4648/udp |
-| **From users** | the functions' `port` (default 8080) on every server (Swarm / k3s) or on your load balancer (Nomad) |
+| **From users** | the functions' `port` (default 8080) on every server. Swarm and k3s spread HTTP from any server. On Nomad each server answers for itself |
 
 ## Live requests: which server handled what
 
 The cluster page's **Live requests** card lists requests as they happen: time, the **server** and **replica** that
-handled each one, method and path, status, duration and function, plus a bar per server (click one to see only its
-requests). It polls the main replica every 2 seconds, and only while the card is on screen, the browser tab is
+handled each one, method and path, status, duration and function, plus every server's URL and its share of HTTP
+(click a server to see only its requests). It polls the main replica every 2 seconds, and only while the card is on screen, the browser tab is
 visible and *Live* is on. Off screen it does nothing.
 
 ```bash
@@ -187,6 +201,30 @@ pskit cluster requests prod --follow
 Each replica knows the server it runs on (`PSKIT_NODE`, set by the orchestrator) and records it with each request;
 web replicas ship their entries to the main replica every second. `GET /__pskit/requests?since=N` on the
 deployment's port returns them (admin token required).
+
+The same command prints a balance table before the requests, and again when the HTTP counts change. It lists
+**every** server of the cluster, including ones that have handled nothing yet:
+
+```text
+The master's URL is the main replica. Each other server's URL is one web replica. A load balancer is optional, and only when you want one URL for all of them.
+  server           serves  requests   share  url
+  edge1            main           0    0.0%  http://10.0.0.5:8080
+  edge2            web            2  100.0%  http://10.0.0.6:8080
+```
+
+On Swarm and k3s every URL spreads HTTP across the web replicas (`serves` is `web`). On Nomad the master's URL is
+the main replica and each other URL is that server's web replica. Schedules and other non-HTTP events stay in
+the request list and are left out of the share.
+
+## Live logs
+
+`pskit logs -f` and the studio's **Logs** view follow a cluster deployment the same way they follow one machine.
+The cluster page has a **Live logs** card for the deployment selected there.
+
+Web replicas send their lines to the main replica. On Swarm and k3s the tail reads that collected buffer (the
+published port forwards `/__pskit/logs` to the main replica). On Nomad each server listens on its own port, so
+the tail reads every server's own buffer and shows them together. A web replica's lines show even when that
+server cannot reach the main replica. Picking one server in the Logs view reads that server only.
 
 ## Monitor, scale and add servers when it is full
 
@@ -297,7 +335,7 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 | `pskit cluster watch NAME [--interval 60]` | check until Ctrl+C |
 | `pskit cluster alerts NAME [--function F] [--stage S] [--webhook URL] [--cooldown M] [--cpu/--memory/--disk %] [--test]` | alert settings |
 | `pskit cluster scale NAME --replicas N [--stack S]` | web replicas now (until the next deploy) |
-| `pskit cluster requests NAME [--follow] [--stack S]` | recent requests and the server / replica of each |
+| `pskit cluster requests NAME [--follow] [--stack S]` | recent requests, and each server's URL with its share of HTTP |
 | `pskit cluster list` / `pskit cluster remove NAME` | list / forget a cluster |
 | `pskit deploy --cluster NAME` / `pskit deploy --server NAME` | deploy the functions to the cluster / to one server |
 | `pskit resources onprem create KEY --service S --cluster NAME [--node SERVER]` | a resource on a server of the cluster |
@@ -308,7 +346,7 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
   root or passwordless `sudo`.
 * The main replica is one process on the master: schedules, built-in queues and workflow executions do not
   scale out. Use a queue driver (Redis, SQS, ...) when queue consumers must scale with the replicas.
-* Nomad has no built-in load balancer: each server runs at most one web replica on the port, and the master's
-  port is the main replica. Put nginx / HAProxy / Traefik in front of the servers.
+* Nomad serves each server on its own port. The master's port is the main replica, and each other server runs
+  one web replica. Add nginx, HAProxy or Traefik only when you want one URL for all of them.
 * The orchestrators' own security is yours to tighten: limit the cluster ports to your network, and enable Nomad
   ACLs or Kubernetes RBAC as your policies need.

@@ -202,7 +202,7 @@ Scale on-prem functions over a master plus joined servers (Docker Swarm, Kuberne
 | `cluster watch NAME [--interval 60]` | `check` every interval until Ctrl+C |
 | `cluster alerts NAME [--function F] [--stage S] [--webhook URL] [--cooldown M] [--cpu N] [--memory N] [--disk N] [--test]` | who is alerted and when a server counts as full |
 | `cluster scale NAME --replicas N [--stack S] [-s STAGE]` | web replicas now (keep it in `options.cluster.replicas`) |
-| `cluster requests NAME [--follow] [--stack S] [-n 50]` | recent requests and the server / replica that handled each |
+| `cluster requests NAME [--follow] [--stack S] [-n 50]` | recent requests, and each server's URL with its share of HTTP |
 | `cluster list [--json]` / `cluster remove NAME [--yes]` | list / forget clusters |
 
 `pskit deploy | package | plan | remove | info --cluster NAME` runs the functions on that cluster instead of one server

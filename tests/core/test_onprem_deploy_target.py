@@ -123,6 +123,8 @@ def test_closed_port_is_reached_over_ssh(monkeypatch):
                               ssh={"host": "10.0.0.5", "user": "ubuntu", "port": 22}, remote_port=8080,
                               remote_path="/opt/pskit/shop", server="VM_01")
     assert control.logs(since=2) == {"items": [], "next": 3}
+    control.logs(local=True)
+    assert "/__pskit/logs/local?" in calls[-1]["request"]["u"]
     request = calls[0]["request"]
     assert request["u"].startswith("http://127.0.0.1:8080/__pskit/logs?") and "since=2" in request["u"]
     assert request["h"]["x-pskit-token"] == "secret-tok"
@@ -131,7 +133,17 @@ def test_closed_port_is_reached_over_ssh(monkeypatch):
 
     # The route is remembered: the next call does not try the closed port again.
     control.request("PUT", "/__pskit/storage/b/k.txt", data=b"hi")
-    assert len(calls) == 2 and base64.b64decode(calls[1]["request"]["b"]) == b"hi"
+    assert len(calls) == 3 and base64.b64decode(calls[2]["request"]["b"]) == b"hi"
+
+
+def test_force_ssh_does_not_dial_the_url(monkeypatch):
+    def boom(*_a, **_k):
+        raise AssertionError("direct dial")
+
+    monkeypatch.setattr(ctl.socket, "create_connection", boom)
+    monkeypatch.setattr(ctl.subprocess, "run", _fake_ssh([], {"s": 200, "h": {}, "b": ""}))
+    control = ctl.HostControl("http://127.0.0.1:8080", ssh={"host": "10.0.0.5", "user": "u"}, force_ssh=True)
+    assert control.fetch("GET", "/__pskit/logs/local")[0] == 200
 
 
 def test_ssh_route_failure_says_what_to_do(monkeypatch):

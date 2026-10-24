@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.10.4] - 2026-10-24
+
+### Added
+- **Live balance for one deployment**: `pskit cluster requests NAME --follow` and the studio cluster page's
+  *Live requests* card list every server, its URL, whether that URL is the main replica or a web replica, and
+  its share of HTTP. Servers with no traffic yet are included. Swarm and k3s spread HTTP from any server's
+  port. On Nomad the master's URL is the main replica and each other server's URL is one web replica.
+- **Live logs for a cluster deployment**: `pskit logs -f`, the studio **Logs** view and the cluster page's
+  *Live logs* card follow a cluster the same way they follow one machine. On Nomad each server is read
+  directly, so a web replica's lines show together with the main replica.
+
+### Fixed
+- **Nomad cluster deploy failed after the job was accepted** (`pskit: no answer on
+  http://127.0.0.1:8080/__pskit/health`). The job asked Nomad for host networking, but Docker stayed on its own
+  bridge, so the functions' port never opened on the server's loopback. The task now uses Docker host networking
+  and binds that port on the server. The previous job is stopped first so the port is free. While the deploy
+  waits it prints each allocation and the main replica's logs every 10 seconds, and that output is shown as it
+  happens. Nomad does not load-balance: the master's port is the main replica, and each other server answers on
+  the same port. A load balancer is optional.
+
 ## [1.10.3] - 2026-10-24
 
 ### Fixed

@@ -22,7 +22,9 @@ import socket
 import tempfile
 import threading
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -44,7 +46,7 @@ ORCHESTRATORS: Dict[str, Dict[str, str]] = {
     },
     "nomad": {
         "label": "HashiCorp Nomad",
-        "summary": "Nomad with the Docker driver; one web replica per server, put a load balancer in front.",
+        "summary": "Nomad with the Docker driver. The master runs the main replica; every other server runs one web replica on its own port. A load balancer is optional.",
         "ports": "4646-4648/tcp (+4648/udp) between servers; the functions port from users",
     },
 }
@@ -603,6 +605,12 @@ def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn]
     except ClusterError:
         pass
     emit(f"{stack} is running on cluster {info['name']}: {endpoint}")
+    if orch == "nomad":
+        others = [name for name in nodes if name != master_server]
+        where = ", ".join(others) if others else "no other server yet"
+        emit("  Nomad does not load-balance. This address is the main replica on the master.")
+        emit(f"  Web replicas answer on the same port on: {where}.")
+        emit("  A load balancer (nginx, HAProxy, Traefik) is optional, and only when you want one URL for all of them.")
     return record
 
 
@@ -753,14 +761,184 @@ def requests_feed(root: Path, name: str, stack: str = "", since: int = 0, limit:
     nodes = dict(cluster.get("nodes") or {})
     by_node = {str(n.get("node")): server for server, n in nodes.items() if n.get("node")}
     counts: Dict[str, int] = {}
+    http_counts: Dict[str, int] = {}
     for item in page.get("items") or []:
         server = by_node.get(str(item.get("node") or ""))
         if not server and item.get("replica") == "main":
             server = str(cluster["master"])  # the main replica always runs on the master
         item["server"] = server or item.get("node") or ""
         counts[item["server"]] = counts.get(item["server"], 0) + 1
+        if item.get("method"):
+            http_counts[item["server"]] = http_counts.get(item["server"], 0) + 1
     return {"stack": stack, "stacks": sorted(deployments), "items": page.get("items") or [],
-            "next": page.get("next", since), "servers": counts}
+            "next": page.get("next", since), "servers": counts,
+            "balance": _balance(cluster, dep, http_counts)}
+
+
+def _balance(cluster: Dict[str, Any], dep: Dict[str, Any], http_counts: Dict[str, int]) -> Dict[str, Any]:
+    """Every server of this deployment: its URL, what answers there, and this page's HTTP counts.
+
+    Swarm and k3s spread HTTP from any server's port. Nomad serves the main replica on the master and
+    one web replica on each other server. Servers with no requests in ``http_counts`` are still listed.
+    """
+    orch = str(cluster.get("orchestrator") or "")
+    spreads = orch in ("swarm", "kubernetes")
+    port = int((dep or {}).get("port") or 8080)
+    master = str(cluster.get("master") or "")
+    rows = []
+    for server, node in sorted((cluster.get("nodes") or {}).items()):
+        address = str((node or {}).get("address") or "")
+        is_master = server == master
+        rows.append({
+            "server": server,
+            "role": "master" if is_master else "worker",
+            "address": address,
+            "url": f"http://{address}:{port}" if address else "",
+            "serves": "web" if spreads or not is_master else "main",
+            "requests": int(http_counts.get(server, 0)),
+        })
+    total = sum(row["requests"] for row in rows)
+    for row in rows:
+        row["share"] = round(100.0 * row["requests"] / total, 1) if total else 0.0
+    if spreads:
+        note = "Any server's port spreads HTTP across the web replicas."
+    else:
+        note = ("The master's URL is the main replica. Each other server's URL is one web replica. "
+                "A load balancer is optional, and only when you want one URL for all of them.")
+    return {"orchestrator": orch, "mode": "mesh" if spreads else "per-server", "spreads": spreads,
+            "note": note, "port": port, "servers": rows}
+
+
+def _ts_ms(ts: str) -> int:
+    text = str(ts or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return int(datetime.fromisoformat(text).timestamp() * 1000)
+    except ValueError:
+        return 0
+
+
+def _log_seq(entry: Dict[str, Any], local_seq: int) -> int:
+    """A seq that stays the same for the same line, ordered by time, across replicas."""
+    replica = str((entry.get("fields") or {}).get("replica") or "")
+    salt = zlib.crc32(replica.encode("utf-8")) % 10
+    return _ts_ms(str(entry.get("ts") or "")) * 10000 + salt * 1000 + (int(local_seq) % 1000)
+
+
+def logs_feed(
+    root: Path,
+    name: str,
+    servers: List[str],
+    *,
+    master: str,
+    port: int,
+    token: str = "",
+    since: int = 0,
+    limit: int = 200,
+    level: Optional[str] = None,
+    function: Optional[str] = None,
+    q: Optional[str] = None,
+    source: Optional[str] = None,
+    read: Optional[Callable[[str], Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Nomad live logs: each server's own buffer, merged.
+
+    ``GET /__pskit/logs`` on a web replica is forwarded to the main replica, so a line stays invisible
+    until that replica can reach the master. This reads ``/__pskit/logs/local`` on each server (SSH to
+    that server's loopback). A copy the main replica already ingested is kept only when the server it
+    came from did not answer. ``read(server)`` replaces the SSH call in tests.
+    """
+    cluster = get_cluster(root, name)
+    nodes = cluster.get("nodes") or {}
+    wanted = [s for s in servers if s in nodes] or list(nodes)
+    if not wanted:
+        raise ClusterError(f"cluster {name} has no servers")
+    window = min(2000, max(int(limit or 200), 400))
+
+    def _default_read(server: str) -> Dict[str, Any]:
+        from .onprem_control import HostControl
+
+        target = _target(root, server)
+        control = HostControl(
+            f"http://127.0.0.1:{int(port)}", token=token, ssh=ssh_options(target), remote_port=int(port),
+            server=server, force_ssh=True, timeout=8,
+        )
+        page = control.logs(since=0, limit=window, level=level, function=function, q=q, source=source, local=True)
+        return {"entries": list(page.get("entries") or [])}
+
+    fetch = read or _default_read
+
+    def _one(server: str) -> Tuple[str, Dict[str, Any]]:
+        try:
+            return server, dict(fetch(server) or {})
+        except (OSError, ValueError) as exc:
+            return server, {"error": str(exc), "entries": []}
+
+    pages: Dict[str, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as pool:
+        for server, page in pool.map(_one, wanted):
+            pages[server] = page
+
+    errors: List[str] = []
+    answered = False
+    read_replicas = set()
+    shipped: List[Tuple[str, Dict[str, Any]]] = []
+    merged: List[Dict[str, Any]] = []
+    for server in wanted:
+        page = pages.get(server) or {}
+        if page.get("error"):
+            errors.append(f"{server}: {page['error']}")
+            continue
+        answered = True
+        is_main = server == master
+        for raw in page.get("entries") or []:
+            if not isinstance(raw, dict):
+                continue
+            entry = dict(raw)
+            fields = dict(entry.get("fields") or {})
+            replica = str(fields.get("replica") or "")
+            local_seq = int(entry.get("seq") or 0)
+            if is_main and replica and replica != "main":
+                shipped.append((replica, entry))
+                continue
+            fields["server"] = server
+            entry["fields"] = fields
+            entry["seq"] = _log_seq(entry, local_seq)
+            merged.append(entry)
+            if not is_main and replica:
+                read_replicas.add(replica)
+    if not answered:
+        detail = "; ".join(errors) or "no answer"
+        raise ClusterError(
+            f"no replica on cluster {name} answered on port {port} ({detail}). "
+            "Redeploy so each server listens on that port."
+        )
+    for replica, raw in shipped:
+        if replica in read_replicas:
+            continue
+        entry = dict(raw)
+        entry["fields"] = dict(entry.get("fields") or {})
+        entry["seq"] = _log_seq(entry, int(entry.get("seq") or 0))
+        merged.append(entry)
+    merged.sort(key=lambda item: int(item.get("seq") or 0))
+    unique: List[Dict[str, Any]] = []
+    seen = set()
+    for entry in merged:
+        seq = int(entry["seq"])
+        if seq in seen:
+            continue
+        seen.add(seq)
+        unique.append(entry)
+    last = int(unique[-1]["seq"]) if unique else 0
+    since_n = max(0, int(since or 0))
+    size = max(1, int(limit or 200))
+    if since_n == 0:
+        picked = unique[-size:]
+    else:
+        picked = [entry for entry in unique if int(entry["seq"]) > since_n][:size]
+    oldest = int(unique[0]["seq"]) if unique else last + 1
+    return {"entries": picked, "next": last, "oldest": oldest, "partial": errors}
 
 
 def resources_of(root: Path, name: str) -> List[Dict[str, Any]]:

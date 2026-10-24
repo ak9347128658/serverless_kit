@@ -38,8 +38,17 @@ export function LogsView({ rest }: { rest: string[] }) {
           <ServerSelect value={server} onChange={setServer} servers={servers} deployed={deployed} />
           <DeployedBadge deployed={deployed} />
           <span className="muted small">
-            Starts on the server this stage was deployed to. When its port (default 8080) is closed to this machine the logs are read over SSH. CLI:{" "}
-            <code className="mono">pskit logs --server NAME</code>.
+            {deployed?.cluster ? (
+              <>
+                This stage runs on cluster <b>{deployed.cluster}</b>. Logs from every replica are shown together. On Nomad each server is read
+                directly, so a web replica's lines show with the main replica. CLI: <code className="mono">pskit logs -f</code>.
+              </>
+            ) : (
+              <>
+                Starts on the server this stage was deployed to. When its port (default 8080) is closed to this machine the logs are read over SSH. CLI:{" "}
+                <code className="mono">pskit logs --server NAME</code>.
+              </>
+            )}
           </span>
         </div>
       )}

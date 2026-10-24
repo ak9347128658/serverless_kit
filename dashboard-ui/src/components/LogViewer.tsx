@@ -249,11 +249,21 @@ export function LogViewer({
           <div key={e.seq} className={`log-line log-${levelTone(e.level)}`}>
             <time className="log-ts">{formatTime(e.ts)}</time>
             <span className={`log-level lvl-${levelTone(e.level)}`}>{(e.level || "").slice(0, 5)}</span>
-            <span className="log-src">{e.function || e.source}</span>
+            <span className="log-src">
+              {e.function || e.source}
+              {typeof e.fields?.server === "string" || typeof e.fields?.replica === "string"
+                ? ` · ${[e.fields?.server, e.fields?.replica].filter((v) => typeof v === "string").join("/")}`
+                : ""}
+            </span>
             <span className="log-msg">
               {e.message}
-              {e.fields && Object.keys(e.fields).length > 0 && (
-                <span className="log-fields"> {JSON.stringify(e.fields)}</span>
+              {e.fields && Object.keys(e.fields).some((k) => k !== "server" && k !== "replica") && (
+                <span className="log-fields">
+                  {" "}
+                  {JSON.stringify(
+                    Object.fromEntries(Object.entries(e.fields).filter(([k]) => k !== "server" && k !== "replica")),
+                  )}
+                </span>
               )}
               {e.request_id && <span className="log-rid"> #{e.request_id.slice(0, 8)}</span>}
             </span>

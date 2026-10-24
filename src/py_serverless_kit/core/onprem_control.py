@@ -67,6 +67,7 @@ class HostControl:
         remote_port: Optional[int] = None,
         remote_path: str = "",
         server: Optional[str] = None,
+        force_ssh: bool = False,
     ) -> None:
         if not base_url.lower().startswith(("http://", "https://")):
             raise ValueError(f"on-prem control URL must be http(s), got {base_url!r}")
@@ -77,6 +78,7 @@ class HostControl:
         self.remote_port = int(remote_port or urlsplit(self.base_url).port or 8080)
         self.remote_path = remote_path
         self.server = server
+        self.force_ssh = force_ssh
 
     @property
     def where(self) -> str:
@@ -100,8 +102,9 @@ class HostControl:
         if self.token:
             sent["x-pskit-token"] = self.token
         wait = timeout or self.timeout
-        if self.ssh is not None and self._route() == "ssh":
-            return self._fetch_ssh(method, suffix, data, sent, wait, direct_error="port not reachable from here")
+        if self.ssh is not None and (self.force_ssh or self._route() == "ssh"):
+            why = "" if self.force_ssh else "port not reachable from here"
+            return self._fetch_ssh(method, suffix, data, sent, wait, direct_error=why)
         req = Request(self.base_url + suffix, data=data, method=method)  # noqa: S310 - http(s) checked in __init__
         for key, value in sent.items():
             req.add_header(key, value)
@@ -228,6 +231,7 @@ class HostControl:
         q: Optional[str] = None,
         source: Optional[str] = None,
         before: Optional[int] = None,
+        local: bool = False,
     ) -> Dict[str, Any]:
         query = {
             "since": since,
@@ -238,7 +242,8 @@ class HostControl:
             "source": source,
             "before": before,
         }
-        return dict(self.request("GET", "/__pskit/logs", query=query) or {})
+        path = "/__pskit/logs/local" if local else "/__pskit/logs"
+        return dict(self.request("GET", path, query=query) or {})
 
     def log_streams(self) -> Dict[str, Any]:
         return dict(self.request("GET", "/__pskit/logs/streams") or {})

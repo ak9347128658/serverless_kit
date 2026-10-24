@@ -592,12 +592,35 @@ export interface ClusterRequest {
   server: string;
 }
 
+/** One server of a deployment: where its port answers, and how many HTTP requests this page counted. */
+export interface ClusterBalanceServer {
+  server: string;
+  role: string;
+  address: string;
+  url: string;
+  /** `web` on Swarm/k3s (any node) and on Nomad workers; `main` on the Nomad master. */
+  serves: "web" | "main" | string;
+  requests: number;
+  share: number;
+}
+
+/** How HTTP for one deployment is spread across the cluster. Servers with zero requests are included. */
+export interface ClusterBalance {
+  orchestrator: string;
+  mode: "mesh" | "per-server";
+  spreads: boolean;
+  note: string;
+  port: number;
+  servers: ClusterBalanceServer[];
+}
+
 export interface ClusterRequests {
   stack: string;
   stacks: string[];
   items: ClusterRequest[];
   next: number;
   servers: Record<string, number>;
+  balance?: ClusterBalance;
 }
 
 export interface OnPremClustersState {

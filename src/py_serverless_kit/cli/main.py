@@ -1601,24 +1601,53 @@ def cluster_alerts(name: str, function: Optional[str], stage: Optional[str], web
 @click.option("-n", "--lines", default=50, type=click.IntRange(1, 500), help="How many recent requests first.")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
 def cluster_requests(name: str, stack: Optional[str], follow: bool, lines: int, config_path: Optional[str]) -> None:
-    """Recent requests of a deployment and the server / replica that handled each one (live with --follow)."""
+    """Recent requests of one deployment, and how HTTP is spread across each server (live with --follow)."""
     import time
 
     from ..core import onprem_cluster as clu
     from ..core.onprem_control import HostUnavailable
 
+    def show_balance(page: dict, totals: dict) -> None:
+        balance = page.get("balance") or {}
+        rows = balance.get("servers") or []
+        if not rows:
+            return
+        echo(str(balance.get("note") or ""))
+        echo(f"  {'server':<16} {'serves':<6} {'requests':>8} {'share':>7}  url")
+        total = sum(totals.values())
+        for row in rows:
+            count = int(totals.get(row.get("server") or "", 0))
+            share = round(100.0 * count / total, 1) if total else 0.0
+            echo(f"  {str(row.get('server') or ''):<16} {str(row.get('serves') or ''):<6} {count:>8} {share:>6.1f}%"
+                 f"  {row.get('url') or ''}")
+
     root = _cluster_root(config_path)
     since = 0
+    totals: dict = {}
+    first = True
     try:
         while True:
             try:
                 page = _cluster_call(clu.requests_feed, root, name, stack or "", since, lines if not since else 500)
             except (HostUnavailable, PermissionError, KeyError) as exc:
                 raise click.ClickException(str(exc)) from None
+            fresh = False
+            rendered = []
             for r in page["items"]:
+                if r.get("method"):
+                    key = str(r.get("server") or "")
+                    totals[key] = totals.get(key, 0) + 1
+                    fresh = True
                 what = f"{r.get('method')} {r.get('path')}" if r.get("method") else str(r.get("event_type") or "")
-                echo(f"  {str(r.get('ts') or '')[11:19]}  {r.get('server') or '-':<12} {r.get('replica') or '-':<22}"
-                     f" {str(r.get('status') or ''):>3} {r.get('duration_ms') or 0:>8} ms  {r.get('function')}: {what}")
+                rendered.append(
+                    f"  {str(r.get('ts') or '')[11:19]}  {r.get('server') or '-':<12} {r.get('replica') or '-':<22}"
+                    f" {str(r.get('status') or ''):>3} {r.get('duration_ms') or 0:>8} ms  {r.get('function')}: {what}"
+                )
+            if first or fresh:
+                show_balance(page, totals)
+                first = False
+            for line in rendered:
+                echo(line)
             since = int(page.get("next") or since)
             if not follow:
                 return
@@ -2402,6 +2431,7 @@ def logs(  # noqa: ANN001
 
     \b
     On premises: the host's buffer (handlers, print output, invocations).
+    A Nomad cluster reads every server, so web-replica lines show with the main replica.
     AWS: CloudWatch Logs (needs boto3). GCP: Cloud Logging (needs
     google-cloud-logging, read only). Azure: Log Analytics when a
     `log_analytics_workspace_id` output exists. Elsewhere: use the console
