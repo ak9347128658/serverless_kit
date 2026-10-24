@@ -286,8 +286,9 @@ def image_load_script(orchestrator: str, parts_dir: str, sha256: str, stale_glob
         load = _docker_ready_block() + f"cat {d}/part-* | gunzip | dk load\n"
     clean = f"rm -rf {d}\n"
     if stale_glob:
-        clean += f"for x in {stale_glob}; do [ -d \"$x\" ] && rm -rf \"$x\"; done\n"
-    return _header() + check + load + clean
+        # `if`, not `[ -d ] && rm`: with no older copy the test fails last and the script would exit 1 after loading
+        clean += f"for x in {stale_glob}; do if [ -d \"$x\" ]; then rm -rf \"$x\"; fi; done\n"
+    return _header() + check + load + clean + "exit 0\n"
 
 
 def has_image_command(orchestrator: str, image: str) -> str:

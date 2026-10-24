@@ -626,6 +626,24 @@ def test_image_copy_failure_on_a_worker_only_warns(servers, tmp_path, monkeypatc
                        FlakySCP({"10.0.0.5": 100}), tar=tar, required=("edge1",))
 
 
+def test_image_loaded_but_load_step_failed_is_not_copied_again(servers, tmp_path, monkeypatch):
+    monkeypatch.setattr(clu, "RETRY_DELAY", 0)
+    tar = tmp_path / "image.tar"
+    tar.write_bytes(b"x" * 5000)
+
+    class LoadedThenFails(FlakySCP):
+        def __call__(self, argv, stdout):
+            if argv[-1].startswith("sh pskit-cluster/") and "load" in argv[-1]:
+                self.has_image = True
+                return 1, "Loaded image: img:1"
+            return super().__call__(argv, stdout)
+
+    fake = LoadedThenFails({})
+    lines: List[str] = []
+    assert clu.ship_image("swarm", "img:1", _targets(servers, "edge1"), lines.append, fake, tar=tar) == []
+    assert any("edge1: loaded img:1" in m for m in lines) and not any("copy interrupted" in m for m in lines)
+
+
 def test_pack_image_is_reproducible(tmp_path, monkeypatch):
     monkeypatch.setattr(clu, "CHUNK_BYTES", 4096)
     tar = tmp_path / "image.tar"
@@ -670,6 +688,10 @@ def test_image_load_script_checks_and_loads(tmp_path):
     (parts / "part-00001").write_bytes(payload[50:])
     assert run(hashlib.sha256(payload).hexdigest()) == 0
     assert loaded.read_bytes() == b"layers" * 100 and not parts.exists() and not stale.exists()
+    parts.mkdir()  # no older copy left to remove: the load still succeeds
+    (parts / "part-00000").write_bytes(payload[:50])
+    (parts / "part-00001").write_bytes(payload[50:])
+    assert run(hashlib.sha256(payload).hexdigest()) == 0
 
 
 def test_nomad_scale_re_registers_the_job(servers):

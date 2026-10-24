@@ -99,6 +99,8 @@ def check(body: Dict[str, Any], raw: Optional[Dict[str, Any]], root: Path, targe
         except ServiceError as exc:
             raise ServiceError(f"{exc} Or set functions_url to the pskit host's URL (e.g. http://10.0.0.5:8080) "
                                "so the SMTP server knows where to send mail events") from None
+        if functions["method"] == "local" and target["method"] == "ssh":
+            functions = _cluster_of(root, target) or functions  # not deployed yet: they go to this server's cluster
         if target["method"] == "local":
             if functions["method"] != "local":
                 raise ServiceError("the functions run on an SSH server: create the SMTP server there, or set "
@@ -106,13 +108,45 @@ def check(body: Dict[str, Any], raw: Optional[Dict[str, Any]], root: Path, targe
             url = f"http://host.docker.internal:{port}"
         elif functions["method"] == "ssh" and functions.get("host") == target.get("host"):
             url = f"http://127.0.0.1:{port}"  # same server, host network: reaches a host bound to 127.0.0.1
+        elif functions.get("cluster") and _in_cluster(root, str(functions["cluster"]), target):
+            # Swarm publishes the port on every node (routing mesh); k3s and Nomad: the master's cluster address.
+            here = functions.get("orchestrator") == "swarm"
+            url = f"http://{'127.0.0.1' if here else functions['address']}:{port}"
         elif functions["method"] == "ssh":
             url = f"http://{functions['host']}:{port}"
         else:
-            raise ServiceError("the functions run on this machine, which the SMTP server cannot reach: deploy the "
-                               "functions to a server, or set functions_url to a URL of the pskit host it can reach")
+            raise ServiceError("the functions are not deployed to a server yet (they run on this machine, which the "
+                               "SMTP server cannot reach): deploy them first (pskit deploy --server NAME or "
+                               "--cluster NAME), create the SMTP server on a server of a scaling cluster, or set "
+                               "functions_url to a URL of the pskit host it can reach")
     return {"domains": domains, "functions_url": url, "hostname": hostname, "max_size_mb": max_mb,
             "network": network}
+
+
+def _in_cluster(root: Path, name: str, target: Dict[str, Any]) -> bool:
+    """Whether the SMTP server's machine (a saved server, or its host) is a node of cluster ``name``."""
+    from .onprem_cluster import load_clusters
+    from .onprem_servers import load_servers
+
+    nodes = (load_clusters(root).get(name) or {}).get("nodes") or {}
+    if target.get("server") in nodes:
+        return True
+    servers = load_servers(root)
+    return bool(target.get("host")) and any((servers.get(n) or {}).get("host") == target["host"] for n in nodes)
+
+
+def _cluster_of(root: Path, target: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The functions' target on the one scaling cluster the SMTP server's machine belongs to, else None."""
+    from .onprem_cluster import load_clusters
+    from .onprem_services import ServiceError, functions_target
+
+    names = [n for n in sorted(load_clusters(root)) if _in_cluster(root, n, target)]
+    if len(names) != 1:
+        return None
+    try:
+        return functions_target({"provider": {"name": "onprem", "options": {"cluster": names[0]}}}, root)
+    except ServiceError:
+        return None
 
 
 def env(req: Dict[str, Any], token: str) -> Dict[str, str]:

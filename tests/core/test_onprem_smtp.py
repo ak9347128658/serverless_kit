@@ -59,6 +59,45 @@ def test_ssh_service_on_the_functions_server_uses_the_host_network(tmp_path):
     assert entry["address"] == "20.40.60.80"
 
 
+def _cluster_project(tmp_path, orchestrator="swarm"):
+    import json
+
+    pskit = tmp_path / ".pskit"
+    pskit.mkdir()
+    servers = {f"vm{i}": {"host": f"20.0.0.{i}", "user": "ubuntu"} for i in (1, 2, 3)}
+    (pskit / "onprem-servers.json").write_text(json.dumps({"servers": servers}))
+    nodes = {"vm1": {"role": "master", "node": "n1", "address": "10.0.0.1"},
+             "vm2": {"role": "worker", "node": "n2", "address": "10.0.0.2"}}
+    clusters = {"prod": {"master": "vm1", "orchestrator": orchestrator, "nodes": nodes}}
+    (pskit / "onprem-clusters.json").write_text(json.dumps({"clusters": clusters}))
+    return pskit
+
+
+@pytest.mark.parametrize("orchestrator, worker_url", [("swarm", "http://127.0.0.1:8080"),
+                                                      ("kubernetes", "http://10.0.0.1:8080")])
+def test_functions_url_on_a_scaling_cluster(tmp_path, orchestrator, worker_url):
+    import json
+
+    pskit = _cluster_project(tmp_path, orchestrator)
+    body = {"domains": "a.example.com"}
+
+    def url(server):
+        target = svc.normalize_target({"server": server}, tmp_path)
+        return onprem_smtp.check(body, _raw(), tmp_path, target)["functions_url"]
+
+    # Not deployed yet: an SMTP server on a cluster node sends to that cluster.
+    assert url("vm1") == "http://127.0.0.1:8080" and url("vm2") == worker_url
+    with pytest.raises(svc.ServiceError, match="not deployed to a server yet"):
+        url("vm3")
+    # Deployed with --cluster (no target in pskit.yml): the last deploy is used, also from outside the cluster.
+    (pskit / "onprem-dev").mkdir()
+    (pskit / "onprem-dev" / "onprem_deployed.json").write_text(json.dumps({"cluster": "prod", "server": "vm1"}))
+    assert url("vm3") == "http://20.0.0.1:8080" and url("vm2") == worker_url
+    # Deployed with --server: that server.
+    (pskit / "onprem-dev" / "onprem_deployed.json").write_text(json.dumps({"server": "vm3"}))
+    assert url("vm3") == "http://127.0.0.1:8080" and url("vm1") == "http://20.0.0.3:8080"
+
+
 def test_functions_url_defaults_and_errors(tmp_path):
     other = {"method": "ssh", "host": "20.40.60.81"}
     raw = _raw(deploy={"host": "20.40.60.80"})
@@ -66,7 +105,7 @@ def test_functions_url_defaults_and_errors(tmp_path):
         "http://20.40.60.80:8080"
     with pytest.raises(svc.ServiceError, match="SSH server"):
         onprem_smtp.check({"domains": "a.example.com"}, raw, tmp_path, {"method": "local"})
-    with pytest.raises(svc.ServiceError, match="functions run on this machine"):
+    with pytest.raises(svc.ServiceError, match="not deployed to a server yet"):
         onprem_smtp.check({"domains": "a.example.com"}, _raw(), tmp_path, other)
     explicit = onprem_smtp.check({"domains": "a.example.com", "functions_url": "https://fn.example.com/"}, _raw(),
                                  tmp_path, other)

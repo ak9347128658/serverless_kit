@@ -849,17 +849,33 @@ def describe_target(target: Dict[str, Any]) -> str:
 
 
 def functions_target(raw: Optional[Dict[str, Any]], root: Path) -> Dict[str, Any]:
-    """Where the functions' host answers from pskit.yml: its SSH server, a cluster's master, or this machine."""
+    """Where the functions' host answers: pskit.yml's SSH server or cluster, else where the stage was last deployed
+    (``pskit deploy --cluster`` / ``--server``, the studio's machine picker), else this machine. A cluster gives its
+    master, tagged with ``cluster`` and the master's cluster ``address``."""
     target = default_target(raw)
+    origin = CONFIG_SERVER
+    if target == {"method": "local"}:
+        from .onprem_servers import deployed_cluster, deployed_server
+
+        stage = str(((raw or {}).get("provider") or {}).get("stage") or "dev")
+        remembered = deployed_cluster(root, stage)
+        if remembered:
+            target = {"cluster": remembered}
+        elif deployed_server(root, stage):
+            target, origin = {"server": deployed_server(root, stage)}, f"the last deploy of onprem-{stage}"
     if target.get("cluster"):
         from .onprem_cluster import ClusterError, get_cluster
 
         try:
-            master = str(get_cluster(root, str(target["cluster"]))["master"])
+            cluster = get_cluster(root, str(target["cluster"]))
         except ClusterError as exc:
             raise ServiceError(str(exc)) from None
-        return normalize_target({"server": master}, root)
-    return normalize_target(target, root, origin=CONFIG_SERVER)
+        master = str(cluster["master"])
+        out = normalize_target({"server": master}, root)
+        address = str(((cluster.get("nodes") or {}).get(master) or {}).get("address") or "")
+        return {**out, "cluster": str(target["cluster"]), "orchestrator": str(cluster.get("orchestrator") or ""),
+                "address": address or str(out.get("host") or "")}
+    return normalize_target(target, root, origin=origin)
 
 
 def default_target_problem(raw: Optional[Dict[str, Any]], root: Path) -> str:

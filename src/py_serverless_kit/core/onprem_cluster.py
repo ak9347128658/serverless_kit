@@ -412,6 +412,9 @@ def ship_image(orchestrator: str, image: str, targets: Dict[str, Dict[str, Any]]
                     return None
                 except ServiceError as exc:
                     error = exc
+                if not fn(_ssh_argv(target, scripts.has_image_command(orchestrator, image)), None)[0]:
+                    emit(f"  {server}: loaded {image}")  # the load went through; only a later step failed
+                    return None
                 if attempt < COPY_ATTEMPTS:
                     emit(f"  {server}: copy interrupted ({error}); resuming in {delay:.0f} s"
                          f" (attempt {attempt + 1} of {COPY_ATTEMPTS})")

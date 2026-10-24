@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.10.3] - 2026-10-24
+
+### Fixed
+- **Cluster deploys copied the image several times and could fail after it had loaded** (`copy interrupted
+  (command failed (1): Loaded image: ...)`). When no older copy of the image was left on the server, the cleanup at
+  the end of the load script exited 1, even though the image was already loaded. The script now exits 0 once
+  the image is loaded. Before each retry pskit also checks whether the server already has the image, and stops
+  copying if it does.
+- **Creating an SMTP server when the functions are not set in pskit.yml** (`the functions run on this machine,
+  which the SMTP server cannot reach`). The functions' address now comes from where the stage was last deployed
+  (`pskit deploy --cluster` / `--server`, or the studio's machine picker) when pskit.yml names no target. If the
+  functions are not deployed anywhere yet, an SMTP server on a node of a scaling cluster sends mail to that
+  cluster. On Swarm it uses `127.0.0.1` (Swarm publishes the port on every node); on k3s and Nomad it uses the
+  master's cluster address. In any other case the error now says that the functions need to be deployed first.
+
 ## [1.10.2] - 2026-10-24
 
 ### Fixed
