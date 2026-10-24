@@ -6,17 +6,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-## [1.10.1] - 2026-10-24
+## [1.10.2] - 2026-10-24
 
 ### Fixed
-- **Re-adding a server to a cluster**: `pskit cluster join` no longer fails with *"This node is already part of a
-  swarm"*. A server that a failed join left in `pending`/`error`, that was removed while it was off, or that belongs
-  to a swarm that was set up again now leaves the old swarm and joins. It is skipped if it is already a member,
-  checked by node id instead of by manager address, which used to break when the master had both public and
-  private IPs. Pskit still refuses to take over a server that manages another swarm with nodes or services, or
-  whose swarm is locked. Older *down* entries for the same host are removed from the master after the rejoin. The
-  swarm master setup also recovers from a half-joined state. Kubernetes (k3s) agents are reinstalled when they
-  point at a different master or token, and a server running its own k3s server is refused with a clear message.
 - **Copying the function image to cluster servers**: a dropped connection (`scp: Couldn't send packet: Broken
   pipe`) no longer fails the whole deploy. The image is gzip-compressed, often to a third of its size or less,
   and sent in 16 MB parts with checksums. Each retry sends only the parts that are missing, up to 6 attempts with
@@ -33,6 +25,17 @@ All notable changes to this project are documented here. The format follows [Kee
   - `pskit resources onprem servers remove` (and the studio's *Forget*) refuses a server that is still in a
     cluster, and warns when pskit.yml or a created resource still names it.
 
+## [1.10.1] - 2026-10-24
+
+### Fixed
+- **Re-adding a server to a cluster**: `pskit cluster join` no longer fails with *"This node is already part of a
+  swarm"*. A server that a failed join left in `pending`/`error`, that was removed while it was off, or that belongs
+  to a swarm that was set up again now leaves the old swarm and joins. It is skipped if it is already a member,
+  checked by node id instead of by manager address, which used to break when the master had both public and
+  private IPs. Pskit still refuses to take over a server that manages another swarm with nodes or services, or
+  whose swarm is locked. Older *down* entries for the same host are removed from the master after the rejoin. The
+  swarm master setup also recovers from a half-joined state. Kubernetes (k3s) agents are reinstalled when they
+  point at a different master or token, and a server running its own k3s server is refused with a clear message.
 ## [1.10.0] - 2026-10-24
 
 ### Added
