@@ -466,3 +466,91 @@ export interface GuidePage {
   title: string;
   markdown: string;
 }
+
+/** A scaling cluster (`GET /api/onprem-clusters`): Docker Swarm, Kubernetes (k3s) or Nomad on saved servers. */
+export type Orchestrator = "swarm" | "kubernetes" | "nomad";
+
+export interface ClusterNode {
+  server: string;
+  role: "master" | "worker";
+  node: string;
+  address: string;
+  joined_at?: string;
+}
+
+export interface ClusterAlertEntry {
+  at: string;
+  test: boolean;
+  message: string;
+  sent: string[];
+  errors: string[];
+}
+
+export interface ClusterDeployment {
+  service: string;
+  stage: string;
+  image: string;
+  replicas: number;
+  port: number;
+  endpoint: string;
+  deployed_at: string;
+}
+
+export interface OnPremCluster {
+  name: string;
+  orchestrator: Orchestrator;
+  orchestrator_label: string;
+  master: string;
+  advertise: string;
+  nodes: ClusterNode[];
+  capacity: { cpu: number; memory: number; disk: number };
+  alert: { function: string; stage: string; webhook: string; cooldown_minutes: number };
+  watch: { enabled: boolean; interval_seconds: number };
+  alerts: ClusterAlertEntry[];
+  deployments: Record<string, ClusterDeployment>;
+  created_at?: string;
+}
+
+export interface ClusterNodeStatus {
+  server: string;
+  role: string;
+  node: string;
+  address: string;
+  reachable: boolean;
+  error?: string;
+  hostname?: string;
+  cpu?: number | null;
+  memory?: number | null;
+  disk?: number | null;
+  memory_mb?: number;
+  disk_gb?: number;
+  cpus?: number | null;
+  load?: string;
+  ready: boolean;
+  state: string;
+  availability: string;
+  over: string[];
+  full: boolean;
+}
+
+export interface ClusterStatus {
+  name: string;
+  orchestrator: Orchestrator;
+  capacity: { cpu: number; memory: number; disk: number };
+  nodes: ClusterNodeStatus[];
+  workloads: { name: string; running: number; desired: number }[];
+  pending: string[];
+  full: boolean;
+  reasons: string[];
+  orchestrator_error?: string | null;
+  checked_at: string;
+  alert?: ClusterAlertEntry | { skipped: string; next_after_minutes: number };
+  error?: string;
+}
+
+export interface OnPremClustersState {
+  clusters: OnPremCluster[];
+  servers: OnPremServer[];
+  orchestrators: { id: Orchestrator; label: string; summary: string; ports: string }[];
+  last: Record<string, ClusterStatus>;
+}

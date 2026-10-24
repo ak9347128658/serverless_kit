@@ -47,6 +47,16 @@ class Studio:
         self.terminal_urls: Dict[str, str] = {}  # browser terminal name -> its secret URL (known only here)
         self.vscode = VSCode(self.root, image=vscode_image)
         self._meta: Optional[Dict[str, Any]] = None
+        self._cluster_watch: Any = None
+
+    def cluster_watch(self) -> Any:
+        """Checks scaling clusters that have `watch` on (capacity alerts) while the studio runs."""
+        if self._cluster_watch is None:
+            from ..core.onprem_cluster import Watcher
+
+            self._cluster_watch = Watcher(self.root)
+            self._cluster_watch.start()
+        return self._cluster_watch
 
     def meta(self) -> Dict[str, Any]:
         if self._meta is None:
@@ -345,6 +355,8 @@ def make_handler(app: Studio) -> type:
                 return self._onprem_services(method, parts[1:], params)
             if parts and parts[0] in ("onprem-servers", "onprem-terminals"):
                 return self._onprem_machines(method, parts, params)
+            if parts and parts[0] == "onprem-clusters":
+                return self._onprem_clusters(method, parts[1:])
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":
@@ -533,6 +545,78 @@ def make_handler(app: Studio) -> type:
             except svc.ServiceError as exc:
                 raise StudioError(400, str(exc)) from None
             raise StudioError(404 if method == "GET" else 405, "unknown on-prem service endpoint")
+
+        def _onprem_clusters(self, method: str, rest: List[str]) -> Tuple[int, Any]:
+            """Scaling clusters (Swarm / Kubernetes / Nomad): create, join / remove servers, monitor, scale, alerts."""
+            from ..core import onprem_cluster as clu
+            from ..core.onprem_servers import list_servers
+            from ..core.onprem_services import ServiceError
+
+            root = app.root
+            watcher = app.cluster_watch()
+            try:
+                if not rest and method == "GET":
+                    return 200, {
+                        "clusters": clu.list_clusters(root),
+                        "servers": list_servers(root),
+                        "orchestrators": [{"id": k, **v} for k, v in clu.ORCHESTRATORS.items()],
+                        "last": watcher.last,
+                    }
+                if not rest and method == "POST":
+                    body = _obj(self._body())
+                    name, orch, master = (str(body.get(k) or "") for k in ("name", "orchestrator", "master"))
+                    if not name or not master or orch not in clu.ORCHESTRATORS:
+                        raise StudioError(400, "name, orchestrator (swarm, kubernetes, nomad) and master are required")
+                    if name in clu.load_clusters(root):
+                        raise StudioError(400, f"cluster {name!r} already exists")
+
+                    def create(job: Any) -> int:
+                        clu.create_cluster(root, name, orch, master, job.emit, advertise=str(body.get("advertise") or ""),
+                                           nomad_version=str(body.get("nomad_version") or ""))
+                        return 0
+
+                    label = f"Create cluster {name} ({clu.ORCHESTRATORS[orch]['label']})"
+                    return 202, {"job_id": app.jobs.run_callable("onprem-cluster", create, label=label).id}
+                if len(rest) == 1 and method == "GET":
+                    return 200, clu.public(rest[0], clu.get_cluster(root, rest[0]))
+                if len(rest) == 2 and rest[1] == "status" and method == "GET":
+                    current = clu.status(root, rest[0])
+                    watcher.last[rest[0]] = current
+                    return 200, current
+                if len(rest) == 2 and rest[1] == "settings" and method == "PUT":
+                    return 200, clu.save_settings(root, rest[0], _obj(self._body()))
+                if len(rest) == 2 and rest[1] == "check" and method == "POST":
+                    current = clu.check(root, rest[0])
+                    watcher.last[rest[0]] = current
+                    return 200, current
+                if len(rest) == 2 and rest[1] == "test-alert" and method == "POST":
+                    current = watcher.last.get(rest[0]) or {"orchestrator": clu.get_cluster(root, rest[0])["orchestrator"]}
+                    return 200, clu.send_alert(root, rest[0], current, test=True)
+                if len(rest) == 2 and rest[1] in ("join", "leave", "scale", "remove") and method == "POST":
+                    name, action = rest
+                    body = _obj(self._body())
+                    clu.get_cluster(root, name)  # 400 for an unknown cluster before starting a job
+                    server = str(body.get("server") or "")
+                    if action in ("join", "leave") and not server:
+                        raise StudioError(400, "server is required")
+
+                    def run(job: Any) -> int:
+                        if action == "join":
+                            clu.join_server(root, name, server, job.emit, advertise=str(body.get("advertise") or ""))
+                        elif action == "leave":
+                            clu.leave_server(root, name, server, job.emit)
+                        elif action == "scale":
+                            clu.scale(root, name, str(body.get("stack") or ""), int(body.get("replicas") or 0), job.emit)
+                        else:
+                            clu.remove_cluster(root, name, job.emit)
+                        return 0
+
+                    label = {"join": f"Join {server} to", "leave": f"Remove {server} from", "scale": "Scale",
+                             "remove": "Forget"}[action] + f" cluster {name}"
+                    return 202, {"job_id": app.jobs.run_callable("onprem-cluster", run, label=label).id}
+            except (clu.ClusterError, ServiceError, ValueError) as exc:
+                raise StudioError(400, str(exc)) from None
+            raise StudioError(404 if method == "GET" else 405, "unknown cluster endpoint")
 
         def _onprem_machines(self, method: str, parts: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
             """Saved SSH servers (add / test / shell / remove) and browser terminals (ttyd in Docker)."""

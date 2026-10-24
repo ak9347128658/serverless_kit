@@ -1,0 +1,846 @@
+"""Scaling clusters for on-prem functions: Docker Swarm, Kubernetes (k3s) or HashiCorp Nomad on saved SSH servers.
+
+A cluster is a master server plus any number of joined servers, all saved servers (``core/onprem_servers.py``).
+pskit installs the orchestrator, joins servers (also while functions are running), copies the function host
+image to every server (no registry), deploys it, shows each server's CPU / memory / disk, and when every
+server is full can call one of your functions (and / or a webhook) so DevOps hears about it and adds a server.
+
+Functions use a cluster with ``provider.options.cluster`` in pskit.yml (``cluster: prod`` or
+``{name: prod, replicas: 3, cpu: 0.25, memory: 256}``); without it nothing changes: the host runs on one
+machine. Resources (``pskit resources onprem create``) stay on one server either way.
+
+Stored in ``.pskit/onprem-clusters.json`` (out of git): orchestrator, master, joined servers, capacity limits,
+alert settings, recent alerts and what is deployed. Logins stay in the saved servers.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import socket
+import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from . import onprem_cluster_scripts as scripts
+from .onprem_services import ServiceError, _default_run, _Runner, _ssh_argv, check_ssh_login, ssh_options
+
+CLUSTERS_FILE = Path(".pskit") / "onprem-clusters.json"
+CLUSTER_SPEC = "onprem_cluster.json"  # next to pskit_host.json: where a cluster deploy goes (not hashed)
+ORCHESTRATORS: Dict[str, Dict[str, str]] = {
+    "swarm": {
+        "label": "Docker Swarm",
+        "summary": "Docker on every server; the built-in routing mesh answers on the port of every server.",
+        "ports": "2377/tcp, 7946/tcp+udp, 4789/udp between servers; the functions port from users",
+    },
+    "kubernetes": {
+        "label": "Kubernetes (k3s)",
+        "summary": "Lightweight Kubernetes (k3s, no Docker needed); ServiceLB answers on the port of every server.",
+        "ports": "6443/tcp, 8472/udp, 10250/tcp between servers; the functions port from users",
+    },
+    "nomad": {
+        "label": "HashiCorp Nomad",
+        "summary": "Nomad with the Docker driver; one web replica per server, put a load balancer in front.",
+        "ports": "4646-4648/tcp (+4648/udp) between servers; the functions port from users",
+    },
+}
+DEFAULT_CAPACITY = {"cpu": 85, "memory": 85, "disk": 90}
+DEFAULT_ALERT = {"function": "", "stage": "", "webhook": "", "cooldown_minutes": 30}
+_NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+_MAX_ALERTS = 50
+Emit = Callable[[str], None]
+RunFn = Callable[[List[str], Optional[Path]], Tuple[int, str]]
+
+
+class ClusterError(ValueError):
+    pass
+
+
+# ----------------------------------------------------------------------------------------------- store
+def _path(root: Path) -> Path:
+    return Path(root) / CLUSTERS_FILE
+
+
+def load_clusters(root: Path) -> Dict[str, Dict[str, Any]]:
+    try:
+        data = json.loads(_path(root).read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    clusters = data.get("clusters") if isinstance(data, dict) else None
+    return {k: v for k, v in (clusters or {}).items() if isinstance(v, dict)}
+
+
+_LOCK = threading.RLock()  # the studio's watcher and requests update the file from several threads
+
+
+def _save(root: Path, clusters: Dict[str, Dict[str, Any]]) -> None:
+    path = _path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((json.dumps({"clusters": clusters}, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _update(root: Path, name: str, change: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    with _LOCK:
+        clusters = load_clusters(root)
+        if name not in clusters:
+            raise ClusterError(_unknown(root, name))
+        change(clusters[name])
+        _save(root, clusters)
+        return clusters[name]
+
+
+def _unknown(root: Path, name: str) -> str:
+    known = ", ".join(sorted(load_clusters(root))) or "none yet"
+    return f"no cluster {name!r} (clusters: {known}). Create one: pskit cluster create NAME --master SERVER"
+
+
+def get_cluster(root: Path, name: str) -> Dict[str, Any]:
+    cluster = load_clusters(root).get(str(name))
+    if cluster is None:
+        raise ClusterError(_unknown(root, name))
+    return cluster
+
+
+def list_clusters(root: Path) -> List[Dict[str, Any]]:
+    return [public(name, item) for name, item in sorted(load_clusters(root).items())]
+
+
+def public(name: str, item: Dict[str, Any]) -> Dict[str, Any]:
+    """What the CLI and studio show (no logins: those stay in the saved servers)."""
+    orch = str(item.get("orchestrator") or "")
+    return {
+        "name": name,
+        "orchestrator": orch,
+        "orchestrator_label": ORCHESTRATORS.get(orch, {}).get("label", orch),
+        "master": item.get("master"),
+        "advertise": item.get("advertise"),
+        "nodes": [{"server": s, **n} for s, n in sorted((item.get("nodes") or {}).items())],
+        "capacity": {**DEFAULT_CAPACITY, **(item.get("capacity") or {})},
+        "alert": {**DEFAULT_ALERT, **(item.get("alert") or {})},
+        "watch": item.get("watch") or {"enabled": False, "interval_seconds": 60},
+        "alerts": list(item.get("alerts") or [])[-_MAX_ALERTS:],
+        "deployments": item.get("deployments") or {},
+        "created_at": item.get("created_at"),
+    }
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _target(root: Path, server: str) -> Dict[str, Any]:
+    from .onprem_servers import ServerError, server_target
+
+    try:
+        return server_target(root, server)
+    except ServerError as exc:
+        raise ClusterError(str(exc)) from None
+
+
+def _ip(host: str) -> str:
+    """The address the orchestrator advertises: an IP (Swarm, k3s and Nomad reject host names)."""
+    try:
+        socket.inet_aton(host)
+        return host
+    except OSError:
+        pass
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
+
+# ----------------------------------------------------------------------------------------------- SSH
+def _script(target: Dict[str, Any], script: str, emit: Emit, run: Optional[RunFn], *, label: str,
+            show: bool = True, check: bool = True) -> str:
+    """Copy ``script`` to ``~/pskit-cluster/<label>.sh`` on the server and run it. Returns its output."""
+    from ..providers.onprem_remote import scp_argv
+
+    runner = _Runner(emit, run)
+    remote = f"pskit-cluster/{label}.sh"
+    with tempfile.TemporaryDirectory(prefix="pskit-cluster-") as tmp:
+        local = Path(tmp) / f"{label}.sh"
+        local.write_bytes(script.replace("\r\n", "\n").encode("utf-8"))
+        runner(_ssh_argv(target, "mkdir -p pskit-cluster"), show=False)
+        runner(scp_argv(ssh_options(target), str(local), remote), show=False)
+    return runner(_ssh_argv(target, f"sh {remote}"), show=show, check=check)
+
+
+def _values(text: str, key: str) -> List[str]:
+    return [line.split("=", 1)[1].strip() for line in text.splitlines() if line.startswith(key + "=")]
+
+
+# ----------------------------------------------------------------------------------------------- lifecycle
+def create_cluster(
+    root: Path, name: str, orchestrator: str, master: str, emit: Emit, *, advertise: str = "",
+    nomad_version: str = "", run: Optional[RunFn] = None,
+) -> Dict[str, Any]:
+    """Install the orchestrator on saved server ``master`` and save cluster ``name``."""
+    if not _NAME.match(str(name)):
+        raise ClusterError("cluster name: lowercase letter first; lowercase letters, digits and - (max 31)")
+    if orchestrator not in ORCHESTRATORS:
+        raise ClusterError(f"orchestrator must be one of {', '.join(ORCHESTRATORS)}")
+    clusters = load_clusters(root)
+    if name in clusters:
+        raise ClusterError(f"cluster {name!r} already exists")
+    for other, item in clusters.items():
+        if master in (item.get("nodes") or {}):
+            raise ClusterError(f"server {master!r} is already in cluster {other!r}")
+    target = _target(root, master)
+    if run is None:
+        check_ssh_login(target)
+    addr = advertise or _ip(str(target["host"]))
+    version = nomad_version or scripts.NOMAD_VERSION
+    emit(f"Installing {ORCHESTRATORS[orchestrator]['label']} on {master} ({addr}) ...")
+    out = _script(target, scripts.master_script(orchestrator, addr, version), emit, run, label="master")
+    node = (_values(out, "PSKIT_NODE") or [str(target["host"])])[-1]
+    item = {
+        "orchestrator": orchestrator,
+        "master": master,
+        "advertise": addr,
+        "nodes": {master: {"role": "master", "node": node, "address": addr, "joined_at": _now()}},
+        "capacity": dict(DEFAULT_CAPACITY),
+        "alert": dict(DEFAULT_ALERT),
+        "created_at": _now(),
+    }
+    if orchestrator == "nomad" and nomad_version:
+        item["nomad_version"] = nomad_version
+    with _LOCK:
+        clusters = load_clusters(root)
+        clusters[name] = item
+        _save(root, clusters)
+    emit(f"Cluster {name} is ready: master {master} (node {node}). Join more servers: pskit cluster join {name} SERVER")
+    return public(name, item)
+
+
+def join_server(root: Path, name: str, server: str, emit: Emit, *, advertise: str = "",
+                run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Install the agent on saved server ``server``, join it, and copy the deployed images to it."""
+    cluster = get_cluster(root, name)
+    for other, item in load_clusters(root).items():
+        if server in (item.get("nodes") or {}):
+            raise ClusterError(f"server {server!r} is already in cluster {other!r}")
+    orch = cluster["orchestrator"]
+    master = _target(root, cluster["master"])
+    target = _target(root, server)
+    if run is None:
+        check_ssh_login(target)
+    addr = advertise or _ip(str(target["host"]))
+    emit(f"Asking {cluster['master']} for a join token ...")
+    out = _script(master, scripts.join_token_script(orch), emit, run, label="token", show=False)
+    token = (_values(out, "PSKIT_TOKEN") or [""])[-1]
+    if orch != "nomad" and not token:
+        raise ClusterError(f"the master {cluster['master']} gave no join token: {out.strip()[-300:]}")
+    emit(f"Installing {ORCHESTRATORS[orch]['label']} on {server} ({addr}) and joining {name} ...")
+    version = str(cluster.get("nomad_version") or scripts.NOMAD_VERSION)
+    out = _script(target, scripts.join_script(orch, str(cluster["advertise"]), token, addr, version), emit, run,
+                  label="join")
+    node = (_values(out, "PSKIT_NODE") or [str(target["host"])])[-1]
+    deployments = dict(cluster.get("deployments") or {})
+    for dep in (d for _k, d in sorted(deployments.items())):
+        if dep.get("image"):
+            emit(f"Copying image {dep['image']} to {server} ...")
+            try:
+                ship_image(orch, str(dep["image"]), {server: target}, emit, run)
+            except ServiceError as exc:
+                emit(f"  could not copy {dep['image']}: {exc}. Run pskit deploy again to copy it.")
+    _update(root, name, lambda c: c.setdefault("nodes", {}).__setitem__(
+        server, {"role": "worker", "node": node, "address": addr, "joined_at": _now()}))
+    emit(f"{server} joined {name} as node {node}. Replicas spread to it as the orchestrator schedules them.")
+    return public(name, get_cluster(root, name))
+
+
+def leave_server(root: Path, name: str, server: str, emit: Emit, *, run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Drain ``server`` (its replicas move to the others), stop its agent and remove it from the cluster."""
+    cluster = get_cluster(root, name)
+    node = (cluster.get("nodes") or {}).get(server)
+    if node is None:
+        raise ClusterError(f"{server!r} is not in cluster {name}")
+    if server == cluster["master"]:
+        raise ClusterError("the master cannot leave; remove the cluster instead")
+    orch = cluster["orchestrator"]
+    master = _target(root, cluster["master"])
+    node_name = str(node.get("node") or "")
+    node_id = _nomad_node_id(master, node_name, emit, run) if orch == "nomad" else ""
+    emit(f"Draining {server} (node {node_name}) ...")
+    _script(master, scripts.drain_script(orch, node_name, node_id), emit, run, label="drain", check=False)
+    emit(f"Stopping the agent on {server} ...")
+    try:
+        _script(_target(root, server), scripts.leave_script(orch), emit, run, label="leave", check=False)
+    except (ServiceError, ClusterError) as exc:
+        emit(f"  {server} did not answer ({exc}); removing it from the cluster anyway")
+    _script(master, scripts.forget_script(orch, node_name, node_id), emit, run, label="forget", check=False)
+    _update(root, name, lambda c: (c.get("nodes") or {}).pop(server, None))
+    emit(f"{server} left {name}.")
+    return public(name, get_cluster(root, name))
+
+
+def remove_cluster(root: Path, name: str, emit: Emit) -> None:
+    """Forget the cluster (servers keep their orchestrator; deployed functions keep running)."""
+    with _LOCK:
+        clusters = load_clusters(root)
+        if clusters.pop(str(name), None) is None:
+            raise ClusterError(_unknown(root, name))
+        _save(root, clusters)
+    emit(f"Forgot cluster {name}. The servers keep running; remove deployments first with pskit remove.")
+
+
+def _nomad_node_id(master: Dict[str, Any], node: str, emit: Emit, run: Optional[RunFn]) -> str:
+    code, text = (run or _default_run)(_ssh_argv(master, "curl -fsS http://127.0.0.1:4646/v1/nodes"), None)
+    try:
+        nodes = json.loads(text) if not code else []
+    except ValueError:
+        nodes = []
+    for item in nodes if isinstance(nodes, list) else []:
+        if item.get("Name") == node:
+            return str(item.get("ID") or "")
+    emit(f"  Nomad does not list node {node}")
+    return ""
+
+
+def save_settings(root: Path, name: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Capacity limits (percent), alert target (function / webhook, cooldown) and the studio's watcher."""
+    capacity = body.get("capacity")
+    alert = body.get("alert")
+    watch = body.get("watch")
+
+    def change(c: Dict[str, Any]) -> None:
+        if isinstance(capacity, dict):
+            merged = {**DEFAULT_CAPACITY, **(c.get("capacity") or {})}
+            for key in DEFAULT_CAPACITY:
+                if key in capacity:
+                    value = int(capacity[key])
+                    if not 10 <= value <= 100:
+                        raise ClusterError(f"capacity.{key} must be 10..100 (percent)")
+                    merged[key] = value
+            c["capacity"] = merged
+        if isinstance(alert, dict):
+            merged_alert = {**DEFAULT_ALERT, **(c.get("alert") or {})}
+            for key in ("function", "stage", "webhook"):
+                if key in alert:
+                    merged_alert[key] = str(alert[key] or "").strip()
+            if merged_alert["webhook"] and not merged_alert["webhook"].lower().startswith(("http://", "https://")):
+                raise ClusterError("alert.webhook must be an http(s) URL")
+            if "cooldown_minutes" in alert:
+                merged_alert["cooldown_minutes"] = max(1, int(alert["cooldown_minutes"] or 30))
+            c["alert"] = merged_alert
+        if isinstance(watch, dict):
+            c["watch"] = {"enabled": bool(watch.get("enabled")),
+                          "interval_seconds": max(15, int(watch.get("interval_seconds") or 60))}
+
+    return public(name, _update(root, name, change))
+
+
+# ----------------------------------------------------------------------------------------------- images
+def ship_image(orchestrator: str, image: str, targets: Dict[str, Dict[str, Any]], emit: Emit,
+               run: Optional[RunFn] = None, *, tar: Optional[Path] = None) -> None:
+    """Copy ``image`` (built on this machine) to every server that does not have it yet, in parallel."""
+    from ..providers.onprem_remote import scp_argv
+
+    runner = _Runner(emit, run)
+    fn = run or _default_run
+    missing = {s: t for s, t in targets.items() if fn(_ssh_argv(t, scripts.has_image_command(orchestrator, image)), None)[0]}
+    if not missing:
+        emit(f"  every server already has {image}")
+        return
+    with tempfile.TemporaryDirectory(prefix="pskit-image-") as tmp:
+        archive = tar or Path(tmp) / "image.tar"
+        if tar is None:
+            runner(["docker", "save", "-o", str(archive), image])
+        size = archive.stat().st_size / 1e6 if archive.is_file() else 0.0
+        remote = "pskit-cluster/" + re.sub(r"[^A-Za-z0-9._-]+", "-", image) + ".tar"
+
+        def one(server: str) -> Optional[str]:
+            target = missing[server]
+            try:
+                runner(_ssh_argv(target, "mkdir -p pskit-cluster"), show=False)
+                runner(scp_argv(ssh_options(target), str(archive), remote), show=False)
+                _script(target, scripts.image_load_script(orchestrator, image, remote), emit, run, label="load",
+                        show=False)
+            except ServiceError as exc:
+                return f"{server}: {exc}"
+            emit(f"  {server}: loaded {image} ({size:.0f} MB)")
+            return None
+
+        with ThreadPoolExecutor(max_workers=min(8, len(missing))) as pool:
+            errors = [e for e in pool.map(one, sorted(missing)) if e]
+    if errors:
+        raise ServiceError("could not copy the image to " + "; ".join(errors))
+
+
+# ----------------------------------------------------------------------------------------------- deploy
+def deploy_spec(root: Path, options: Dict[str, Any]) -> Dict[str, Any]:
+    """``provider.options.cluster`` -> the deploy target in place on ``options`` (``deploy`` becomes the master over
+    SSH so logs, test and the studio reach the host). Returns the normalized cluster settings."""
+    raw = options.get("cluster")
+    body: Dict[str, Any] = {"name": raw} if isinstance(raw, str) else dict(raw or {})
+    name = str(body.get("name") or "")
+    if not name:
+        raise ClusterError("options.cluster needs a name: cluster: NAME or cluster: {name: NAME, replicas: 3}")
+    cluster = get_cluster(root, name)
+    replicas = body.get("replicas", 2)
+    cpu = body.get("cpu", 0.25)
+    memory = body.get("memory", 256)
+    if isinstance(replicas, bool) or not isinstance(replicas, int) or not 1 <= replicas <= 500:
+        raise ClusterError("options.cluster.replicas must be an integer 1..500")
+    if isinstance(cpu, bool) or not isinstance(cpu, (int, float)) or not 0.05 <= float(cpu) <= 64:
+        raise ClusterError("options.cluster.cpu must be 0.05..64 (CPU cores each replica reserves)")
+    if isinstance(memory, bool) or not isinstance(memory, int) or not 32 <= memory <= 262144:
+        raise ClusterError("options.cluster.memory must be 32..262144 (MB each replica reserves)")
+    unknown = sorted(set(body) - {"name", "replicas", "cpu", "memory"})
+    if unknown:
+        raise ClusterError(f"unknown options.cluster keys {unknown}; expected name, replicas, cpu, memory")
+    master = get_server_item(root, str(cluster["master"]))
+    deploy = options.get("deploy")
+    deploy = deploy if isinstance(deploy, dict) else {}
+    kept = {k: v for k, v in deploy.items() if k in ("python", "target_arch")}
+    new = {**kept, "method": "docker", "host": master["host"], "user": master.get("user") or "root",
+           "port": int(master.get("port") or 22), "server": str(cluster["master"])}
+    if master.get("identity_file"):
+        new["pem"] = master["identity_file"]
+    for key in ("password_file", "auth", "known_hosts"):
+        if master.get(key):
+            new[key] = master[key]
+    if master.get("sudo"):
+        new["sudo"] = True
+    options["deploy"] = new
+    settings = {"name": name, "orchestrator": cluster["orchestrator"], "replicas": replicas, "cpu": float(cpu),
+                "memory": memory}
+    options["cluster"] = settings
+    return settings
+
+
+def get_server_item(root: Path, server: str) -> Dict[str, Any]:
+    from .onprem_servers import ServerError, get_server
+
+    try:
+        return get_server(root, server)
+    except ServerError as exc:
+        raise ClusterError(str(exc)) from None
+
+
+def cluster_file(root: Path, settings: Dict[str, Any]) -> Dict[str, Any]:
+    """``onprem_cluster.json`` for the deploy step: the cluster's servers with their logins (paths, no secrets)."""
+    cluster = get_cluster(root, settings["name"])
+    nodes = {s: {**n, "target": _target(root, s)} for s, n in (cluster.get("nodes") or {}).items()}
+    return {**settings, "project_root": str(Path(root).resolve()), "master": cluster["master"],
+            "advertise": cluster["advertise"], "nodes": nodes}
+
+
+def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Terraform apply of a cluster deploy: build the image here, copy it to every server, apply, wait healthy."""
+    info = json.loads((app_dir / CLUSTER_SPEC).read_text("utf-8"))
+    orch = str(info["orchestrator"])
+    stack = scripts.stack_name(str(spec["service"]), str(spec["stage"]))
+    port = int(spec.get("port") or 8080)
+    runner = _Runner(emit, run)
+    emit(f"Building the function host image for {stack} ...")
+    if run is None:
+        _build(app_dir, stack)
+    else:
+        runner(["docker", "build", "-t", f"{stack}:build", "."], show=False)
+    ident = runner(["docker", "image", "inspect", "--format", "{{.Id}}", f"{stack}:build"], show=False).strip()
+    tag = re.sub(r"^sha256:", "", ident)[:12] or "latest"
+    image = f"{stack}:{tag}"
+    runner(["docker", "tag", f"{stack}:build", image], show=False)
+    nodes = info["nodes"]
+    master_server = str(info["master"])
+    master = nodes[master_server]
+    emit(f"Copying {image} to {len(nodes)} server(s) ...")
+    ship_image(orch, image, {s: n["target"] for s, n in nodes.items()}, emit, run)
+    replicas = int(info["replicas"])
+    common: Dict[str, Any] = {"port": port, "replicas": replicas, "master_node": str(master["node"]), "cpu": float(info["cpu"]),
+              "memory_mb": int(info["memory"])}
+    if orch == "swarm":
+        python = "python3" if spec.get("language") == "node" else "python"
+        manifest = scripts.swarm_stack(stack, image, python=python, **common)
+    elif orch == "kubernetes":
+        manifest = scripts.kubernetes_manifest(stack, image, **common)
+    else:
+        manifest = scripts.nomad_job(stack, image, master_addr=str(info["advertise"]), **common)
+        workers = len(nodes) - 1
+        if replicas > workers:
+            emit(f"  Nomad runs one web replica per server besides the master: {workers} of {replicas} can start "
+                 "now, the rest start when you join more servers")
+    emit(f"Deploying {stack} on {ORCHESTRATORS[orch]['label']} ({replicas} web replica(s) + 1 main) ...")
+    _script(master["target"], scripts.apply_script(orch, stack, manifest, port), emit, run, label=f"apply-{stack}")
+    for node in nodes.values():
+        try:
+            _script(node["target"], scripts.prune_script(orch, stack, tag), emit, run, label="prune", show=False,
+                    check=False)
+        except ServiceError:
+            pass
+    endpoint = str(spec.get("endpoint") or f"http://{info['advertise']}:{port}")
+    record = {"service": spec["service"], "stage": spec["stage"], "image": image, "replicas": replicas, "port": port,
+              "endpoint": endpoint, "work_dir": str(app_dir.parent.resolve()), "deployed_at": _now()}
+    root = Path(str(info.get("project_root") or app_dir.parents[2]))
+    try:
+        _update(root, str(info["name"]), lambda c: c.setdefault("deployments", {}).__setitem__(stack, record))
+    except ClusterError:
+        pass
+    emit(f"{stack} is running on cluster {info['name']}: {endpoint}")
+    return record
+
+
+def _build(app_dir: Path, stack: str) -> None:
+    import subprocess
+
+    proc = subprocess.run(  # noqa: S603 - fixed argv
+        ["docker", "build", "-t", f"{stack}:build", "."], cwd=str(app_dir), stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+    )
+    if proc.returncode:
+        tail = proc.stdout.decode("utf-8", "replace").strip().splitlines()[-30:]
+        raise ServiceError("docker build failed (Docker must run on this machine):\n" + "\n".join(tail))
+
+
+def destroy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn] = None) -> None:
+    """Terraform destroy: remove the workloads (the main replica's data stays on the master)."""
+    info = json.loads((app_dir / CLUSTER_SPEC).read_text("utf-8"))
+    stack = scripts.stack_name(str(spec["service"]), str(spec["stage"]))
+    master = info["nodes"][str(info["master"])]
+    _script(master["target"], scripts.destroy_script(str(info["orchestrator"]), stack), emit, run,
+            label=f"destroy-{stack}", check=False)
+    root = Path(str(info.get("project_root") or app_dir.parents[2]))
+    try:
+        _update(root, str(info["name"]), lambda c: (c.get("deployments") or {}).pop(stack, None))
+    except ClusterError:
+        pass
+
+
+def scale(root: Path, name: str, stack: str, replicas: int, emit: Emit, run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Change the web replicas now (lasts until the next deploy, which uses options.cluster.replicas)."""
+    cluster = get_cluster(root, name)
+    if stack not in (cluster.get("deployments") or {}):
+        raise ClusterError(f"{stack!r} is not deployed on cluster {name}")
+    if not 0 <= int(replicas) <= 500:
+        raise ClusterError("replicas must be 0..500")
+    master = _target(root, cluster["master"])
+    live = None
+    if cluster["orchestrator"] == "nomad":
+        code, text = (run or _default_run)(_ssh_argv(master, f"curl -fsS http://127.0.0.1:4646/v1/job/{stack}"), None)
+        live = _json(text) if not code else None
+        if not isinstance(live, dict) or not live.get("TaskGroups"):
+            raise ClusterError(f"Nomad does not know job {stack}: {text.strip()[-300:]}")
+    _script(master, scripts.scale_script(cluster["orchestrator"], stack, int(replicas), live), emit, run, label="scale")
+    _update(root, name, lambda c: c["deployments"][stack].__setitem__("replicas", int(replicas)))
+    emit(f"{stack}: {replicas} web replica(s)")
+    return public(name, get_cluster(root, name))
+
+
+# ----------------------------------------------------------------------------------------------- status
+def node_metrics(target: Dict[str, Any], run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """CPU (busy over one second), memory and disk use in percent, load and CPU count of one server."""
+    code, text = (run or _default_run)(_ssh_argv(target, scripts.metrics_command()), None)
+    values: Dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and re.match(r"^[a-z_]+$", key):
+            values[key] = value.strip()
+    if code or "cpu_b" not in values:
+        return {"reachable": False, "error": (text.strip().splitlines() or [f"ssh exited with {code}"])[-1][-300:]}
+    out: Dict[str, Any] = {"reachable": True, "hostname": values.get("hostname", "")}
+    try:
+        a = [int(x) for x in values["cpu_a"].split()[1:]]
+        b = [int(x) for x in values["cpu_b"].split()[1:]]
+        total = sum(b) - sum(a)
+        idle = (b[3] + (b[4] if len(b) > 4 else 0)) - (a[3] + (a[4] if len(a) > 4 else 0))
+        out["cpu"] = round(100.0 * (total - idle) / total, 1) if total > 0 else 0.0
+    except (ValueError, IndexError):
+        out["cpu"] = None
+    try:
+        mem_total = int(values["mem_total_kb"])
+        out["memory"] = round(100.0 * (mem_total - int(values["mem_avail_kb"])) / mem_total, 1)
+        out["memory_mb"] = mem_total // 1024
+    except (KeyError, ValueError, ZeroDivisionError):
+        out["memory"] = None
+    try:
+        out["disk"] = round(100.0 * int(values["disk_used_kb"]) / int(values["disk_total_kb"]), 1)
+        out["disk_gb"] = round(int(values["disk_total_kb"]) / 1024 / 1024, 1)
+    except (KeyError, ValueError, ZeroDivisionError):
+        out["disk"] = None
+    out["cpus"] = int(values["cpus"]) if values.get("cpus", "").isdigit() else None
+    out["load"] = values.get("load", "")
+    return out
+
+
+def _sections(text: str) -> Dict[str, str]:
+    found: Dict[str, List[str]] = {}
+    current = ""
+    for line in text.splitlines():
+        if line.startswith(scripts.MARK):
+            current = line[len(scripts.MARK):].strip()
+            found[current] = []
+        elif current:
+            found[current].append(line)
+    return {k: "\n".join(v) for k, v in found.items()}
+
+
+def _json_lines(text: str) -> List[Dict[str, Any]]:
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+    return out
+
+
+def _json(text: str) -> Any:
+    try:
+        return json.loads(text.strip() or "null")
+    except ValueError:
+        return None
+
+
+def parse_orchestrator(orchestrator: str, text: str) -> Dict[str, Any]:
+    """The master's status script output -> ``{nodes: {name: {...}}, workloads: [...], pending: [...]}``."""
+    parts = _sections(text)
+    nodes: Dict[str, Dict[str, Any]] = {}
+    workloads: List[Dict[str, Any]] = []
+    pending: List[str] = []
+    if orchestrator == "swarm":
+        for item in _json_lines(parts.get("nodes", "")):
+            nodes[str(item.get("Hostname"))] = {
+                "ready": item.get("Status") == "Ready", "state": item.get("Status"),
+                "availability": item.get("Availability"), "manager": bool(item.get("ManagerStatus")),
+            }
+        for item in _json_lines(parts.get("services", "")):
+            ran, _, wanted = str(item.get("Replicas") or "0/0").partition(" ")[0].partition("/")
+            workloads.append({"name": item.get("Name"), "running": _int(ran), "desired": _int(wanted)})
+        for item in _json_lines(parts.get("pending", "")):
+            pending.append(f"{item.get('Name')}: {item.get('Error') or item.get('CurrentState')}")
+    elif orchestrator == "kubernetes":
+        for item in (_json(parts.get("nodes", "")) or {}).get("items", []):
+            conditions = {c.get("type"): c.get("status") for c in item.get("status", {}).get("conditions", [])}
+            name = item.get("metadata", {}).get("name")
+            labels = item.get("metadata", {}).get("labels", {})
+            nodes[str(name)] = {
+                "ready": conditions.get("Ready") == "True", "state": "Ready" if conditions.get("Ready") == "True"
+                else "NotReady", "availability": "Drain" if item.get("spec", {}).get("unschedulable") else "Active",
+                "manager": "node-role.kubernetes.io/control-plane" in labels,
+            }
+        for item in (_json(parts.get("services", "")) or {}).get("items", []):
+            status = item.get("status", {})
+            workloads.append({"name": item.get("metadata", {}).get("name"),
+                              "running": int(status.get("readyReplicas") or 0),
+                              "desired": int(item.get("spec", {}).get("replicas") or 0)})
+        for item in (_json(parts.get("pending", "")) or {}).get("items", []):
+            reasons = [c.get("message") for c in item.get("status", {}).get("conditions", []) if c.get("message")]
+            pending.append(f"{item.get('metadata', {}).get('name')}: {'; '.join(reasons) or 'Pending'}")
+    else:
+        for item in _json(parts.get("nodes", "")) or []:
+            nodes[str(item.get("Name"))] = {
+                "ready": item.get("Status") == "ready", "state": item.get("Status"),
+                "availability": "Drain" if item.get("Drain") or item.get("SchedulingEligibility") == "ineligible"
+                else "Active", "manager": False, "id": item.get("ID"),
+            }
+        for job in _json(parts.get("services", "")) or []:
+            summary = (job.get("JobSummary") or {}).get("Summary") or {}
+            for group, counts in sorted(summary.items()):
+                running = int(counts.get("Running") or 0)
+                queued = int(counts.get("Queued") or 0)
+                workloads.append({"name": f"{job.get('ID')}/{group}", "running": running,
+                                  "desired": running + queued + int(counts.get("Starting") or 0)})
+                if queued:
+                    pending.append(f"{job.get('ID')}/{group}: {queued} allocation(s) cannot be placed")
+    return {"nodes": nodes, "workloads": workloads, "pending": pending}
+
+
+def _int(text: Any) -> int:
+    try:
+        return int(str(text).strip())
+    except ValueError:
+        return 0
+
+
+def status(root: Path, name: str, run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Live view: every server's use (in parallel over SSH), the orchestrator's nodes and workloads, and whether
+    the cluster is full (every reachable, schedulable server over a limit, or replicas that cannot be placed)."""
+    cluster = get_cluster(root, name)
+    orch = cluster["orchestrator"]
+    capacity = {**DEFAULT_CAPACITY, **(cluster.get("capacity") or {})}
+    servers = dict(cluster.get("nodes") or {})
+    targets = {}
+    errors: Dict[str, str] = {}
+    for server in servers:
+        try:
+            targets[server] = _target(root, server)
+        except ClusterError as exc:
+            errors[server] = str(exc)
+    with ThreadPoolExecutor(max_workers=min(16, len(targets) + 1)) as pool:
+        orch_future = pool.submit(_orchestrator_view, targets.get(cluster["master"]), orch, run)
+        futures = {s: pool.submit(node_metrics, t, run) for s, t in targets.items()}
+        metrics = {s: f.result() for s, f in futures.items()}
+        view = orch_future.result()
+    rows = []
+    for server, node in sorted(servers.items(), key=lambda kv: (kv[1].get("role") != "master", kv[0])):
+        m = metrics.get(server) or {"reachable": False, "error": errors.get(server, "no saved server")}
+        o = (view.get("nodes") or {}).get(str(node.get("node"))) or {}
+        over = [k for k in ("cpu", "memory", "disk") if isinstance(m.get(k), (int, float)) and m[k] >= capacity[k]]
+        rows.append({
+            "server": server, "role": node.get("role"), "node": node.get("node"), "address": node.get("address"),
+            **m, "ready": bool(o.get("ready")), "state": o.get("state") or ("unknown" if view.get("error") else "missing"),
+            "availability": o.get("availability") or "", "over": over, "full": bool(over),
+        })
+    usable = [r for r in rows if r.get("reachable") and r["ready"] and r["availability"] in ("Active", "")]
+    pending = list(view.get("pending") or [])
+    full = bool(usable) and all(r["full"] for r in usable)
+    reasons = []
+    if full:
+        reasons.append(f"all {len(usable)} server(s) are over a capacity limit")
+    if not usable and rows:
+        reasons.append("no server is ready")
+    if pending:
+        reasons.append(f"{len(pending)} replica(s) cannot be placed")
+    if view.get("error"):
+        reasons.append(f"the master did not answer: {view['error']}")
+    return {
+        "name": name, "orchestrator": orch, "capacity": capacity, "nodes": rows,
+        "workloads": view.get("workloads") or [], "pending": pending, "full": full or bool(pending) or not usable,
+        "reasons": reasons, "orchestrator_error": view.get("error"), "checked_at": _now(),
+    }
+
+
+def _orchestrator_view(master: Optional[Dict[str, Any]], orch: str, run: Optional[RunFn]) -> Dict[str, Any]:
+    if master is None:
+        return {"error": "the master is not a saved server"}
+    try:
+        out = _script(master, scripts.status_script(orch), lambda _line: None, run, label="status", show=False)
+    except ServiceError as exc:
+        return {"error": str(exc)}
+    return parse_orchestrator(orch, out)
+
+
+# ----------------------------------------------------------------------------------------------- alerts
+def check(root: Path, name: str, *, alert: bool = True, run: Optional[RunFn] = None,
+          send: Optional[Callable[..., Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Status, and when the cluster is full the alert (at most once per cooldown)."""
+    current = status(root, name, run=run)
+    if current["full"] and alert:
+        cluster = get_cluster(root, name)
+        settings = {**DEFAULT_ALERT, **(cluster.get("alert") or {})}
+        last = float(cluster.get("last_alert_ts") or 0)
+        if time.time() - last >= 60 * int(settings["cooldown_minutes"]):
+            current["alert"] = (send or send_alert)(root, name, current)
+        else:
+            current["alert"] = {"skipped": "cooldown", "next_after_minutes": round(
+                (last + 60 * int(settings["cooldown_minutes"]) - time.time()) / 60, 1)}
+    return current
+
+
+def alert_event(name: str, current: Dict[str, Any], *, test: bool = False) -> Dict[str, Any]:
+    """``event.data`` of the alert function (also the webhook's JSON body)."""
+    nodes = [{k: n.get(k) for k in ("server", "node", "role", "cpu", "memory", "disk", "reachable", "state", "over")}
+             for n in current.get("nodes") or []]
+    reasons = current.get("reasons") or (["test alert"] if test else [])
+    message = (f"pskit cluster {name} is full: {'; '.join(reasons)}. Add a server: pskit cluster join {name} SERVER"
+               if not test else f"Test alert from pskit cluster {name}")
+    return {
+        "type": "pskit.cluster.capacity", "test": test, "cluster": name, "orchestrator": current.get("orchestrator"),
+        "full": bool(current.get("full")), "reasons": reasons, "message": message, "subject": (
+            f"[pskit] cluster {name} needs another server" if not test else f"[pskit] test alert for cluster {name}"),
+        "capacity": current.get("capacity"), "nodes": nodes, "workloads": current.get("workloads") or [],
+        "pending": current.get("pending") or [], "checked_at": current.get("checked_at") or _now(),
+    }
+
+
+def send_alert(root: Path, name: str, current: Dict[str, Any], *, test: bool = False) -> Dict[str, Any]:
+    """Call the alert function (through the deployed host) and / or POST the webhook. Recorded in the history."""
+    cluster = get_cluster(root, name)
+    settings = {**DEFAULT_ALERT, **(cluster.get("alert") or {})}
+    event = alert_event(name, current, test=test)
+    sent: List[str] = []
+    failures: List[str] = []
+    if settings["function"]:
+        try:
+            _invoke_alert(root, cluster, settings, event)
+            sent.append(f"function {settings['function']}")
+        except Exception as exc:  # noqa: BLE001 - reported in the result and history
+            failures.append(f"function {settings['function']}: {exc}")
+    if settings["webhook"]:
+        try:
+            _post_webhook(str(settings["webhook"]), event)
+            sent.append("webhook")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"webhook: {exc}")
+    if not settings["function"] and not settings["webhook"]:
+        failures.append("no alert function or webhook is set (cluster settings)")
+    entry = {"at": _now(), "test": test, "message": event["message"], "sent": sent, "errors": failures}
+
+    def record(c: Dict[str, Any]) -> None:
+        c["alerts"] = (list(c.get("alerts") or []) + [entry])[-_MAX_ALERTS:]
+        if sent and not test:
+            c["last_alert_ts"] = time.time()
+
+    _update(root, name, record)
+    return entry
+
+
+def _invoke_alert(root: Path, cluster: Dict[str, Any], settings: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """``POST /__pskit/invoke/<function>`` on the host of the stage that has the function (any deployment)."""
+    from urllib.parse import quote
+
+    from .onprem_control import HostControl, deployed_host
+
+    stage = str(settings.get("stage") or "")
+    deployed = deployed_host(root, stage) if stage else None
+    spec = (deployed or {}).get("spec") or {}
+    if not spec:
+        for dep in (cluster.get("deployments") or {}).values():
+            if not stage or dep.get("stage") == stage:
+                spec = (deployed_host(root, str(dep.get("stage"))) or {}).get("spec") or {}
+                if spec:
+                    break
+    if not spec:
+        raise ClusterError("no deployed on-prem stage to run it on (deploy the project, or set alert.stage)")
+    ssh = (spec.get("deploy") or {}).get("ssh") or None
+    control = HostControl(str(spec.get("endpoint")), token=str(spec.get("admin_token") or ""), ssh=ssh,
+                          remote_port=int(spec.get("port") or 8080), timeout=60)
+    control.request("POST", "/__pskit/invoke/" + quote(str(settings["function"]), safe=""), event)
+
+
+def _post_webhook(url: str, event: Dict[str, Any]) -> None:
+    from urllib.request import Request, urlopen
+
+    # Slack / Teams / Google Chat incoming webhooks show `text`; other receivers get the whole event.
+    body = json.dumps({"text": event["message"], **event}, default=str).encode("utf-8")
+    req = Request(url, data=body, method="POST", headers={"content-type": "application/json"})  # noqa: S310
+    with urlopen(req, timeout=20) as resp:  # noqa: S310 - the user's own webhook URL
+        resp.read()
+
+
+class Watcher:
+    """Checks clusters on their interval while the studio runs (``pskit cluster watch`` does it from a shell)."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.last: Dict[str, Dict[str, Any]] = {}
+        self._due: Dict[str, float] = {}
+
+    def start(self) -> None:
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._loop, name="pskit-cluster-watch", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(5):
+            for name, item in load_clusters(self.root).items():
+                watch = item.get("watch") or {}
+                if not watch.get("enabled") or time.time() < self._due.get(name, 0):
+                    continue
+                self._due[name] = time.time() + max(15, int(watch.get("interval_seconds") or 60))
+                try:
+                    self.last[name] = check(self.root, name)
+                except Exception as exc:  # noqa: BLE001 - keep watching the others
+                    self.last[name] = {"error": str(exc), "checked_at": _now()}

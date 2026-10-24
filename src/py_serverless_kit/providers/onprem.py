@@ -58,6 +58,20 @@ from .onprem_spec import (
 )
 from .terraform_doc import TerraformDoc
 
+CLUSTER_SPEC = "onprem_cluster.json"
+
+
+def _cluster_settings(options: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``options.cluster`` after ``core.onprem_cluster.deploy_spec`` resolved it (the project load does)."""
+    cluster = options.get("cluster")
+    return dict(cluster) if isinstance(cluster, dict) and cluster.get("orchestrator") else None
+
+
+def cluster_file(root: Path, settings: Dict[str, Any]) -> Dict[str, Any]:
+    from ..core.onprem_cluster import cluster_file as build
+
+    return build(root, settings)
+
 APP_DIR = "onprem_app"
 _SERVICE_KINDS = ("schedule", "queue", "storage", "topic", "workflow")
 # Host tuning passed straight into pskit_host.json: (kind, minimum).
@@ -285,6 +299,7 @@ class OnPremProvider(Provider):
             "admin_token",
             "deploy",
             "env_file",
+            "cluster",
         }
         known |= set(_TUNING)
         for key, (kind, low) in _TUNING.items():
@@ -723,6 +738,12 @@ class OnPremProvider(Provider):
             }
         unit = unit_name(cfg.service, cfg.provider.stage)
         extra: Dict[str, Any] = {}
+        deploy_json = spec.as_json()
+        cluster = _cluster_settings(options)
+        if cluster:
+            # A scaling cluster: the same image as `method: docker`, run by Swarm / Kubernetes / Nomad.
+            deploy_json["method"] = "cluster"
+            extra["cluster"] = cluster
         if options.get("env_file"):
             env_path = self._env_file_path(cfg, ctx.root)
             if env_path.is_file():
@@ -747,7 +768,7 @@ class OnPremProvider(Provider):
             "services": services,
             "resources": resources,
             "functions": functions,
-            "deploy": spec.as_json(),
+            "deploy": deploy_json,
             "unit_name": unit,
         }
 
@@ -784,7 +805,14 @@ class OnPremProvider(Provider):
             from ..packaging.builder import _copy_runtime
 
             _copy_runtime(staging)
-        if deploy.get("method") == "docker":
+        cluster_path = root / CLUSTER_SPEC
+        if deploy.get("method") == "cluster":
+            # Where the cluster's servers are: not part of the digest, so joining a server does not redeploy.
+            body = cluster_file(ctx.root, spec["cluster"])
+            cluster_path.write_bytes((json.dumps(body, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+        elif cluster_path.exists():
+            cluster_path.unlink()
+        if deploy.get("method") in ("docker", "cluster"):
             _write(
                 root / "Dockerfile",
                 dockerfile_text(

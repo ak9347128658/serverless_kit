@@ -156,7 +156,18 @@ def resolve_deploy(options: Dict[str, Any], root: Path, stage: str, server: Opti
     ``options.deploy`` in pskit.yml (``server``, ``host``, or a ``method`` other than local). Otherwise the stage goes back to the
     saved server it was last deployed to, so a deploy from the studio's machine picker sticks for later
     deploys, triggers, tests and logs.
+
+    ``options.cluster`` (a scaling cluster, ``core/onprem_cluster.py``) wins over all of these: the functions go to
+    the cluster, and the cluster's master becomes the SSH target used by logs and tests.
     """
+    if options.get("cluster"):
+        from .onprem_cluster import ClusterError, deploy_spec
+
+        try:
+            deploy_spec(root, options)
+        except ClusterError as exc:
+            raise ServerError(str(exc)) from None
+        return str(options["deploy"]["server"])
     if server == LOCAL:
         deploy = options.get("deploy")
         kept = {k: v for k, v in deploy.items() if k not in _LOGIN_KEYS} if isinstance(deploy, dict) else {}

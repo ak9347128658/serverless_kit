@@ -1,5 +1,9 @@
 import type { LogsResponse, LogStream } from "../types";
 import type {
+  ClusterAlertEntry,
+  ClusterStatus,
+  OnPremCluster,
+  OnPremClustersState,
   DiscoverResult,
   OnPremConsoleInfo,
   OnPremConsoleResult,
@@ -227,6 +231,15 @@ export const api = {
   onpremTerminals: () => request<{ terminals: OnPremTerminal[] }>("GET", "/api/onprem-terminals"),
   onpremTerminalStart: (body: { server?: string; key?: string; shell?: boolean }) => request<OnPremTerminal>("POST", "/api/onprem-terminals", body),
   onpremTerminalStop: (name: string) => request<{ stopped: string }>("POST", `/api/onprem-terminals/${encodeURIComponent(name)}/stop`, {}),
+  clusters: () => request<OnPremClustersState>("GET", "/api/onprem-clusters"),
+  clusterCreate: (body: { name: string; orchestrator: string; master: string; advertise?: string }) =>
+    request<{ job_id: string }>("POST", "/api/onprem-clusters", body),
+  clusterStatus: (name: string) => request<ClusterStatus>("GET", `/api/onprem-clusters/${encodeURIComponent(name)}/status`),
+  clusterCheck: (name: string) => request<ClusterStatus>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/check`, {}),
+  clusterTestAlert: (name: string) => request<ClusterAlertEntry>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/test-alert`, {}),
+  clusterSettings: (name: string, body: JsonObject) => request<OnPremCluster>("PUT", `/api/onprem-clusters/${encodeURIComponent(name)}/settings`, body),
+  clusterAction: (name: string, action: "join" | "leave" | "scale" | "remove", body: JsonObject = {}) =>
+    request<{ job_id: string }>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/${action}`, body),
   onpremApply: (raw: JsonObject, key: string, attach?: string[]) =>
     request<{ raw: JsonObject }>("POST", "/api/onprem-services/apply", { raw, key, attach }),
   onpremUnapply: (raw: JsonObject, key: string) => request<{ raw: JsonObject }>("POST", "/api/onprem-services/unapply", { raw, key }),

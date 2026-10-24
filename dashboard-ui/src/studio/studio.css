@@ -555,3 +555,21 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .terminal-frame { width: 100%; height: 66vh; border: 0; border-radius: 8px; background: #000; }
 .onprem-servers { margin-top: 16px; }
 .deploy-machine { margin: 12px 0; align-items: center; }
+
+/* Scaling cluster */
+.cluster-steps { margin: 6px 0 12px; padding-left: 20px; line-height: 1.7; }
+.cluster-tabs { margin-bottom: 12px; }
+.cluster-binding { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
+.cluster-full { align-items: flex-start; }
+.cluster-full ul { flex-basis: 100%; margin: 2px 0; padding-left: 18px; }
+.cluster-nodes td { vertical-align: top; }
+.cluster-nodes .badge + .badge { margin-left: 4px; }
+.node-full { background: var(--err-soft); }
+.meter { display: flex; align-items: center; gap: 8px; min-width: 130px; }
+.meter-bar { position: relative; flex: 1; height: 8px; border-radius: 4px; background: var(--border); overflow: visible; }
+.meter-fill { height: 100%; border-radius: 4px; background: var(--ok); transition: width 0.4s ease; }
+.meter-warn .meter-fill { background: var(--warn); }
+.meter-err .meter-fill { background: var(--err); }
+.meter-limit { position: absolute; top: -3px; width: 2px; height: 14px; background: var(--text); opacity: 0.35; transform: translateX(-1px); }
+.meter-text { min-width: 3.5em; text-align: right; }
+.cluster-alerts { list-style: none; padding: 0; margin: 4px 0 0; display: grid; gap: 6px; }

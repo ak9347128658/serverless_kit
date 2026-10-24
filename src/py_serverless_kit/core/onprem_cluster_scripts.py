@@ -1,0 +1,526 @@
+"""Shell scripts and workload manifests for on-prem scaling clusters (Docker Swarm, Kubernetes via k3s, Nomad).
+
+Everything here is a pure function of its arguments, so it is unit-tested without servers. The scripts run on
+the servers over SSH (``core/onprem_cluster.py`` copies and starts them); manifests are JSON (valid YAML for
+``docker stack deploy``, accepted by ``kubectl apply -f`` and the Nomad jobs API).
+
+Each deployment runs the function host image as two workloads:
+
+* ``main`` - one replica pinned to the master server with the data volume: schedules, built-in queues / topics /
+  buckets, workflow executions, logs and the admin API live there.
+* ``web`` - ``replicas`` copies behind the orchestrator's load balancer: HTTP routes and ``invoke()``. They hand
+  everything stateful to ``main`` (``PSKIT_MAIN_URL``), so adding replicas or servers never duplicates a schedule.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Dict, List, Optional
+
+from ..providers.onprem_remote import _docker_install_block, _docker_ready_block, _docker_shell_header, _shq
+
+NOMAD_VERSION = "1.11.3"  # releases.hashicorp.com; override per cluster with `nomad_version`
+K3S_INSTALL = "https://get.k3s.io"
+NAMESPACE = "pskit"  # Kubernetes namespace of every pskit workload
+DATA_ROOT = "/var/lib/pskit"  # Kubernetes / Nomad: <DATA_ROOT>/<stack> on the master holds the main replica's data
+MARK = "PSKIT_SECTION="  # separates the outputs of one status script
+
+_COMMON = (
+    "need() { command -v \"$1\" >/dev/null 2>&1; }\n"
+    "pkg_install() {\n"
+    "  if need apt-get; then export DEBIAN_FRONTEND=noninteractive; as_root apt-get update -y >/dev/null;"
+    " as_root apt-get install -y \"$@\";\n"
+    "  elif need dnf; then as_root dnf install -y \"$@\";\n"
+    "  elif need yum; then as_root yum install -y \"$@\";\n"
+    "  elif need apk; then as_root apk add --no-cache \"$@\";\n"
+    "  else echo \"pskit: install $* on this server and retry\" >&2; exit 1; fi\n"
+    "}\n"
+    "need curl || pkg_install curl\n"
+)
+
+
+def _header(*, secret: bool = False) -> str:
+    """POSIX sh with ``as_root``, ``dk`` (docker, or sudo docker), ``need`` and ``pkg_install``.
+
+    ``secret``: the script holds a join token, so it deletes itself when it ends.
+    """
+    trap = 'trap \'rm -f "$0"\' EXIT\n' if secret else ""
+    return _docker_shell_header() + trap + _COMMON
+
+
+def stack_name(service: str, stage: str) -> str:
+    """``pskit-<service>-<stage>``: a valid Swarm stack, Kubernetes name (DNS-1123) and Nomad job id."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", f"pskit-{service}-{stage}".lower()).strip("-")
+    return re.sub(r"-{2,}", "-", slug)[:50].rstrip("-")
+
+
+# ---------------------------------------------------------------------------------------------- master / join
+def master_script(orchestrator: str, advertise: str, nomad_version: str = NOMAD_VERSION) -> str:
+    """Install the orchestrator on the master server (idempotent) and print ``PSKIT_NODE=<node name>``."""
+    addr = _shq(advertise)
+    if orchestrator == "swarm":
+        return (
+            _header() + _docker_install_block() + _docker_ready_block()
+            + "state=$(dk info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo inactive)\n"
+            + f'if [ "$state" != "active" ]; then dk swarm init --advertise-addr {addr}; fi\n'
+            + "if [ \"$(dk info --format '{{.Swarm.ControlAvailable}}')\" != \"true\" ]; then\n"
+            + '  echo "pskit: this server is a worker of another swarm; make its manager the master" >&2\n'
+            + "  exit 1\n"
+            + "fi\n"
+            + "echo \"PSKIT_NODE=$(dk info --format '{{.Name}}')\"\n"
+        )
+    if orchestrator == "kubernetes":
+        return (
+            _header()
+            + "if ! need k3s; then\n"
+            + f"  curl -sfL {K3S_INSTALL} | as_root env INSTALL_K3S_EXEC=\"server --write-kubeconfig-mode 644"
+            + f' --tls-san {advertise}" sh -\n'
+            + "fi\n"
+            + _wait("as_root k3s kubectl get nodes >/dev/null 2>&1", 90, "Kubernetes (k3s) did not start")
+            + f"as_root k3s kubectl create namespace {NAMESPACE} >/dev/null 2>&1 || true\n"
+            + "echo \"PSKIT_NODE=$(hostname | tr 'A-Z' 'a-z')\"\n"
+        )
+    if orchestrator == "nomad":
+        config = _nomad_config(advertise, server=True, servers=[advertise])
+        return _nomad_agent_script(config, nomad_version)
+    raise ValueError(f"unknown orchestrator {orchestrator!r}")
+
+
+def join_token_script(orchestrator: str) -> str:
+    """Runs on the master: prints ``PSKIT_TOKEN=<worker join token>`` (Nomad needs none)."""
+    if orchestrator == "swarm":
+        return _header() + "echo \"PSKIT_TOKEN=$(dk swarm join-token -q worker)\"\n"
+    if orchestrator == "kubernetes":
+        return _header() + "echo \"PSKIT_TOKEN=$(as_root cat /var/lib/rancher/k3s/server/node-token)\"\n"
+    return _header() + "echo PSKIT_TOKEN=\n"
+
+
+def join_script(orchestrator: str, master: str, token: str, advertise: str,
+                nomad_version: str = NOMAD_VERSION) -> str:
+    """Install the orchestrator agent on a server and join the master's cluster; prints ``PSKIT_NODE=``."""
+    if orchestrator == "swarm":
+        return (
+            _header(secret=True) + _docker_install_block() + _docker_ready_block()
+            + "state=$(dk info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo inactive)\n"
+            + 'if [ "$state" = "active" ]; then\n'
+            + "  if dk info --format '{{range .Swarm.RemoteManagers}}{{.Addr}} {{end}}' | grep -q "
+            + _shq(f"{master}:2377") + "; then\n"
+            + '    echo "already in this swarm"\n'
+            + "  else\n"
+            + '    echo "pskit: this server is in another swarm. Leave it first: docker swarm leave --force" >&2\n'
+            + "    exit 1\n"
+            + "  fi\n"
+            + "else\n"
+            + f"  dk swarm join --advertise-addr {_shq(advertise)} --token {_shq(token)} {_shq(master + ':2377')}\n"
+            + "fi\n"
+            + "echo \"PSKIT_NODE=$(dk info --format '{{.Name}}')\"\n"
+        )
+    if orchestrator == "kubernetes":
+        return (
+            _header(secret=True)
+            + "if need k3s; then\n"
+            + '  echo "k3s is already installed here"\n'
+            + "else\n"
+            + f"  curl -sfL {K3S_INSTALL} | as_root env K3S_URL={_shq('https://' + master + ':6443')}"
+            + f" K3S_TOKEN={_shq(token)} INSTALL_K3S_EXEC={_shq('agent --node-external-ip ' + advertise)} sh -\n"
+            + "fi\n"
+            + "echo \"PSKIT_NODE=$(hostname | tr 'A-Z' 'a-z')\"\n"
+        )
+    if orchestrator == "nomad":
+        return _nomad_agent_script(_nomad_config(advertise, server=False, servers=[master]), nomad_version)
+    raise ValueError(f"unknown orchestrator {orchestrator!r}")
+
+
+def leave_script(orchestrator: str) -> str:
+    """Runs on the server that leaves: stop its agent (the master removes the node afterwards)."""
+    if orchestrator == "swarm":
+        return _header() + "dk swarm leave --force || true\n"
+    if orchestrator == "kubernetes":
+        return _header() + "if [ -x /usr/local/bin/k3s-agent-uninstall.sh ]; then as_root /usr/local/bin/k3s-agent-uninstall.sh; fi\n"
+    return _header() + "as_root systemctl disable --now nomad || true\n"
+
+
+def drain_script(orchestrator: str, node: str, node_id: str = "") -> str:
+    """Runs on the master: move every replica off ``node`` before it leaves."""
+    n = _shq(node)
+    if orchestrator == "swarm":
+        return (
+            _header() + f"dk node update --availability drain {n}\n"
+            + _wait(f"[ -z \"$(dk node ps {n} --filter desired-state=running -q)\" ]", 120, "replicas did not move",
+                    fail=False)
+        )
+    if orchestrator == "kubernetes":
+        return _header() + (f"as_root k3s kubectl drain {n} --ignore-daemonsets --delete-emptydir-data --force"
+                            " --timeout=180s || true\n")
+    body = json.dumps({"DrainSpec": {"Deadline": 120 * 10**9, "IgnoreSystemJobs": False}})
+    return _header() + (f"curl -fsS -X POST -H 'Content-Type: application/json' --data {_shq(body)}"
+                        f" http://127.0.0.1:4646/v1/node/{_shq(node_id)}/drain >/dev/null || true\n")
+
+
+def forget_script(orchestrator: str, node: str, node_id: str = "") -> str:
+    """Runs on the master after the server left: remove the node from the cluster's list."""
+    n = _shq(node)
+    if orchestrator == "swarm":
+        return _header() + _wait(
+            f"[ \"$(dk node inspect {n} --format '{{{{.Status.State}}}}' 2>/dev/null || echo down)\" = down ]", 60,
+            "node still up", fail=False) + f"dk node rm --force {n} || true\n"
+    if orchestrator == "kubernetes":
+        return _header() + f"as_root k3s kubectl delete node {n} --ignore-not-found\n"
+    return _header() + f"curl -fsS -X PUT http://127.0.0.1:4646/v1/node/{_shq(node_id)}/purge >/dev/null || true\n"
+
+
+def status_script(orchestrator: str, stack_prefix: str = "pskit-") -> str:
+    """Runs on the master: node list and workloads, as sections ``PSKIT_SECTION=<name>`` followed by JSON lines."""
+    if orchestrator == "swarm":
+        return (
+            _header()
+            + f"echo {MARK}nodes\n"
+            + "dk node ls --format '{{json .}}'\n"
+            + f"echo {MARK}services\n"
+            + "dk service ls --filter label=com.docker.stack.namespace --format '{{json .}}'\n"
+            + f"echo {MARK}pending\n"
+            + "for s in $(dk service ls -q); do dk service ps \"$s\" --filter desired-state=running"
+            + " --format '{{json .}}' 2>/dev/null | grep -i '\"CurrentState\":\"Pending' || true; done\n"
+        )
+    if orchestrator == "kubernetes":
+        k = "as_root k3s kubectl"
+        return (
+            _header()
+            + f"echo {MARK}nodes\n{k} get nodes -o json\n"
+            + f"echo {MARK}services\n{k} get deployments -n {NAMESPACE} -o json\n"
+            + f"echo {MARK}pending\n{k} get pods -n {NAMESPACE} --field-selector=status.phase=Pending -o json\n"
+        )
+    api = "http://127.0.0.1:4646/v1"
+    return (
+        _header()
+        + f"echo {MARK}nodes\ncurl -fsS {api}/nodes\necho\n"
+        + f"echo {MARK}services\ncurl -fsS '{api}/jobs?prefix={stack_prefix}'\necho\n"
+    )
+
+
+def metrics_command() -> str:
+    """One line for any Linux server: CPU over one second, memory, disk of /, load and CPU count."""
+    return (
+        "a=$(head -1 /proc/stat); sleep 1; b=$(head -1 /proc/stat); echo \"cpu_a=$a\"; echo \"cpu_b=$b\"; "
+        "echo \"cpus=$(nproc 2>/dev/null)\"; "
+        "awk '/^MemTotal/ {t=$2} /^MemAvailable/ {a=$2} END {print \"mem_total_kb=\" t; print \"mem_avail_kb=\" a}'"
+        " /proc/meminfo; "
+        "df -P / | awk 'NR==2 {print \"disk_total_kb=\" $2; print \"disk_used_kb=\" $3}'; "
+        "echo \"load=$(cut -d' ' -f1-3 /proc/loadavg)\"; echo \"hostname=$(hostname)\""
+    )
+
+
+def image_load_script(orchestrator: str, image: str, tar: str) -> str:
+    """Load the host image from ``tar`` into the node's container runtime, then delete the file."""
+    t = _shq(tar)
+    if orchestrator == "kubernetes":
+        return _header() + f"as_root k3s ctr images import {t}\nrm -f {t}\n"
+    return _header() + _docker_ready_block() + f"dk load -i {t}\nrm -f {t}\n"
+
+
+def has_image_command(orchestrator: str, image: str) -> str:
+    """Exit 0 when the node already has ``image`` (so the copy is skipped)."""
+    if orchestrator == "kubernetes":
+        ref = image if "/" in image else f"docker.io/library/{image}"
+        return f"sudo -n k3s ctr images ls -q 2>/dev/null | grep -qx {_shq(ref)} || k3s ctr images ls -q 2>/dev/null | grep -qx {_shq(ref)}"
+    return f"docker image inspect {_shq(image)} >/dev/null 2>&1 || sudo -n docker image inspect {_shq(image)} >/dev/null 2>&1"
+
+
+def prune_script(orchestrator: str, repo: str, keep: str) -> str:
+    """Remove older tags of this deployment's image (best effort; an image still in use stays)."""
+    if orchestrator == "kubernetes":
+        return _header() + (
+            f"for ref in $(as_root k3s ctr images ls -q | grep '^docker.io/library/{repo}:' | grep -v ':{keep}$'); do"
+            " as_root k3s ctr images rm \"$ref\" >/dev/null 2>&1 || true; done\n"
+        )
+    return _header() + (
+        f"for ref in $(dk images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep '^{repo}:' | grep -v ':{keep}$'); do"
+        " dk rmi \"$ref\" >/dev/null 2>&1 || true; done\n"
+    )
+
+
+# ---------------------------------------------------------------------------------------------- workloads
+def _health_cmd(python: str, port: int) -> List[str]:
+    code = f"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/__pskit/health', timeout=3).read()"
+    return ["CMD", python, "-c", code]
+
+
+def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node: str, cpu: float, memory_mb: int,
+                python: str = "python") -> Dict[str, Any]:
+    """A compose file (JSON) for ``docker stack deploy``: ``main`` on the master, ``web`` behind the routing mesh."""
+    health = {"test": _health_cmd(python, port), "interval": "10s", "timeout": "5s", "retries": 3, "start_period": "30s"}
+    reserve = {"cpus": f"{cpu:g}", "memory": f"{memory_mb}M"}
+    return {
+        "version": "3.8",
+        "services": {
+            "main": {
+                "image": image,
+                "environment": {"PSKIT_HOST_ROLE": "main", "PSKIT_REPLICA": "main"},
+                "volumes": ["data:/var/pskit/data"],
+                "networks": ["pskit"],
+                "healthcheck": health,
+                "deploy": {
+                    "replicas": 1,
+                    "placement": {"constraints": [f"node.hostname == {master_node}"]},
+                    "update_config": {"order": "stop-first"},
+                    "restart_policy": {"condition": "any"},
+                    "resources": {"reservations": reserve},
+                },
+            },
+            "web": {
+                "image": image,
+                "environment": {
+                    "PSKIT_HOST_ROLE": "web",
+                    "PSKIT_MAIN_URL": f"http://main:{port}",
+                    "PSKIT_REPLICA": "{{.Node.Hostname}}-{{.Task.Slot}}",
+                },
+                "ports": [{"target": port, "published": port, "protocol": "tcp", "mode": "ingress"}],
+                "networks": ["pskit"],
+                "healthcheck": health,
+                "deploy": {
+                    "replicas": replicas,
+                    "update_config": {"parallelism": 1, "order": "start-first", "failure_action": "rollback"},
+                    "restart_policy": {"condition": "any"},
+                    "resources": {"reservations": reserve},
+                },
+            },
+        },
+        "volumes": {"data": {}},
+        "networks": {"pskit": {"driver": "overlay", "attachable": True}},
+    }
+
+
+def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, master_node: str, cpu: float,
+                        memory_mb: int) -> Dict[str, Any]:
+    """Deployments ``<stack>-main`` / ``<stack>-web`` and Services (``<stack>`` is a LoadBalancer: k3s ServiceLB
+    answers on ``port`` of every node)."""
+    probe = {"httpGet": {"path": "/__pskit/health", "port": port}, "periodSeconds": 10, "timeoutSeconds": 5}
+    requests = {"cpu": f"{int(round(cpu * 1000))}m", "memory": f"{memory_mb}Mi"}
+
+    def deployment(role: str, count: int, env: List[Dict[str, Any]], extra: Dict[str, Any]) -> Dict[str, Any]:
+        labels = {"app": stack, "role": role}
+        container: Dict[str, Any] = {
+            "name": "host",
+            "image": image,
+            "imagePullPolicy": "Never",  # copied to every node by pskit, no registry
+            "ports": [{"containerPort": port}],
+            "env": env,
+            "readinessProbe": probe,
+            "livenessProbe": {**probe, "initialDelaySeconds": 30, "failureThreshold": 6},
+            "resources": {"requests": requests},
+        }
+        pod: Dict[str, Any] = {"containers": [container]}
+        if role == "main":
+            container["volumeMounts"] = [{"name": "data", "mountPath": "/var/pskit/data"}]
+            pod["volumes"] = [{"name": "data", "hostPath": {"path": f"{DATA_ROOT}/{stack}", "type": "DirectoryOrCreate"}}]
+            pod["nodeSelector"] = {"kubernetes.io/hostname": master_node}
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": f"{stack}-{role}", "namespace": NAMESPACE, "labels": labels},
+            "spec": {
+                "replicas": count,
+                "selector": {"matchLabels": labels},
+                "template": {"metadata": {"labels": labels}, "spec": pod},
+                **extra,
+            },
+        }
+
+    def service(name: str, role: str, kind: str) -> Dict[str, Any]:
+        return {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": name, "namespace": NAMESPACE, "labels": {"app": stack}},
+            "spec": {"type": kind, "selector": {"app": stack, "role": role},
+                     "ports": [{"name": "http", "port": port, "targetPort": port}]},
+        }
+
+    replica = {"name": "PSKIT_REPLICA", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}
+    return {
+        "apiVersion": "v1",
+        "kind": "List",
+        "items": [
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NAMESPACE}},
+            deployment("main", 1, [{"name": "PSKIT_HOST_ROLE", "value": "main"}, replica],
+                       {"strategy": {"type": "Recreate"}}),
+            service(f"{stack}-main", "main", "ClusterIP"),
+            deployment(
+                "web", replicas,
+                [{"name": "PSKIT_HOST_ROLE", "value": "web"},
+                 {"name": "PSKIT_MAIN_URL", "value": f"http://{stack}-main:{port}"}, replica],
+                {"strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}}},
+            ),
+            service(stack, "web", "LoadBalancer"),
+        ],
+    }
+
+
+def nomad_job(stack: str, image: str, *, port: int, replicas: int, master_node: str, master_addr: str, cpu: float,
+              memory_mb: int) -> Dict[str, Any]:
+    """A Nomad job (jobs API JSON). ``main`` holds ``port`` on the master; ``web`` holds it on each other server
+    (one per server: put your load balancer in front of every server's ``port``)."""
+    seconds = 10**9
+
+    def group(role: str, count: int, env: Dict[str, str], constraints: List[Dict[str, str]]) -> Dict[str, Any]:
+        config: Dict[str, Any] = {"image": image, "ports": ["http"], "force_pull": False}
+        if role == "main":
+            config["volumes"] = [f"{DATA_ROOT}/{stack}:/var/pskit/data"]
+        return {
+            "Name": role,
+            "Count": count,
+            "Constraints": constraints,
+            "Networks": [{"Mode": "host", "ReservedPorts": [{"Label": "http", "Value": port, "To": port}]}],
+            "RestartPolicy": {"Attempts": 10, "Interval": 30 * 60 * seconds, "Delay": 15 * seconds, "Mode": "delay"},
+            "Update": {"MaxParallel": 1, "HealthCheck": "task_states", "MinHealthyTime": 10 * seconds,
+                       "HealthyDeadline": 5 * 60 * seconds, "AutoRevert": True},
+            "Tasks": [{
+                "Name": "host",
+                "Driver": "docker",
+                "Config": config,
+                "Env": env,
+                "Resources": {"CPU": max(100, int(round(cpu * 1000))), "MemoryMB": memory_mb},
+            }],
+        }
+
+    on_master = {"LTarget": "${node.unique.name}", "RTarget": master_node, "Operand": "="}
+    return {
+        "Job": {
+            "ID": stack,
+            "Name": stack,
+            "Type": "service",
+            "Datacenters": ["dc1"],
+            "TaskGroups": [
+                group("main", 1, {"PSKIT_HOST_ROLE": "main", "PSKIT_REPLICA": "main"}, [on_master]),
+                group(
+                    "web", replicas,
+                    {"PSKIT_HOST_ROLE": "web", "PSKIT_MAIN_URL": f"http://{master_addr}:{port}",
+                     "PSKIT_REPLICA": "${node.unique.name}-${NOMAD_ALLOC_INDEX}"},
+                    [{**on_master, "Operand": "!="}, {"Operand": "distinct_hosts", "RTarget": "true"}],
+                ),
+            ],
+        }
+    }
+
+
+def apply_script(orchestrator: str, stack: str, manifest: Dict[str, Any], port: int, timeout: int = 300) -> str:
+    """Runs on the master: apply the manifest and wait until the main replica answers ``/__pskit/health``."""
+    doc = json.dumps(manifest, indent=1)
+    path = f"pskit-cluster/{stack}.json"
+    write = f"mkdir -p pskit-cluster\ncat > {path} <<'PSKIT_MANIFEST'\n{doc}\nPSKIT_MANIFEST\n"
+    if orchestrator == "swarm":
+        run = (f"dk stack deploy --prune --resolve-image never -c {path} {_shq(stack)}\n"
+               + _wait(f"dk service ls --filter label=com.docker.stack.namespace={stack} --format '{{{{.Replicas}}}}'"
+                       " | awk -F'[/ ]' '$1 != $2 {bad=1} END {exit bad}'", timeout,
+                       "replicas did not start", fail=False))
+    elif orchestrator == "kubernetes":
+        k = "as_root k3s kubectl"
+        run = (f"{k} apply -f {path}\n"
+               f"{k} rollout status deployment/{stack}-main -n {NAMESPACE} --timeout={timeout}s\n"
+               f"{k} rollout status deployment/{stack}-web -n {NAMESPACE} --timeout={timeout}s || true\n")
+    else:
+        run = ("curl -fsS -X POST -H 'Content-Type: application/json' --data @" + path
+               + " http://127.0.0.1:4646/v1/jobs\necho\n")
+    health = f"curl -fsS -m 3 http://127.0.0.1:{port}/__pskit/health >/dev/null 2>&1"
+    return _header() + write + run + _wait(health, timeout, f"no answer on http://127.0.0.1:{port}/__pskit/health")
+
+
+def destroy_script(orchestrator: str, stack: str) -> str:
+    if orchestrator == "swarm":
+        return _header() + f"dk stack rm {_shq(stack)} || true\n"
+    if orchestrator == "kubernetes":
+        return _header() + f"as_root k3s kubectl delete deployment,service -n {NAMESPACE} -l app={stack} --ignore-not-found\n"
+    return _header() + f"curl -fsS -X DELETE 'http://127.0.0.1:4646/v1/job/{stack}?purge=true' >/dev/null || true\n"
+
+
+def scale_script(orchestrator: str, stack: str, replicas: int, nomad_job_now: Optional[Dict[str, Any]] = None) -> str:
+    """Set the web replicas. Nomad: re-register the running job with the new count (its scale API refuses while a
+    deployment is still placing replicas, which is exactly when a full cluster needs more)."""
+    if orchestrator == "swarm":
+        return _header() + f"dk service scale --detach {_shq(stack + '_web')}={int(replicas)}\n"
+    if orchestrator == "kubernetes":
+        return _header() + f"as_root k3s kubectl scale deployment/{stack}-web -n {NAMESPACE} --replicas={int(replicas)}\n"
+    job = dict(nomad_job_now or {})
+    job["TaskGroups"] = [{**g, "Count": int(replicas)} if g.get("Name") == "web" else g
+                         for g in job.get("TaskGroups") or []]
+    path = f"pskit-cluster/{stack}-scale.json"
+    return _header() + (
+        f"mkdir -p pskit-cluster\ncat > {path} <<'PSKIT_MANIFEST'\n{json.dumps({'Job': job})}\nPSKIT_MANIFEST\n"
+        f"curl -fsS -X POST -H 'Content-Type: application/json' --data @{path} http://127.0.0.1:4646/v1/jobs\necho\n"
+    )
+
+
+# ---------------------------------------------------------------------------------------------- helpers
+def _wait(check: str, seconds: int, message: str, *, fail: bool = True) -> str:
+    """Retry ``check`` every 2 s for ``seconds``; then fail with ``message`` (or only warn)."""
+    end = f'  echo "pskit: {message}" >&2\n' + ("  exit 1\n" if fail else "")
+    return (
+        "pskit_ok=0\npskit_i=0\n"
+        f'while [ "$pskit_i" -lt {max(1, seconds // 2)} ]; do\n'
+        f"  if {check}; then pskit_ok=1; break; fi\n"
+        "  pskit_i=$((pskit_i + 1))\n  sleep 2\ndone\n"
+        f'if [ "$pskit_ok" != "1" ]; then\n{end}fi\n'
+    )
+
+
+def _nomad_config(advertise: str, *, server: bool, servers: List[str]) -> str:
+    lines = [
+        'datacenter = "dc1"',
+        'data_dir = "/opt/nomad/data"',
+        'bind_addr = "0.0.0.0"',
+        f'advertise {{\n  http = "{advertise}"\n  rpc = "{advertise}"\n  serf = "{advertise}"\n}}',
+    ]
+    if server:
+        lines.append("server {\n  enabled = true\n  bootstrap_expect = 1\n}")
+    joined = ", ".join(f'"{s}:4647"' for s in servers)
+    lines.append(f"client {{\n  enabled = true\n  servers = [{joined}]\n}}")
+    lines.append('plugin "docker" {\n  config {\n    volumes {\n      enabled = true\n    }\n  }\n}')
+    return "\n".join(lines) + "\n"
+
+
+_NOMAD_UNIT = """[Unit]
+Description=HashiCorp Nomad agent (pskit cluster)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+ExecStart=/usr/local/bin/nomad agent -config /etc/nomad.d
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _nomad_agent_script(config: str, version: str) -> str:
+    url = f"https://releases.hashicorp.com/nomad/{version}/nomad_{version}_linux_$a.zip"
+    return (
+        _header() + _docker_install_block() + _docker_ready_block()
+        + "if ! need nomad; then\n"
+        + '  case "$(uname -m)" in x86_64|amd64) a=amd64 ;; aarch64|arm64) a=arm64 ;;'
+        + ' *) echo "pskit: Nomad has no build for $(uname -m)" >&2; exit 1 ;; esac\n'
+        + "  need unzip || pkg_install unzip\n"
+        + f'  curl -fsSL -o /tmp/pskit-nomad.zip "{url}"\n'
+        + "  as_root unzip -o /tmp/pskit-nomad.zip nomad -d /usr/local/bin\n"
+        + "  rm -f /tmp/pskit-nomad.zip\n"
+        + "fi\n"
+        + "as_root mkdir -p /etc/nomad.d /opt/nomad/data\n"
+        + f"cat > /tmp/pskit-nomad.hcl <<'PSKIT_HCL'\n{config}PSKIT_HCL\n"
+        + f"cat > /tmp/pskit-nomad.service <<'PSKIT_UNIT'\n{_NOMAD_UNIT}PSKIT_UNIT\n"
+        + "changed=0\n"
+        + "cmp -s /tmp/pskit-nomad.hcl /etc/nomad.d/nomad.hcl || { as_root mv /tmp/pskit-nomad.hcl /etc/nomad.d/nomad.hcl;"
+        + " changed=1; }\n"
+        + "cmp -s /tmp/pskit-nomad.service /etc/systemd/system/nomad.service || { as_root mv /tmp/pskit-nomad.service"
+        + " /etc/systemd/system/nomad.service; changed=1; }\n"
+        + "rm -f /tmp/pskit-nomad.hcl /tmp/pskit-nomad.service\n"
+        + "as_root systemctl daemon-reload\n"
+        + "as_root systemctl enable nomad >/dev/null 2>&1 || true\n"
+        + 'if [ "$changed" = "1" ] || ! as_root systemctl is-active --quiet nomad; then as_root systemctl restart nomad; fi\n'
+        + _wait("curl -fsS -m 3 http://127.0.0.1:4646/v1/agent/self >/dev/null 2>&1", 90, "Nomad did not start")
+        + 'echo "PSKIT_NODE=$(hostname)"\n'
+    )

@@ -53,6 +53,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -62,9 +63,9 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.error import URLError
-from urllib.parse import parse_qsl, unquote, urlsplit
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
+from urllib.request import Request, urlopen
 
 from . import hostlog
 from .batch import BatchResult
@@ -82,6 +83,12 @@ _BROKER: Optional[Broker] = None
 _MAX_BODY = 64 * 1024 * 1024
 # Copied from provider.options.env_file next to pskit_host.json; never in Terraform state.
 ENV_FILE = "host.env"
+# Cluster deploys (provider.options.cluster) run the same image twice: one `main` replica that owns schedules,
+# built-in queues / topics / buckets, workflow executions and logs, and N `web` replicas behind the load balancer
+# that run HTTP and invoke() and hand everything stateful to the main replica (PSKIT_MAIN_URL).
+ROLES = ("all", "main", "web")
+# /__pskit/... calls a web replica answers itself; every other one goes to the main replica.
+_WEB_LOCAL = ("health", "invoke")
 
 
 def parse_env_text(text: str) -> Dict[str, str]:
@@ -706,6 +713,125 @@ class _BuiltinQueue:
         return self._broker.submit_queue(self._name, body, attrs)
 
 
+def main_request(
+    main_url: str, token: str, method: str, path: str, body: Optional[bytes] = None,
+    headers: Optional[Dict[str, str]] = None, timeout: float = 30.0,
+) -> Tuple[int, Dict[str, str], bytes]:
+    """One HTTP call to the main replica: ``(status, headers, body)`` for any status; OSError when it is down."""
+    sent = {k: v for k, v in (headers or {}).items() if v}
+    if token:
+        sent["x-pskit-token"] = token
+    req = Request(main_url.rstrip("/") + path, data=body, method=method, headers=sent)  # noqa: S310 - our own URL
+    try:
+        with urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            return resp.status, dict(resp.headers), resp.read()
+    except HTTPError as exc:
+        return exc.code, dict(exc.headers or {}), exc.read()
+
+
+class ForwardingBroker(Broker):
+    """The broker of a ``web`` replica: built-in queues, topics and buckets live on the main replica.
+
+    A resource with a driver (redis, sqs, s3, ...) is used directly, as on any host.
+    """
+
+    def __init__(self, spec: Dict[str, Any], main_url: str, token: str) -> None:
+        super().__init__(spec)
+        self.main_url = main_url
+        self.token = token
+
+    def _request(self, method: str, path: str, body: Optional[bytes] = None,
+                 headers: Optional[Dict[str, str]] = None) -> Tuple[int, Dict[str, str], bytes]:
+        """``main_request``, retried for about 8 s while the main replica cannot be reached at all (it is restarting
+        during a deploy, or its address is not routable yet). A request that reached it is never sent twice."""
+        for delay in (0.5, 1.0, 2.0, 4.0, 0.0):
+            try:
+                return main_request(self.main_url, self.token, method, path, body, headers)
+            except URLError as exc:
+                if not delay or not isinstance(exc.reason, (ConnectionError, socket.gaierror)):
+                    raise
+            time.sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _call(self, method: str, path: str, payload: Any = None, raw: Optional[bytes] = None) -> Any:
+        body = raw if raw is not None else (dumps(payload).encode("utf-8") if payload is not None else None)
+        kind = "application/octet-stream" if raw is not None else "application/json"
+        status, _headers, data = self._request(method, path, body, {"content-type": kind})
+        if status >= 300:
+            raise RuntimeError(f"main replica answered {status} to {method} {path}: {data[:300].decode('utf-8', 'replace')}")
+        return json.loads(data.decode("utf-8") or "null") if data else None
+
+    def submit_queue(self, name: str, message: Any, attributes: Optional[Dict[str, Any]] = None) -> str:
+        if self.queue_driver(name) is not None:
+            return super().submit_queue(name, message, attributes)
+        reply = self._call("POST", f"/__pskit/queues/{quote(name, safe='')}",
+                           {"messages": [{"message": message, "attributes": dict(attributes or {})}]})
+        return str((reply or {}).get("queued", [""])[0])
+
+    def submit_topic(self, name: str, message: Any, attributes: Optional[Dict[str, Any]] = None) -> str:
+        reply = self._call("POST", f"/__pskit/topics/{quote(name, safe='')}",
+                           {"messages": [{"message": message, "attributes": dict(attributes or {})}]})
+        return str((reply or {}).get("published", [""])[0])
+
+    def _object_path(self, bucket: str, key: str) -> str:
+        return f"/__pskit/storage/{quote(bucket, safe='')}/" + "/".join(quote(p, safe="") for p in _key_parts(key))
+
+    def put_object(self, bucket: str, key: str, data: bytes) -> Optional[Path]:
+        if self.storage_driver(bucket) is not None:
+            return super().put_object(bucket, key, data)
+        self._call("PUT", self._object_path(bucket, key), raw=bytes(data))
+        return None
+
+    def get_object(self, bucket: str, key: str) -> bytes:
+        if self.storage_driver(bucket) is not None:
+            return super().get_object(bucket, key)
+        status, _headers, data = self._request("GET", self._object_path(bucket, key))
+        if status == 404:
+            raise FileNotFoundError(f"no object {key!r} in {bucket}")
+        if status >= 300:
+            raise RuntimeError(f"main replica answered {status} reading {bucket}/{key}")
+        return data
+
+    def delete_object(self, bucket: str, key: str) -> bool:
+        if self.storage_driver(bucket) is not None:
+            return super().delete_object(bucket, key)
+        return bool((self._call("DELETE", self._object_path(bucket, key)) or {}).get("deleted"))
+
+
+class RemoteExecutor:
+    """Workflow starts on a ``web`` replica: the run happens (and is recorded) on the main replica."""
+
+    def __init__(self, main_url: str, token: str, workflows: Iterable[str]) -> None:
+        self.main_url = main_url
+        self.token = token
+        self.workflows = set(workflows)
+
+    def knows(self, name: str) -> bool:
+        return name in self.workflows
+
+    def start(self, name: str, data: Any, wait: bool = False, task_runner: Any = None) -> Dict[str, Any]:
+        path = f"/__pskit/workflows/{quote(name, safe='')}" + ("?wait=true" if wait else "")
+        status, _headers, raw = main_request(
+            self.main_url, self.token, "POST", path, dumps(data).encode("utf-8"), {"content-type": "application/json"},
+            timeout=24 * 3600 if wait else 30,
+        )
+        body = json.loads(raw.decode("utf-8") or "null") if raw else {}
+        if not wait:
+            if status >= 300:
+                raise RuntimeError(f"main replica answered {status} starting workflow {name}: {body}")
+            return body
+        record = dict(body) if isinstance(body, dict) else {"output": body}
+        record.setdefault("status", "SUCCEEDED" if status < 300 else "FAILED")
+        record["_body"] = body
+        return record
+
+    def result_body(self, record: Dict[str, Any]) -> Any:
+        return record.get("_body")
+
+    def shutdown(self) -> None:
+        return None
+
+
 def _filter_match(policy: Optional[Dict[str, Any]], attributes: Dict[str, Any], body: Any) -> bool:
     if not policy:
         return True
@@ -748,7 +874,18 @@ class Host:
         # resolve relative paths against the host root.
         self._prepare_imports()
         os.environ["PSKIT_ONPREM_ROOT"] = str(self.root)
-        self.broker = Broker(self.spec)
+        self.role = str(os.environ.get("PSKIT_HOST_ROLE") or self.spec.get("role") or "all")
+        if self.role not in ROLES:
+            raise ValueError(f"PSKIT_HOST_ROLE must be one of {', '.join(ROLES)}, got {self.role!r}")
+        self.main_url = str(os.environ.get("PSKIT_MAIN_URL") or "").rstrip("/")
+        if self.role == "web" and not self.main_url:
+            raise ValueError("a web replica needs PSKIT_MAIN_URL (the main replica)")
+        self.replica = str(os.environ.get("PSKIT_REPLICA") or socket.gethostname())
+        token = str(self.spec.get("admin_token") or "")
+        self.broker = ForwardingBroker(self.spec, self.main_url, token) if self.role == "web" else Broker(self.spec)
+        # web: invocations and log entries not yet sent to the main replica.
+        self._shipped = 0
+        self._unshipped: List[Dict[str, Any]] = []
         self.notes: List[str] = []
         self._stop = threading.Event()
         self._env_lock = threading.RLock()
@@ -761,7 +898,7 @@ class Host:
             self.broker.data_dir / "logs" / "host.jsonl",
             capacity=int(self.spec.get("log_buffer") or 5000),
         )
-        self.executor: Optional[Executor] = None
+        self.executor: Any = None  # Executor; RemoteExecutor on a web replica
         self._stats: Dict[str, Dict[str, Any]] = {}
         self._stats_lock = threading.Lock()
         self._last_recover = 0.0
@@ -782,6 +919,12 @@ class Host:
         install_broker(self.broker)
         for note in self.broker.ensure(self.spec.get("functions") or {}):
             self._note(note)
+        if self.role == "web":
+            workflows = sorted(self.manifest.workflows or {})
+            self.executor = RemoteExecutor(self.main_url, str(self.spec.get("admin_token") or ""), workflows)
+            install_executor(self.executor)
+            self._booted = True
+            return
         self._start_executor()
         self._baseline_storage()
         if not self._sched.get("origin"):
@@ -939,6 +1082,10 @@ class Host:
         if error is not None:
             message += f" {fields['error']}"
         self.logs.append("ERROR" if failed else "INFO", "invocation", message, fields=fields)
+        error_text = (fields.get("error") or f"HTTP {fields.get('status')}") if failed else ""
+        self._count(function, duration, failed, error_text, ship=self.role == "web")
+
+    def _count(self, function: str, duration: float, failed: bool, error: str, *, ship: bool) -> None:
         with self._stats_lock:
             item = self._stats.setdefault(function, _empty_stats())
             item["invocations"] += 1
@@ -947,7 +1094,9 @@ class Host:
             item["last_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             if failed:
                 item["errors"] += 1
-                item["last_error"] = fields.get("error") or f"HTTP {fields.get('status')}"
+                item["last_error"] = error
+            if ship:
+                self._unshipped.append({"function": function, "duration_ms": duration, "failed": failed, "error": error})
 
     def stats(self) -> Dict[str, Any]:
         with self._stats_lock:
@@ -1355,11 +1504,13 @@ class Host:
         if not self._booted:
             self.open()
         self.capture_output()
-        poller = threading.Thread(target=self._poll_loop, name="pskit-onprem", daemon=True)
-        poller.start()
+        # A web replica has no schedules or built-in queues to poll: the main replica runs those triggers.
+        loop = self._ship_loop if self.role == "web" else self._poll_loop
+        threading.Thread(target=loop, name="pskit-onprem", daemon=True).start()
         server = self.make_server()
         bound = server.server_address
-        self.logs.append("INFO", "host", f"listening on {bound[0]!s}:{bound[1]}")
+        role = "" if self.role == "all" else f" as the {self.role} replica ({self.replica})"
+        self.logs.append("INFO", "host", f"listening on {bound[0]!s}:{bound[1]}{role}")
         try:
             server.serve_forever()
         finally:
@@ -1377,6 +1528,56 @@ class Host:
                 self.pump()
             except Exception as exc:  # noqa: BLE001
                 self._note(f"pump failed: {exc}")
+
+    def _ship_loop(self) -> None:
+        while not self._stop.wait(1.0):
+            self.ship_logs()
+
+    def ship_logs(self) -> bool:
+        """web: send new log entries and invocation counts to the main replica, so logs and stats stay in one place."""
+        page = self.logs.query(since=self._shipped, limit=500)
+        entries = page.get("entries") or []
+        with self._stats_lock:
+            invocations, self._unshipped = self._unshipped, []
+        if not entries and not invocations:
+            return True
+        body = dumps({"replica": self.replica, "entries": entries, "invocations": invocations}).encode("utf-8")
+        try:
+            status, _headers, _raw = main_request(
+                self.main_url, str(self.spec.get("admin_token") or ""), "POST", "/__pskit/logs/ingest", body,
+                {"content-type": "application/json"},
+            )
+        except OSError:
+            status = 0
+        if status == 200:
+            if entries:
+                self._shipped = int(entries[-1]["seq"])
+            return True
+        with self._stats_lock:  # the main replica is restarting: keep the counts (bounded) and retry
+            self._unshipped = (invocations + self._unshipped)[-5000:]
+        return False
+
+    def ingest_logs(self, payload: Any) -> Dict[str, Any]:
+        """main: log entries and invocation counts sent by a web replica."""
+        if not isinstance(payload, dict):
+            raise ValueError("send {replica, entries, invocations}")
+        replica = str(payload.get("replica") or "web")[:120]
+        added = 0
+        for entry in payload.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            fields = dict(entry.get("fields") or {})
+            fields["replica"] = replica
+            self.logs.append(
+                str(entry.get("level") or "INFO"), str(entry.get("source") or "host"), str(entry.get("message") or ""),
+                function=entry.get("function") or None, request_id=entry.get("request_id") or None, fields=fields,
+            )
+            added += 1
+        for item in payload.get("invocations") or []:
+            if isinstance(item, dict) and item.get("function"):
+                self._count(str(item["function"]), float(item.get("duration_ms") or 0), bool(item.get("failed")),
+                            str(item.get("error") or ""), ship=False)
+        return {"entries": added}
 
     def _handler(self):
         host = self
@@ -1444,6 +1645,11 @@ class Host:
                     if url.path.startswith("/2015-03-31/functions/"):
                         return self._lambda(url.path)
                     target = self.headers.get("x-amz-target") or ""
+                    if host.role == "web" and (
+                        (url.path.startswith("/__pskit/") and url.path.split("/")[2] not in _WEB_LOCAL)
+                        or (self.command == "POST" and target.startswith("AmazonSQS."))
+                    ):
+                        return self._to_main()
                     if self.command == "POST" and target.startswith("AmazonSQS."):
                         return self._sqs(target.split(".", 1)[1])
                     if url.path.startswith("/__pskit/"):
@@ -1460,10 +1666,29 @@ class Host:
                 except Exception as exc:  # noqa: BLE001 - last-resort response
                     self._json(500, {"errorType": type(exc).__name__, "cause": str(exc)})
 
+            def _to_main(self) -> None:
+                """web replica: the main replica answers (state, logs, executions and the SQS API live there)."""
+                raw = self._read()
+                keep = ("content-type", "accept", "prefer", "x-pskit-wait", "x-pskit-token", "x-amz-target", "authorization")
+                headers = {k: self.headers.get(k) or "" for k in keep}
+                body = raw if raw or self.command in ("POST", "PUT", "PATCH") else None
+                try:
+                    status, reply, data = main_request(host.main_url, "", self.command, self.path, body, headers,
+                                                       timeout=24 * 3600)
+                except OSError as exc:
+                    reason = getattr(exc, "reason", exc)
+                    return self._json(503, {"error": f"the main replica is not reachable: {reason}"})
+                passed = {k: v for k, v in reply.items() if k.lower() in ("content-type", "x-amzn-errortype", "x-amzn-query-error")}
+                self._send(status, passed or {"content-type": "application/json"}, data)
+
             def _admin(self, url: Any) -> None:
                 parts = [unquote(part) for part in url.path.split("/") if part][1:]
                 query = dict(parse_qsl(url.query, keep_blank_values=True))
                 raw = self._read()
+                if parts == ["logs", "ingest"]:
+                    if self.command != "POST":
+                        return self._json(405, {"error": "POST log entries"})
+                    return self._json(200, host.ingest_logs(json.loads(raw.decode("utf-8") or "null")))
                 if parts == ["logs"]:
                     return self._logs(query)
                 if parts == ["logs", "streams"]:
@@ -2060,6 +2285,8 @@ class Host:
             "stage": self.spec.get("stage"),
             "endpoint": self.spec.get("endpoint"),
             "pid": os.getpid(),
+            "role": self.role,
+            "replica": self.replica,
             "started_at": datetime.fromtimestamp(self.started_at, timezone.utc).isoformat(timespec="seconds"),
             "workflows": sorted((manifest.workflows if manifest else None) or {}),
             "services": {

@@ -49,6 +49,9 @@ def main(root: Path) -> int:
     deploy = spec.get("deploy") or {}
     method = str(deploy.get("method") or "local")
     try:
+        if method == "cluster" and action in ("apply", "destroy"):
+            _cluster(root, spec, action)
+            return 0
         if action == "apply":
             if method == "ssh":
                 apply_ssh(root, spec)
@@ -70,6 +73,23 @@ def main(root: Path) -> int:
         return 1
     sys.stderr.write("usage: onprem_deploy.py [apply|destroy]\n")
     return 2
+
+
+def _cluster(root: Path, spec: Dict[str, Any], action: str) -> None:
+    """``provider.options.cluster``: Docker Swarm, Kubernetes (k3s) or Nomad on saved servers."""
+    from ..core import onprem_cluster
+    from ..core.onprem_services import ServiceError
+
+    def emit(line: str) -> None:
+        print(line, flush=True)
+
+    try:
+        if action == "apply":
+            onprem_cluster.deploy(root, spec, emit)
+        else:
+            onprem_cluster.destroy(root, spec, emit)
+    except (ServiceError, onprem_cluster.ClusterError, OSError) as exc:
+        raise DeployError(f"cluster {action} failed: {exc}") from None
 
 
 def apply_local(root: Path, spec: Dict[str, Any], *, run: Optional[RunFn] = None) -> None:

@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-24
+
+### Added
+- **Scaling clusters for on-prem functions** ([docs/cluster.md](docs/cluster.md)): a master server plus joined servers
+  run by **Docker Swarm**, **Kubernetes (k3s)** or **HashiCorp Nomad**, all installed and driven over SSH from saved
+  servers. `pskit cluster create | join | leave | status | check | watch | alerts | scale | list | remove`, and a new
+  studio page **Scaling cluster**: create a cluster, join servers (also while functions run, adding a new saved server
+  in the same dialog), see every server's CPU / memory / disk against the limits, replicas running / desired and
+  replicas that cannot be placed, scale, drain and remove servers.
+- `provider.options.cluster` (`cluster: prod` or `{name, replicas, cpu, memory}`) deploys the functions to a cluster:
+  the image is built on this machine, copied to every server (no registry), and deployed as one `main` replica on the
+  master (schedules, built-in queues / topics / buckets, workflow executions, logs, the data volume) plus `replicas`
+  `web` replicas behind the orchestrator's load balancer (HTTP routes and `invoke()`). Joining a server copies the
+  deployed images to it and does not redeploy. Without `options.cluster` nothing changes: the host runs on one server.
+- Capacity alerts: when every server is over a limit (default CPU 85 %, memory 85 %, disk 90 %), replicas cannot be
+  placed, or no server is ready, pskit calls a function of yours (`event.data.type = "pskit.cluster.capacity"`, e.g. to
+  mail DevOps) and / or POSTs a webhook (Slack / Teams `text` included), once per cooldown. Checks run in the studio
+  (*Watch while the studio runs*) or with `pskit cluster watch` / `pskit cluster check` (exit 3 when full).
+- Host roles for cluster replicas (`PSKIT_HOST_ROLE=main|web`, `PSKIT_MAIN_URL`): a web replica forwards built-in
+  queue / topic / bucket calls, workflow starts and `/__pskit/*` admin calls to the main replica (retrying for a few
+  seconds while it restarts), and ships its log entries (tagged `replica`) and invocation counts to it every second.
+  `GET /__pskit/health` reports `role` and `replica`. A host without a role behaves as before.
+
 ## [1.7.0] - 2026-10-23
 
 ### Changed

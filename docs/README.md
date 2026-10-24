@@ -8,6 +8,7 @@ Write a Python function once, describe its triggers in `pskit.yml`, and deploy i
 | [Getting started](getting-started.md) | Install, scaffold a project, run it locally, set up cloud credentials, deploy, inspect, remove |
 | [Configuration reference](configuration.md) | Every `pskit.yml` key, `extends:`, `providers:`/`stages:` overrides, variables, escape hatches |
 | [Events (triggers)](events.md) | `http`, `schedule`, `queue`, `storage`, `topic`, `smtp`, with shorthand forms and per-provider support |
+| [Scaling cluster (on premises)](cluster.md) | Run on-prem functions on a master plus joined servers with Docker Swarm, Kubernetes (k3s) or Nomad: join servers on the go, monitor CPU / memory / disk, scale replicas, alert DevOps (a function or webhook) when every server is full |
 | [E-mail triggers (SMTP)](smtp/README.md) | On premises: an SMTP server (Node.js) that receives mail for your domain and runs functions with from, to, subject, body and attachments (also in the Amazon SES event shape); DNS (A / MX) records, port 25, testing |
 | [Node.js and TypeScript](nodejs.md) | Handlers in JavaScript or TypeScript: runtimes per provider, `tsc`, npm dependencies, local runs |
 | [Handler API](handlers.md) | `Event`, `HttpRequest`, `Record`, `Context`, `Response`, errors, `BatchResult`, `invoke()`, logging |

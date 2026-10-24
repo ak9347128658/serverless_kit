@@ -9,6 +9,7 @@ import { flushHandlerStubs } from "./stubs";
 import { StudioProvider, useStudio } from "./store";
 import type { Meta, ProjectState } from "./types";
 import { asObject, str } from "./util";
+import { ClusterView } from "./views/Cluster";
 import { CodeView } from "./views/Code";
 import { DeployView } from "./views/Deploy";
 import { LogsView } from "./views/Logs";
@@ -133,6 +134,7 @@ const NAV: { view: View; label: string; icon: string }[] = [
   { view: "functions", label: "Functions", icon: "λ" },
   { view: "workflows", label: "Workflows", icon: "⇉" },
   { view: "resources", label: "Resources", icon: "▤" },
+  { view: "cluster", label: "Scaling cluster", icon: "⧉" },
   { view: "code", label: "Code", icon: "{}" },
   { view: "test", label: "Test", icon: "▶" },
   { view: "deploy", label: "Deploy", icon: "▲" },
@@ -213,6 +215,9 @@ function Shell() {
       break;
     case "resources":
       page = <ResourcesView rest={route.rest} />;
+      break;
+    case "cluster":
+      page = <ClusterView rest={route.rest} />;
       break;
     case "code":
       page = <CodeView rest={route.rest} />;

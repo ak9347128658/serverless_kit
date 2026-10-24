@@ -188,6 +188,22 @@ pskit resources send uploads -d '{"key": "in/a.csv", "content": "a,b"}'   # obje
 pskit resources send events -d '{"message": {"id": 1}, "attributes": {"type": "order"}}'
 ```
 
+## `pskit cluster`
+
+Scale on-prem functions over a master plus joined servers (Docker Swarm, Kubernetes via k3s, Nomad). Details: [cluster.md](cluster.md).
+
+| Command | |
+|---|---|
+| `cluster create NAME -o swarm\|kubernetes\|nomad --master SERVER [--advertise IP] [--nomad-version V]` | install the orchestrator on a saved server and save the cluster |
+| `cluster join NAME SERVER [--advertise IP]` | install the agent on a saved server, join it, copy the deployed images |
+| `cluster leave NAME SERVER [--yes]` | drain the server (replicas move) and remove it |
+| `cluster status NAME [--json]` | CPU / memory / disk per server, replicas, pending replicas, full or not |
+| `cluster check NAME [--no-alert]` | status once; when full, the alert (cooldown applies). Exit 3 when full |
+| `cluster watch NAME [--interval 60]` | `check` every interval until Ctrl+C |
+| `cluster alerts NAME [--function F] [--stage S] [--webhook URL] [--cooldown M] [--cpu N] [--memory N] [--disk N] [--test]` | who is alerted and when a server counts as full |
+| `cluster scale NAME --replicas N [--stack S] [-s STAGE]` | web replicas now (keep it in `options.cluster.replicas`) |
+| `cluster list [--json]` / `cluster remove NAME [--yes]` | list / forget clusters |
+
 ## `pskit client`
 
 Call the deployed on-prem host from scripts. Details: [client.md](client.md).

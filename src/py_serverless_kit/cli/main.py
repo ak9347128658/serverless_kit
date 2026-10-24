@@ -125,6 +125,17 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
+  cluster     create | join | leave | status | check | watch | alerts | scale | list | remove
+              pskit cluster create prod --orchestrator swarm --master edge1
+              pskit cluster join prod edge2
+              pskit cluster leave prod edge2 --yes
+              pskit cluster status prod
+              pskit cluster check prod
+              pskit cluster watch prod --interval 60
+              pskit cluster alerts prod --function notify-devops --test
+              pskit cluster scale prod --replicas 6
+              pskit cluster list
+              pskit cluster remove prod --yes
   client      info | install-node | tunnel
               pskit client info
               pskit client install-node
@@ -1322,6 +1333,254 @@ def resources_onprem_remove(key: str, delete_data: bool, save: bool, yes: bool, 
     if save:
         _save_raw(path, svc.remove_from_raw(raw, key))
     ok(f"Removed {key}")
+
+
+# ----------------------------------------------------------------------------- cluster
+@cli.group(short_help="Scale on-prem functions over several servers (Swarm, Kubernetes, Nomad).")
+def cluster() -> None:
+    """Run on-prem functions on a master server plus joined servers: Docker Swarm, Kubernetes (k3s) or Nomad.
+
+    \b
+    Examples:
+      pskit cluster create prod --orchestrator swarm --master edge1
+      pskit cluster join prod edge2                # also while functions are running
+      pskit cluster status prod                    # CPU / memory / disk of every server, replicas, full?
+      pskit cluster alerts prod --function notify-devops --webhook https://hooks.slack.com/...
+      pskit cluster watch prod                     # check every minute, alert when every server is full
+      pskit cluster scale prod --replicas 6
+      pskit cluster leave prod edge2
+
+    Functions use it with provider.options.cluster in pskit.yml (cluster: prod, or {name: prod, replicas: 3}).
+    Saved servers come from: pskit resources onprem servers add. Resources stay on one server.
+    """
+
+
+def _cluster_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    from ..core.onprem_cluster import ClusterError
+    from ..core.onprem_services import ServiceError
+
+    try:
+        return fn(*args, **kwargs)
+    except (ClusterError, ServiceError) as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+def _cluster_root(config_path: Optional[str]) -> Path:
+    root, _path, _raw = _raw_project(config_path)
+    return root
+
+
+_CONFIG_OPTION = click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+
+
+@cluster.command("list")
+@click.option("--json", "as_json", is_flag=True)
+@_CONFIG_OPTION
+def cluster_list(as_json: bool, config_path: Optional[str]) -> None:
+    """Clusters, their servers and deployments."""
+    from ..core.onprem_cluster import list_clusters
+
+    items = list_clusters(_cluster_root(config_path))
+    if as_json:
+        click.echo(json.dumps(items, indent=2))
+        return
+    if not items:
+        info("No clusters. Create one: pskit cluster create NAME --orchestrator swarm --master SERVER")
+        return
+    for item in items:
+        servers = ", ".join(f"{n['server']}{' (master)' if n.get('role') == 'master' else ''}" for n in item["nodes"])
+        echo(f"  {item['name']:<14} {item['orchestrator_label']:<18} {servers}")
+        for stack, dep in sorted(item["deployments"].items()):
+            echo(f"      {stack}: {dep.get('replicas')} replica(s) {dep.get('endpoint')}")
+
+
+@cluster.command("create")
+@click.argument("name")
+@click.option("--orchestrator", "-o", type=click.Choice(["swarm", "kubernetes", "nomad"]), required=True)
+@click.option("--master", required=True, help="Saved server that runs the control plane and the main replica.")
+@click.option("--advertise", default="", help="The master's address other servers use (default: its host).")
+@click.option("--nomad-version", default="", help="Nomad release to install (default: the tested one).")
+@_CONFIG_OPTION
+def cluster_create(name: str, orchestrator: str, master: str, advertise: str, nomad_version: str,
+                   config_path: Optional[str]) -> None:
+    """Install the orchestrator on MASTER and save cluster NAME."""
+    from ..core.onprem_cluster import create_cluster
+
+    _cluster_call(create_cluster, _cluster_root(config_path), name, orchestrator, master, echo, advertise=advertise,
+                  nomad_version=nomad_version)
+    ok(f"Cluster {name} created. In pskit.yml: provider.options.cluster: {name}")
+
+
+@cluster.command("join")
+@click.argument("name")
+@click.argument("server")
+@click.option("--advertise", default="", help="This server's address in the cluster network (default: its host).")
+@_CONFIG_OPTION
+def cluster_join(name: str, server: str, advertise: str, config_path: Optional[str]) -> None:
+    """Add saved SERVER to cluster NAME (installs the agent and copies the deployed images)."""
+    from ..core.onprem_cluster import join_server
+
+    _cluster_call(join_server, _cluster_root(config_path), name, server, echo, advertise=advertise)
+    ok(f"{server} joined {name}")
+
+
+@cluster.command("leave")
+@click.argument("name")
+@click.argument("server")
+@click.option("--yes", is_flag=True, help="Do not ask.")
+@_CONFIG_OPTION
+def cluster_leave(name: str, server: str, yes: bool, config_path: Optional[str]) -> None:
+    """Drain SERVER (replicas move to the others) and remove it from cluster NAME."""
+    from ..core.onprem_cluster import leave_server
+
+    if not yes:
+        click.confirm(f"Remove {server} from cluster {name}?", abort=True)
+    _cluster_call(leave_server, _cluster_root(config_path), name, server, echo)
+    ok(f"{server} left {name}")
+
+
+def _print_cluster_status(current: dict) -> None:
+    def pct(value: Any) -> str:
+        return "-" if value is None else f"{value:.0f}%"
+
+    cap = current["capacity"]
+    echo(f"  {'server':<14} {'role':<7} {'state':<9} {'cpu':>5} {'mem':>5} {'disk':>5}  load")
+    for n in current["nodes"]:
+        if not n.get("reachable"):
+            echo(f"  {n['server']:<14} {n.get('role') or '':<7} {'offline':<9}  {n.get('error', '')}")
+            continue
+        flag = "  FULL (" + ", ".join(n["over"]) + ")" if n["full"] else ""
+        state = n.get("state") or ""
+        if n.get("availability") and n["availability"] != "Active":
+            state = n["availability"]
+        echo(f"  {n['server']:<14} {n.get('role') or '':<7} {state:<9} {pct(n.get('cpu')):>5} {pct(n.get('memory')):>5}"
+             f" {pct(n.get('disk')):>5}  {n.get('load', '')}{flag}")
+    echo(f"  limits: cpu {cap['cpu']}%  memory {cap['memory']}%  disk {cap['disk']}%")
+    for w in current["workloads"]:
+        echo(f"  workload {w['name']}: {w['running']}/{w['desired']} running")
+    for item in current["pending"]:
+        echo(f"  pending  {item}")
+    if current["full"]:
+        fail("FULL: " + "; ".join(current["reasons"]) + f". Add a server: pskit cluster join {current['name']} SERVER")
+    else:
+        ok("capacity left on at least one server")
+    sent = current.get("alert")
+    if sent:
+        echo(f"  alert: {json.dumps(sent)}")
+
+
+@cluster.command("status")
+@click.argument("name")
+@click.option("--json", "as_json", is_flag=True)
+@_CONFIG_OPTION
+def cluster_status(name: str, as_json: bool, config_path: Optional[str]) -> None:
+    """Every server's CPU, memory and disk, the replicas, and whether the cluster is full."""
+    from ..core.onprem_cluster import status
+
+    current = _cluster_call(status, _cluster_root(config_path), name)
+    if as_json:
+        click.echo(json.dumps(current, indent=2))
+        return
+    _print_cluster_status(current)
+
+
+@cluster.command("check")
+@click.argument("name")
+@click.option("--alert/--no-alert", default=True, help="Send the alert when the cluster is full (default: yes).")
+@_CONFIG_OPTION
+def cluster_check(name: str, alert: bool, config_path: Optional[str]) -> None:
+    """Status once; when full, call the alert function / webhook (respecting the cooldown). Exit 3 when full."""
+    from ..core.onprem_cluster import check
+
+    current = _cluster_call(check, _cluster_root(config_path), name, alert=alert)
+    _print_cluster_status(current)
+    if current["full"]:
+        raise SystemExit(3)
+
+
+@cluster.command("watch")
+@click.argument("name")
+@click.option("--interval", default=60, show_default=True, type=click.IntRange(15, 86400), help="Seconds.")
+@_CONFIG_OPTION
+def cluster_watch(name: str, interval: int, config_path: Optional[str]) -> None:
+    """Check every INTERVAL seconds until Ctrl+C (run it on an always-on machine, e.g. a systemd unit)."""
+    import time
+
+    from ..core.onprem_cluster import check
+
+    root = _cluster_root(config_path)
+    while True:
+        echo(time.strftime("%Y-%m-%d %H:%M:%S"))
+        try:
+            _print_cluster_status(_cluster_call(check, root, name))
+        except click.ClickException as exc:
+            fail(exc.message)
+        time.sleep(interval)
+
+
+@cluster.command("alerts")
+@click.argument("name")
+@click.option("--function", "function", default=None, help="Function called with the capacity event (\"\" clears).")
+@click.option("--stage", default=None, help="Stage whose deployed host runs it (default: any deployed stage).")
+@click.option("--webhook", default=None, help="Also POST the event here (Slack / Teams / any URL; \"\" clears).")
+@click.option("--cooldown", default=None, type=int, help="Minutes between two alerts (default 30).")
+@click.option("--cpu", default=None, type=int, help="A server is full at this CPU percent (default 85).")
+@click.option("--memory", default=None, type=int, help="... memory percent (default 85).")
+@click.option("--disk", default=None, type=int, help="... disk percent (default 90).")
+@click.option("--test", is_flag=True, help="Send a test alert now.")
+@_CONFIG_OPTION
+def cluster_alerts(name: str, function: Optional[str], stage: Optional[str], webhook: Optional[str],
+                   cooldown: Optional[int], cpu: Optional[int], memory: Optional[int], disk: Optional[int], test: bool,
+                   config_path: Optional[str]) -> None:
+    """Who hears about a full cluster, and when a server counts as full."""
+    from ..core import onprem_cluster as clu
+
+    root = _cluster_root(config_path)
+    alert = {k: v for k, v in (("function", function), ("stage", stage), ("webhook", webhook),
+                               ("cooldown_minutes", cooldown)) if v is not None}
+    capacity = {k: v for k, v in (("cpu", cpu), ("memory", memory), ("disk", disk)) if v is not None}
+    item = _cluster_call(clu.save_settings, root, name, {"alert": alert, "capacity": capacity})
+    a, cap = item["alert"], item["capacity"]
+    echo(f"  function {a['function'] or '-'}  stage {a['stage'] or 'any'}  webhook {a['webhook'] or '-'}"
+         f"  cooldown {a['cooldown_minutes']} min")
+    echo(f"  full at: cpu {cap['cpu']}%  memory {cap['memory']}%  disk {cap['disk']}%")
+    if test:
+        result = _cluster_call(clu.send_alert, root, name, {"orchestrator": item["orchestrator"]}, test=True)
+        if result["errors"]:
+            raise click.ClickException("; ".join(result["errors"]))
+        ok("Test alert sent to " + ", ".join(result["sent"]))
+
+
+@cluster.command("scale")
+@click.argument("name")
+@click.option("--replicas", required=True, type=click.IntRange(0, 500))
+@click.option("--stack", default=None, help="Deployment (default: this project's stage, pskit-<service>-<stage>).")
+@click.option("-s", "--stage", default=None, help="Stage of this project (default: the configured stage).")
+@_CONFIG_OPTION
+def cluster_scale(name: str, replicas: int, stack: Optional[str], stage: Optional[str],
+                  config_path: Optional[str]) -> None:
+    """Set the web replicas now (until the next deploy; keep it in options.cluster.replicas)."""
+    from ..core import onprem_cluster as clu
+    from ..core.onprem_cluster_scripts import stack_name
+
+    root, _path, raw = _raw_project(config_path)
+    if not stack:
+        provider = raw.get("provider") or {}
+        stack = stack_name(str(raw.get("service") or ""), str(stage or provider.get("stage") or "dev"))
+    _cluster_call(clu.scale, root, name, stack, replicas, echo)
+
+
+@cluster.command("remove")
+@click.argument("name")
+@click.option("--yes", is_flag=True, help="Do not ask.")
+@_CONFIG_OPTION
+def cluster_remove(name: str, yes: bool, config_path: Optional[str]) -> None:
+    """Forget cluster NAME (the servers and anything running on them are left as they are)."""
+    from ..core.onprem_cluster import remove_cluster
+
+    if not yes:
+        click.confirm(f"Forget cluster {name}?", abort=True)
+    _cluster_call(remove_cluster, _cluster_root(config_path), name, echo)
 
 
 # ----------------------------------------------------------------------------- client
