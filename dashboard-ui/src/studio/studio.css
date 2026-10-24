@@ -573,3 +573,12 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .meter-limit { position: absolute; top: -3px; width: 2px; height: 14px; background: var(--text); opacity: 0.35; transform: translateX(-1px); }
 .meter-text { min-width: 3.5em; text-align: right; }
 .cluster-alerts { list-style: none; padding: 0; margin: 4px 0 0; display: grid; gap: 6px; }
+
+/* live requests (cluster page) */
+.live-servers { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.live-server { display: flex; align-items: center; gap: 8px; min-width: 200px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.live-server.active { border-color: var(--accent); background: var(--accent-soft); }
+.live-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.live-bar > span { display: block; height: 100%; background: var(--accent); transition: width 0.3s ease; }
+.live-table { max-height: 420px; overflow: auto; }
+.live-table .row-error td { color: var(--err); }

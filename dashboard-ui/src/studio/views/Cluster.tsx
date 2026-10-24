@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Drawer } from "../../components/Drawer";
 import { api, errorMessage } from "../api";
 import { JobConsole } from "../components/Console";
@@ -9,7 +9,7 @@ import { ServerForm } from "../components/OnPremMachines";
 import { useJob } from "../jobs";
 import { href, navigate } from "../route";
 import { useStudio } from "../store";
-import type { ClusterNodeStatus, ClusterStatus, JsonObject, OnPremCluster, OnPremClustersState, Orchestrator } from "../types";
+import type { ClusterNodeStatus, ClusterRequest, ClusterStatus, JsonObject, OnPremCluster, OnPremClustersState, Orchestrator } from "../types";
 import { asObject } from "../util";
 
 const NAME_RE = /^[a-z][a-z0-9-]{0,30}$/;
@@ -289,6 +289,7 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
       </div>
 
       <Workloads cluster={cluster} status={status} onScale={(stack, replicas) => void startJob("scale", { stack, replicas })} />
+      <LiveRequests cluster={cluster} />
       <ClusterResources status={status} />
       {jobId && <JobConsole job={job} />}
       <AlertSettings cluster={cluster} onSaved={reload} />
@@ -388,6 +389,163 @@ function ProjectBinding({ cluster }: { cluster: OnPremCluster }) {
             Save, then <a href={href("deploy")}>Deploy</a>. Reservations decide how many replicas fit on a server; when none fit, the cluster counts as full.
           </span>
         </div>
+      )}
+    </div>
+  );
+}
+
+const LIVE_MAX = 300;
+
+/**
+ * Requests as they happen and the server / replica that handled each one. Polls the main replica every 2 s, only
+ * while Live is on, the card is on screen and the browser tab is visible.
+ */
+function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
+  const stacks = Object.keys(cluster.deployments).sort();
+  const [stack, setStack] = useState(stacks[0] || "");
+  const [live, setLive] = useState(true);
+  const [items, setItems] = useState<ClusterRequest[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [onScreen, setOnScreen] = useState(false);
+  const [tabVisible, setTabVisible] = useState(() => document.visibilityState === "visible");
+  const [filter, setFilter] = useState("");
+  const since = useRef(0);
+  const box = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setOnScreen(true);
+      return undefined;
+    }
+    const seen = new IntersectionObserver(([entry]) => setOnScreen(entry.isIntersecting));
+    seen.observe(el);
+    return () => seen.disconnect();
+  }, []);
+  useEffect(() => {
+    const onChange = () => setTabVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+  useEffect(() => {
+    since.current = 0;
+    setItems([]);
+  }, [stack]);
+
+  const active = live && onScreen && tabVisible && !!stack;
+  useEffect(() => {
+    if (!active) return undefined;
+    let stopped = false;
+    let timer: number | undefined;
+    const tick = async () => {
+      try {
+        const page = await api.clusterRequests(cluster.name, stack, since.current);
+        if (stopped) return;
+        since.current = page.next || since.current;
+        if (page.items.length) setItems((old) => [...old, ...page.items].slice(-LIVE_MAX));
+        setError(null);
+      } catch (exc) {
+        if (!stopped) setError(errorMessage(exc));
+      }
+      if (!stopped) timer = window.setTimeout(() => void tick(), 2000);
+    };
+    void tick();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [active, cluster.name, stack]);
+
+  const shown = filter ? items.filter((r) => r.server === filter) : items;
+  const perServer: Record<string, number> = {};
+  for (const r of items) perServer[r.server || "?"] = (perServer[r.server || "?"] || 0) + 1;
+  const top = Math.max(1, ...Object.values(perServer));
+
+  return (
+    <div className="card card-pad" ref={box}>
+      <div className="row-gap wrap">
+        <h3>Live requests</h3>
+        <span className={`badge ${active ? "badge-ok" : ""}`}>{active ? "● live" : live ? "paused (off screen)" : "stopped"}</span>
+        {stacks.length > 1 && (
+          <select className="select" value={stack} onChange={(e) => setStack(e.target.value)} aria-label="Deployment">
+            {stacks.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        )}
+        <Toggle checked={live} onChange={setLive} label="Live" />
+        <button type="button" className="btn btn-sm" disabled={!items.length} onClick={() => setItems([])}>
+          Clear
+        </button>
+      </div>
+      {!stacks.length ? (
+        <p className="muted small">Nothing deployed on this cluster yet: deploy with Run on → Scaling cluster, then requests show here as they happen.</p>
+      ) : (
+        <>
+          <p className="muted small">
+            Every request to <span className="mono">{cluster.deployments[stack]?.endpoint}</span> and which server and replica handled it (the main replica
+            on the master runs schedules, queue / storage / topic triggers and workflows). Updates every 2 s while this card is on screen; the same as{" "}
+            <code className="mono">pskit cluster requests {cluster.name} --follow</code>.
+          </p>
+          {Object.keys(perServer).length > 0 && (
+            <div className="live-servers">
+              {Object.entries(perServer)
+                .sort((a, b) => b[1] - a[1])
+                .map(([server, count]) => (
+                  <button
+                    key={server}
+                    type="button"
+                    className={`live-server${filter === server ? " active" : ""}`}
+                    onClick={() => setFilter(filter === server ? "" : server)}
+                    title={filter === server ? "Show every server" : `Only ${server}`}
+                  >
+                    <span className="mono">{server}</span>
+                    <span className="live-bar">
+                      <span style={{ width: `${(100 * count) / top}%` }} />
+                    </span>
+                    <span className="small">{count}</span>
+                  </button>
+                ))}
+            </div>
+          )}
+          {error && <div className="form-error small">{error}</div>}
+          {!shown.length ? (
+            <p className="muted small">{active ? "Waiting for requests…" : "No requests yet."}</p>
+          ) : (
+            <div className="live-table">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Server</th>
+                    <th>Replica</th>
+                    <th>Request</th>
+                    <th>Status</th>
+                    <th>ms</th>
+                    <th>Function</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...shown].reverse().map((r) => (
+                    <tr key={`${r.seq}-${r.replica}`} className={r.level === "ERROR" ? "row-error" : undefined}>
+                      <td className="mono small">{r.ts ? new Date(r.ts).toLocaleTimeString() : ""}</td>
+                      <td className="mono">{r.server || "–"}</td>
+                      <td className="mono small muted">{r.replica || ""}</td>
+                      <td className="mono small" title={r.error || undefined}>
+                        {r.method ? `${r.method} ${r.path}` : r.event_type}
+                      </td>
+                      <td className={r.status && r.status >= 500 ? "warn-text" : undefined}>{r.status ?? (r.level === "ERROR" ? "error" : "ok")}</td>
+                      <td className="small">{r.duration_ms ?? ""}</td>
+                      <td className="mono small">{r.function}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -676,7 +834,13 @@ function CreateClusterDrawer({
   onCreated: (name: string) => void;
   onServersChanged: () => void;
 }) {
-  const [name, setName] = useState(state.clusters.length ? "" : "prod");
+  const [name, setName] = useState(() => {
+    const used = new Set(state.clusters.map((c) => c.name));
+    if (!used.has("prod")) return "prod";
+    let n = 2;
+    while (used.has(`prod-${n}`)) n += 1;
+    return `prod-${n}`;
+  });
   const [orchestrator, setOrchestrator] = useState<Orchestrator>("swarm");
   const [master, setMaster] = useState("");
   const [advertise, setAdvertise] = useState("");
@@ -717,8 +881,18 @@ function CreateClusterDrawer({
         </button>
       }
     >
-      <FormRow label="Name" required error={nameError || (taken ? "already used" : null)}>
-        <TextInput value={name} onChange={setName} placeholder="prod" mono />
+      <FormRow
+        label="Cluster name"
+        required
+        error={nameError || (taken ? "already used" : null)}
+        help={
+          <>
+            How you refer to it: <code className="mono">pskit deploy --cluster {name || "NAME"}</code>, <code className="mono">provider.options.cluster: {name || "NAME"}</code>. Lowercase
+            letters, digits and -.
+          </>
+        }
+      >
+        <TextInput value={name} onChange={(v) => setName(v.toLowerCase())} placeholder="prod" mono autoFocus invalid={!!nameError || taken} />
       </FormRow>
       <FormRow label="Orchestrator" help={info ? `${info.summary} Open between servers: ${info.ports}.` : undefined}>
         <Segmented

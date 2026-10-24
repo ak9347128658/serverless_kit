@@ -117,6 +117,20 @@ back to one server. The old place keeps running until you `pskit remove` it ther
 SSH target that `pskit logs`, `pskit trigger`, the dashboard and the studio use when the port is closed to your
 machine; `pskit info` shows `deployed on: cluster prod (master edge1 (10.0.0.5))`.
 
+## Per-server settings: home path, bind address, data directory
+
+A saved server can carry three optional defaults (*Add a server* in the studio, or
+`pskit resources onprem servers add edge1 --ssh root@10.0.0.5 --home /srv/pskit --bind 10.0.0.5 --data-dir /data/pskit`):
+
+| Setting | Functions on this server | Resources on this server | In a cluster |
+|---|---|---|---|
+| **Home path** | app in `<home>/<service>-<stage>` (instead of `/opt/pskit/...`) | – | scripts and image copies in `<home>/pskit-cluster` |
+| **Bind address** | the host listens on it (`options.host`) | port published on it | a specific IP is the server's cluster address |
+| **Data directory** | `options.data_dir` (built-in queues, buckets, ...) | data in `<data>/<container>` (bind mount, not a Docker volume) | the master keeps the main replica's data in `<data>/<stack>` |
+
+pskit.yml wins: `deploy.path`, `data_dir` and a `host` other than the default `127.0.0.1`. Settings apply to what you
+create or deploy afterwards; existing services keep their volumes.
+
 ## Resources on a cluster
 
 A resource can run on one server of a cluster:
@@ -147,6 +161,23 @@ pskit resources onprem create orders-db --service postgres --cluster prod --node
 | Kubernetes (k3s) | 6443/tcp (to the master), 8472/udp, 10250/tcp |
 | Nomad | 4646-4648/tcp, 4648/udp |
 | **From users** | the functions' `port` (default 8080) on every server (Swarm / k3s) or on your load balancer (Nomad) |
+
+## Live requests: which server handled what
+
+The cluster page's **Live requests** card lists requests as they happen: time, the **server** and **replica** that
+handled each one, method and path, status, duration and function, plus a bar per server (click one to see only its
+requests). It polls the main replica every 2 seconds, and only while the card is on screen, the browser tab is
+visible and *Live* is on. Off screen it does nothing.
+
+```bash
+pskit cluster requests prod --follow
+#   12:04:53  edge1        main                   200     45.4 ms  send: POST /send
+#   12:04:53  edge2        node-b-2               500     10.9 ms  hello: GET /hello
+```
+
+Each replica knows the server it runs on (`PSKIT_NODE`, set by the orchestrator) and records it with each request;
+web replicas ship their entries to the main replica every second. `GET /__pskit/requests?since=N` on the
+deployment's port returns them (admin token required).
 
 ## Monitor, scale and add servers when it is full
 
@@ -257,6 +288,7 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 | `pskit cluster watch NAME [--interval 60]` | check until Ctrl+C |
 | `pskit cluster alerts NAME [--function F] [--stage S] [--webhook URL] [--cooldown M] [--cpu/--memory/--disk %] [--test]` | alert settings |
 | `pskit cluster scale NAME --replicas N [--stack S]` | web replicas now (until the next deploy) |
+| `pskit cluster requests NAME [--follow] [--stack S]` | recent requests and the server / replica of each |
 | `pskit cluster list` / `pskit cluster remove NAME` | list / forget a cluster |
 | `pskit deploy --cluster NAME` / `pskit deploy --server NAME` | deploy the functions to the cluster / to one server |
 | `pskit resources onprem create KEY --service S --cluster NAME [--node SERVER]` | a resource on a server of the cluster |

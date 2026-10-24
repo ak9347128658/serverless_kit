@@ -185,3 +185,20 @@ def test_forwarding_retries_only_while_main_is_unreachable(monkeypatch):
     with pytest.raises(URLError):
         broker.submit_queue("jobs", {"a": 1})
     assert len(calls) == 1
+
+
+def test_requests_feed_names_the_replica_and_server(pair):
+    main, main_base, web, web_base = pair
+    main.node, web.node = "node-a", "node-b"
+    _json("GET", web_base + "/hello")
+    assert web.ship_logs()
+    _json("POST", main_base + "/__pskit/invoke/step", {"x": 1})  # runs on main
+    status, page = _json("GET", web_base + "/__pskit/requests")  # a web replica hands it to main
+    assert status == 200 and page["role"] == "main"
+    hello = next(r for r in page["items"] if r.get("path") == "/hello")
+    assert hello["replica"] == "node-b-1" and hello["node"] == "node-b" and hello["status"] == 200
+    assert hello["method"] == "GET" and hello["function"] == "hello"
+    step = next(r for r in page["items"] if r["function"] == "step")
+    assert step["node"] == "node-a" and step["replica"] == main.replica
+    later = _json("GET", main_base + f"/__pskit/requests?since={page['next']}")[1]
+    assert later["items"] == []  # polling with `next` returns only new requests

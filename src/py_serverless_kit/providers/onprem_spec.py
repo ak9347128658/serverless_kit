@@ -374,7 +374,8 @@ def parse_deploy(
         if not _SAFE_USER.match(spec.ssh_user):
             raise ValueError("options.deploy.user contains characters that are not safe to pass to ssh")
         if not spec.remote_path:
-            spec.remote_path = f"/opt/pskit/{slug}" if target_os != "windows" else f"C:/pskit/{slug}"
+            home = _str(merged, "home").rstrip("/") or "/opt/pskit"  # a saved server's home path
+            spec.remote_path = f"{home}/{slug}" if target_os != "windows" else f"C:/pskit/{slug}"
         if not _SAFE_PATH.match(spec.remote_path):
             raise ValueError("options.deploy.path contains characters that are not safe to pass to ssh")
         if spec.known_hosts not in KNOWN_HOSTS_SPECIAL and spec.known_hosts:
@@ -427,7 +428,7 @@ def parse_deploy(
             if not _SAFE_USER.match(spec.ssh_user):
                 raise ValueError("options.deploy.user contains characters that are not safe to pass to ssh")
             if not spec.remote_path:
-                spec.remote_path = f"/opt/pskit/{slug}"
+                spec.remote_path = f"{_str(merged, 'home').rstrip('/') or '/opt/pskit'}/{slug}"
             if not _SAFE_PATH.match(spec.remote_path):
                 raise ValueError("options.deploy.path contains characters that are not safe to pass to ssh")
             if spec.known_hosts not in KNOWN_HOSTS_SPECIAL and spec.known_hosts:

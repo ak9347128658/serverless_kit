@@ -141,6 +141,12 @@ def _target(root: Path, server: str) -> Dict[str, Any]:
         raise ClusterError(str(exc)) from None
 
 
+def _bind_address(target: Dict[str, Any]) -> str:
+    """A saved server's bind address when it is one specific IP (not 0.0.0.0 / 127.0.0.1): its cluster address."""
+    bind = str(target.get("bind") or "")
+    return "" if bind in ("", "0.0.0.0", "127.0.0.1") else bind  # noqa: S104
+
+
 def _ip(host: str) -> str:
     """The address the orchestrator advertises: an IP (Swarm, k3s and Nomad reject host names)."""
     try:
@@ -155,19 +161,37 @@ def _ip(host: str) -> str:
 
 
 # ----------------------------------------------------------------------------------------------- SSH
+def _workdir(target: Dict[str, Any]) -> str:
+    """``<home>/pskit-cluster`` for a server with a home path, else ``pskit-cluster`` in the SSH user's home."""
+    home = str(target.get("home") or "").rstrip("/")
+    return f"{home}/pskit-cluster" if home else "pskit-cluster"
+
+
+def _mkdir_command(target: Dict[str, Any]) -> str:
+    path = _workdir(target)
+    if not path.startswith("/"):
+        return f"mkdir -p {path}"
+    # A home path such as /opt/pskit may need sudo once; the folder then belongs to the SSH user.
+    return (f"mkdir -p {path} 2>/dev/null || {{ sudo -n mkdir -p {path} && "
+            f"sudo -n chown \"$(id -u):$(id -g)\" {path}; }}")
+
+
 def _script(target: Dict[str, Any], script: str, emit: Emit, run: Optional[RunFn], *, label: str,
             show: bool = True, check: bool = True) -> str:
-    """Copy ``script`` to ``~/pskit-cluster/<label>.sh`` on the server and run it. Returns its output."""
+    """Copy ``script`` to ``<workdir>/<label>.sh`` on the server and run it from the folder above (the home path,
+    or the SSH user's home), so paths in the script (``pskit-cluster/...``) land there. Returns its output."""
     from ..providers.onprem_remote import scp_argv
 
     runner = _Runner(emit, run)
-    remote = f"pskit-cluster/{label}.sh"
+    remote = f"{_workdir(target)}/{label}.sh"
+    home = str(target.get("home") or "").rstrip("/")
     with tempfile.TemporaryDirectory(prefix="pskit-cluster-") as tmp:
         local = Path(tmp) / f"{label}.sh"
         local.write_bytes(script.replace("\r\n", "\n").encode("utf-8"))
-        runner(_ssh_argv(target, "mkdir -p pskit-cluster"), show=False)
+        runner(_ssh_argv(target, _mkdir_command(target)), show=False)
         runner(scp_argv(ssh_options(target), str(local), remote), show=False)
-    return runner(_ssh_argv(target, f"sh {remote}"), show=show, check=check)
+    command = f"cd {home} && sh pskit-cluster/{label}.sh" if home else f"sh {remote}"
+    return runner(_ssh_argv(target, command), show=show, check=check)
 
 
 def _values(text: str, key: str) -> List[str]:
@@ -193,7 +217,7 @@ def create_cluster(
     target = _target(root, master)
     if run is None:
         check_ssh_login(target)
-    addr = advertise or _ip(str(target["host"]))
+    addr = advertise or _bind_address(target) or _ip(str(target["host"]))
     version = nomad_version or scripts.NOMAD_VERSION
     emit(f"Installing {ORCHESTRATORS[orchestrator]['label']} on {master} ({addr}) ...")
     out = _script(target, scripts.master_script(orchestrator, addr, version), emit, run, label="master")
@@ -229,7 +253,7 @@ def join_server(root: Path, name: str, server: str, emit: Emit, *, advertise: st
     target = _target(root, server)
     if run is None:
         check_ssh_login(target)
-    addr = advertise or _ip(str(target["host"]))
+    addr = advertise or _bind_address(target) or _ip(str(target["host"]))
     emit(f"Asking {cluster['master']} for a join token ...")
     out = _script(master, scripts.join_token_script(orch), emit, run, label="token", show=False)
     token = (_values(out, "PSKIT_TOKEN") or [""])[-1]
@@ -354,12 +378,13 @@ def ship_image(orchestrator: str, image: str, targets: Dict[str, Dict[str, Any]]
         if tar is None:
             runner(["docker", "save", "-o", str(archive), image])
         size = archive.stat().st_size / 1e6 if archive.is_file() else 0.0
-        remote = "pskit-cluster/" + re.sub(r"[^A-Za-z0-9._-]+", "-", image) + ".tar"
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", image) + ".tar"
 
         def one(server: str) -> Optional[str]:
             target = missing[server]
+            remote = f"{_workdir(target)}/{name}"
             try:
-                runner(_ssh_argv(target, "mkdir -p pskit-cluster"), show=False)
+                runner(_ssh_argv(target, _mkdir_command(target)), show=False)
                 runner(scp_argv(ssh_options(target), str(archive), remote), show=False)
                 _script(target, scripts.image_load_script(orchestrator, image, remote), emit, run, label="load",
                         show=False)
@@ -455,8 +480,10 @@ def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn]
     emit(f"Copying {image} to {len(nodes)} server(s) ...")
     ship_image(orch, image, {s: n["target"] for s, n in nodes.items()}, emit, run)
     replicas = int(info["replicas"])
-    common: Dict[str, Any] = {"port": port, "replicas": replicas, "master_node": str(master["node"]), "cpu": float(info["cpu"]),
-              "memory_mb": int(info["memory"])}
+    data_root = str((master.get("target") or {}).get("data_dir") or "")
+    common: Dict[str, Any] = {"port": port, "replicas": replicas, "master_node": str(master["node"]),
+                              "cpu": float(info["cpu"]), "memory_mb": int(info["memory"]),
+                              "data_root": data_root or None}
     if orch == "swarm":
         python = "python3" if spec.get("language") == "node" else "python"
         manifest = scripts.swarm_stack(stack, image, python=python, **common)
@@ -469,7 +496,9 @@ def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn]
             emit(f"  Nomad runs one web replica per server besides the master: {workers} of {replicas} can start "
                  "now, the rest start when you join more servers")
     emit(f"Deploying {stack} on {ORCHESTRATORS[orch]['label']} ({replicas} web replica(s) + 1 main) ...")
-    _script(master["target"], scripts.apply_script(orch, stack, manifest, port), emit, run, label=f"apply-{stack}")
+    data_path = f"{data_root or scripts.DATA_ROOT}/{stack}" if data_root or orch != "swarm" else ""
+    _script(master["target"], scripts.apply_script(orch, stack, manifest, port, data_path=data_path), emit, run,
+            label=f"apply-{stack}")
     for node in nodes.values():
         try:
             _script(node["target"], scripts.prune_script(orch, stack, tag), emit, run, label="prune", show=False,
@@ -607,6 +636,42 @@ def place(root: Path, name: str, server: str = "", *, run: Optional[RunFn] = Non
                            f"(pskit cluster join {name} SERVER) or pick one of its servers")
     best = min(sorted(usable), key=free)
     return {"server": best, "address": str(nodes[best].get("address") or ""), "metrics": metrics[best]}
+
+
+def requests_feed(root: Path, name: str, stack: str = "", since: int = 0, limit: int = 200,
+                  control: Any = None) -> Dict[str, Any]:
+    """The live request view of a deployment on cluster ``name``: recent requests (oldest first) from the main
+    replica, each with the saved server and replica that handled it, plus per-server counts of this page.
+
+    Poll with ``since=next``. ``stack`` defaults to the only (or first) deployment."""
+    from .onprem_control import HostControl, deployed_host
+
+    cluster = get_cluster(root, name)
+    deployments = dict(cluster.get("deployments") or {})
+    if not deployments:
+        raise ClusterError(f"nothing is deployed on cluster {name} yet (pskit deploy --cluster {name})")
+    stack = stack or sorted(deployments)[0]
+    dep = deployments.get(stack)
+    if dep is None:
+        raise ClusterError(f"{stack!r} is not deployed on cluster {name} (deployed: {', '.join(sorted(deployments))})")
+    if control is None:
+        spec = (deployed_host(root, str(dep.get("stage") or "")) or {}).get("spec") or {}
+        ssh = (spec.get("deploy") or {}).get("ssh") or None
+        control = HostControl(str(dep.get("endpoint") or spec.get("endpoint")),
+                              token=str(spec.get("admin_token") or ""), ssh=ssh,
+                              remote_port=int(dep.get("port") or spec.get("port") or 8080), timeout=10)
+    page = dict(control.request("GET", "/__pskit/requests", query={"since": since, "limit": limit}) or {})
+    nodes = dict(cluster.get("nodes") or {})
+    by_node = {str(n.get("node")): server for server, n in nodes.items() if n.get("node")}
+    counts: Dict[str, int] = {}
+    for item in page.get("items") or []:
+        server = by_node.get(str(item.get("node") or ""))
+        if not server and item.get("replica") == "main":
+            server = str(cluster["master"])  # the main replica always runs on the master
+        item["server"] = server or item.get("node") or ""
+        counts[item["server"]] = counts.get(item["server"], 0) + 1
+    return {"stack": stack, "stacks": sorted(deployments), "items": page.get("items") or [],
+            "next": page.get("next", since), "servers": counts}
 
 
 def resources_of(root: Path, name: str) -> List[Dict[str, Any]]:

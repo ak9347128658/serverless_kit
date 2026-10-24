@@ -357,7 +357,7 @@ def make_handler(app: Studio) -> type:
             if parts and parts[0] in ("onprem-servers", "onprem-terminals"):
                 return self._onprem_machines(method, parts, params)
             if parts and parts[0] == "onprem-clusters":
-                return self._onprem_clusters(method, parts[1:])
+                return self._onprem_clusters(method, parts[1:], params)
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":
@@ -547,7 +547,7 @@ def make_handler(app: Studio) -> type:
                 raise StudioError(400, str(exc)) from None
             raise StudioError(404 if method == "GET" else 405, "unknown on-prem service endpoint")
 
-        def _onprem_clusters(self, method: str, rest: List[str]) -> Tuple[int, Any]:
+        def _onprem_clusters(self, method: str, rest: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
             """Scaling clusters (Swarm / Kubernetes / Nomad): create, join / remove servers, monitor, scale, alerts."""
             from ..core import onprem_cluster as clu
             from ..core.onprem_servers import list_servers
@@ -584,6 +584,14 @@ def make_handler(app: Studio) -> type:
                     current = clu.status(root, rest[0])
                     watcher.last[rest[0]] = current
                     return 200, current
+                if len(rest) == 2 and rest[1] == "requests" and method == "GET":
+                    from ..core.onprem_control import HostUnavailable
+
+                    try:
+                        return 200, clu.requests_feed(root, rest[0], _param(params, "stack") or "",
+                                                      _int(params, "since", 0), _int(params, "limit", 200))
+                    except (HostUnavailable, KeyError, PermissionError) as exc:
+                        raise StudioError(502, str(exc.args[0] if exc.args else exc)) from None
                 if len(rest) == 2 and rest[1] == "settings" and method == "PUT":
                     return 200, clu.save_settings(root, rest[0], _obj(self._body()))
                 if len(rest) == 2 and rest[1] == "check" and method == "POST":

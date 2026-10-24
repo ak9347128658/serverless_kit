@@ -136,7 +136,7 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  cluster     create | join | leave | status | check | watch | alerts | scale | list | remove
+  cluster     create | join | leave | status | check | watch | alerts | requests | scale | list | remove
               pskit cluster create prod --orchestrator swarm --master edge1
               pskit cluster join prod edge2
               pskit cluster leave prod edge2 --yes
@@ -145,6 +145,7 @@ Operate
               pskit cluster watch prod --interval 60
               pskit cluster alerts prod --function notify-devops --test
               pskit cluster scale prod --replicas 6
+              pskit cluster requests prod --follow
               pskit cluster list
               pskit cluster remove prod --yes
   client      info | install-node | tunnel
@@ -1105,7 +1106,8 @@ def resources_onprem_servers_list(as_json: bool, config_path: Optional[str]) -> 
     for item in servers:
         login = "password" if item.get("password_file") else ("key " + item["identity_file"]) if item.get(
             "identity_file") else "agent / default key"
-        echo(f"  {item['name']:<16} {item['label']:<36} {login}{'  sudo' if item.get('sudo') else ''}")
+        extra = "".join(f"  {k}={item[k]}" for k in ("home", "bind", "data_dir") if item.get(k))
+        echo(f"  {item['name']:<16} {item['label']:<36} {login}{'  sudo' if item.get('sudo') else ''}{extra}")
 
 
 @resources_onprem_servers.command("add")
@@ -1116,19 +1118,29 @@ def resources_onprem_servers_list(as_json: bool, config_path: Optional[str]) -> 
 @click.option("--ssh-password-file", default=None, help="Log in with the password in this file (sshpass).")
 @click.option("--sudo", is_flag=True, help="Run docker / installs with sudo -n.")
 @click.option("--description", default="", help="A note shown in the studio.")
+@click.option("--home", default="", help="Where pskit keeps files there (default /opt/pskit; cluster files in ~).")
+@click.option("--bind", default="", help="Address the functions and services listen on (0.0.0.0, 127.0.0.1 or an IP).")
+@click.option("--data-dir", "data_dir", default="", help="Where data lives there (default: Docker volumes / the app).")
 @click.option("--test/--no-test", "run_test", default=True, help="Log in once after saving (default: yes).")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
 def resources_onprem_servers_add(  # noqa: PLR0913
     name: str, ssh: str, pem: Optional[str], ssh_password_env: Optional[str], ssh_password_file: Optional[str],
-    sudo: bool, description: str, run_test: bool, config_path: Optional[str],
+    sudo: bool, description: str, home: str, bind: str, data_dir: str, run_test: bool, config_path: Optional[str],
 ) -> None:
-    """Save (or replace) server NAME."""
+    """Save (or replace) server NAME.
+
+    \b
+    --home /srv/pskit --bind 10.0.0.5 --data-dir /data/pskit are this server's defaults: functions deploy to
+    <home>/<service>-<stage> and listen on the bind address, services publish their port on it and keep their data
+    in <data-dir>/<container>, a cluster master keeps the main replica's data in <data-dir>/<stack>.
+    """
     from ..core import onprem_servers as srv
 
     root, _path, _raw = _raw_project(config_path)
     user, _, rest = ssh.rpartition("@")
     host, _, ssh_port = rest.partition(":")
-    raw: dict = {"host": host, "user": user or "root", "port": int(ssh_port or 22), "sudo": sudo}
+    raw: dict = {"host": host, "user": user or "root", "port": int(ssh_port or 22), "sudo": sudo,
+                 "home": home, "bind": bind, "data_dir": data_dir}
     if ssh_password_env:
         raw.update({"auth": "password", "password": _env_value(ssh_password_env)})
     elif ssh_password_file:
@@ -1372,6 +1384,7 @@ def cluster() -> None:
       pskit cluster alerts prod --function notify-devops --webhook https://hooks.slack.com/...
       pskit cluster watch prod                     # check every minute, alert when every server is full
       pskit cluster scale prod --replicas 6
+      pskit cluster requests prod --follow          # which server handled each request, live
       pskit cluster leave prod edge2
 
     Functions use it with provider.options.cluster in pskit.yml (cluster: prod, or {name: prod, replicas: 3}),
@@ -1577,6 +1590,39 @@ def cluster_alerts(name: str, function: Optional[str], stage: Optional[str], web
         if result["errors"]:
             raise click.ClickException("; ".join(result["errors"]))
         ok("Test alert sent to " + ", ".join(result["sent"]))
+
+
+@cluster.command("requests")
+@click.argument("name")
+@click.option("--stack", default=None, help="The deployment (default: the first one on the cluster).")
+@click.option("-f", "--follow", is_flag=True, help="Keep printing new requests until Ctrl+C.")
+@click.option("-n", "--lines", default=50, type=click.IntRange(1, 500), help="How many recent requests first.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def cluster_requests(name: str, stack: Optional[str], follow: bool, lines: int, config_path: Optional[str]) -> None:
+    """Recent requests of a deployment and the server / replica that handled each one (live with --follow)."""
+    import time
+
+    from ..core import onprem_cluster as clu
+    from ..core.onprem_control import HostUnavailable
+
+    root = _cluster_root(config_path)
+    since = 0
+    try:
+        while True:
+            try:
+                page = _cluster_call(clu.requests_feed, root, name, stack or "", since, lines if not since else 500)
+            except (HostUnavailable, PermissionError, KeyError) as exc:
+                raise click.ClickException(str(exc)) from None
+            for r in page["items"]:
+                what = f"{r.get('method')} {r.get('path')}" if r.get("method") else str(r.get("event_type") or "")
+                echo(f"  {str(r.get('ts') or '')[11:19]}  {r.get('server') or '-':<12} {r.get('replica') or '-':<22}"
+                     f" {str(r.get('status') or ''):>3} {r.get('duration_ms') or 0:>8} ms  {r.get('function')}: {what}")
+            since = int(page.get("next") or since)
+            if not follow:
+                return
+            time.sleep(2)
+    except KeyboardInterrupt:
+        pass
 
 
 @cluster.command("scale")

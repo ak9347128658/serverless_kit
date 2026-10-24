@@ -247,8 +247,11 @@ def _health_cmd(python: str, port: int) -> List[str]:
 
 
 def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node: str, cpu: float, memory_mb: int,
-                python: str = "python") -> Dict[str, Any]:
-    """A compose file (JSON) for ``docker stack deploy``: ``main`` on the master, ``web`` behind the routing mesh."""
+                python: str = "python", data_root: Optional[str] = None) -> Dict[str, Any]:
+    """A compose file (JSON) for ``docker stack deploy``: ``main`` on the master, ``web`` behind the routing mesh.
+
+    The main replica's data is the stack's ``data`` volume, or ``<data_root>/<stack>`` on the master (the master's
+    data directory)."""
     health = {"test": _health_cmd(python, port), "interval": "10s", "timeout": "5s", "retries": 3, "start_period": "30s"}
     reserve = {"cpus": f"{cpu:g}", "memory": f"{memory_mb}M"}
     return {
@@ -256,8 +259,8 @@ def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node
         "services": {
             "main": {
                 "image": image,
-                "environment": {"PSKIT_HOST_ROLE": "main", "PSKIT_REPLICA": "main"},
-                "volumes": ["data:/var/pskit/data"],
+                "environment": {"PSKIT_HOST_ROLE": "main", "PSKIT_REPLICA": "main", "PSKIT_NODE": "{{.Node.Hostname}}"},
+                "volumes": [f"{data_root}/{stack}:/var/pskit/data" if data_root else "data:/var/pskit/data"],
                 "networks": ["pskit"],
                 "healthcheck": health,
                 "deploy": {
@@ -274,6 +277,7 @@ def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node
                     "PSKIT_HOST_ROLE": "web",
                     "PSKIT_MAIN_URL": f"http://main:{port}",
                     "PSKIT_REPLICA": "{{.Node.Hostname}}-{{.Task.Slot}}",
+                    "PSKIT_NODE": "{{.Node.Hostname}}",
                 },
                 "ports": [{"target": port, "published": port, "protocol": "tcp", "mode": "ingress"}],
                 "networks": ["pskit"],
@@ -286,13 +290,13 @@ def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node
                 },
             },
         },
-        "volumes": {"data": {}},
+        **({} if data_root else {"volumes": {"data": {}}}),
         "networks": {"pskit": {"driver": "overlay", "attachable": True}},
     }
 
 
 def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, master_node: str, cpu: float,
-                        memory_mb: int) -> Dict[str, Any]:
+                        memory_mb: int, data_root: Optional[str] = None) -> Dict[str, Any]:
     """Deployments ``<stack>-main`` / ``<stack>-web`` and Services (``<stack>`` is a LoadBalancer: k3s ServiceLB
     answers on ``port`` of every node)."""
     probe = {"httpGet": {"path": "/__pskit/health", "port": port}, "periodSeconds": 10, "timeoutSeconds": 5}
@@ -313,7 +317,8 @@ def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, mas
         pod: Dict[str, Any] = {"containers": [container]}
         if role == "main":
             container["volumeMounts"] = [{"name": "data", "mountPath": "/var/pskit/data"}]
-            pod["volumes"] = [{"name": "data", "hostPath": {"path": f"{DATA_ROOT}/{stack}", "type": "DirectoryOrCreate"}}]
+            pod["volumes"] = [{"name": "data", "hostPath": {"path": f"{data_root or DATA_ROOT}/{stack}",
+                                                             "type": "DirectoryOrCreate"}}]
             pod["nodeSelector"] = {"kubernetes.io/hostname": master_node}
         return {
             "apiVersion": "apps/v1",
@@ -337,18 +342,19 @@ def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, mas
         }
 
     replica = {"name": "PSKIT_REPLICA", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}
+    node = {"name": "PSKIT_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}
     return {
         "apiVersion": "v1",
         "kind": "List",
         "items": [
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NAMESPACE}},
-            deployment("main", 1, [{"name": "PSKIT_HOST_ROLE", "value": "main"}, replica],
+            deployment("main", 1, [{"name": "PSKIT_HOST_ROLE", "value": "main"}, replica, node],
                        {"strategy": {"type": "Recreate"}}),
             service(f"{stack}-main", "main", "ClusterIP"),
             deployment(
                 "web", replicas,
                 [{"name": "PSKIT_HOST_ROLE", "value": "web"},
-                 {"name": "PSKIT_MAIN_URL", "value": f"http://{stack}-main:{port}"}, replica],
+                 {"name": "PSKIT_MAIN_URL", "value": f"http://{stack}-main:{port}"}, replica, node],
                 {"strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}}},
             ),
             service(stack, "web", "LoadBalancer"),
@@ -357,7 +363,7 @@ def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, mas
 
 
 def nomad_job(stack: str, image: str, *, port: int, replicas: int, master_node: str, master_addr: str, cpu: float,
-              memory_mb: int) -> Dict[str, Any]:
+              memory_mb: int, data_root: Optional[str] = None) -> Dict[str, Any]:
     """A Nomad job (jobs API JSON). ``main`` holds ``port`` on the master; ``web`` holds it on each other server
     (one per server: put your load balancer in front of every server's ``port``)."""
     seconds = 10**9
@@ -365,7 +371,7 @@ def nomad_job(stack: str, image: str, *, port: int, replicas: int, master_node: 
     def group(role: str, count: int, env: Dict[str, str], constraints: List[Dict[str, str]]) -> Dict[str, Any]:
         config: Dict[str, Any] = {"image": image, "ports": ["http"], "force_pull": False}
         if role == "main":
-            config["volumes"] = [f"{DATA_ROOT}/{stack}:/var/pskit/data"]
+            config["volumes"] = [f"{data_root or DATA_ROOT}/{stack}:/var/pskit/data"]
         return {
             "Name": role,
             "Count": count,
@@ -391,11 +397,12 @@ def nomad_job(stack: str, image: str, *, port: int, replicas: int, master_node: 
             "Type": "service",
             "Datacenters": ["dc1"],
             "TaskGroups": [
-                group("main", 1, {"PSKIT_HOST_ROLE": "main", "PSKIT_REPLICA": "main"}, [on_master]),
+                group("main", 1, {"PSKIT_HOST_ROLE": "main", "PSKIT_REPLICA": "main", "PSKIT_NODE": "${node.unique.name}"},
+                      [on_master]),
                 group(
                     "web", replicas,
                     {"PSKIT_HOST_ROLE": "web", "PSKIT_MAIN_URL": f"http://{master_addr}:{port}",
-                     "PSKIT_REPLICA": "${node.unique.name}-${NOMAD_ALLOC_INDEX}"},
+                     "PSKIT_REPLICA": "${node.unique.name}-${NOMAD_ALLOC_INDEX}", "PSKIT_NODE": "${node.unique.name}"},
                     [{**on_master, "Operand": "!="}, {"Operand": "distinct_hosts", "RTarget": "true"}],
                 ),
             ],
@@ -403,11 +410,15 @@ def nomad_job(stack: str, image: str, *, port: int, replicas: int, master_node: 
     }
 
 
-def apply_script(orchestrator: str, stack: str, manifest: Dict[str, Any], port: int, timeout: int = 300) -> str:
-    """Runs on the master: apply the manifest and wait until the main replica answers ``/__pskit/health``."""
+def apply_script(orchestrator: str, stack: str, manifest: Dict[str, Any], port: int, timeout: int = 300,
+                 data_path: str = "") -> str:
+    """Runs on the master: apply the manifest and wait until the main replica answers ``/__pskit/health``.
+    ``data_path``: the main replica's data folder on the master, created first (a bind mount needs it)."""
     doc = json.dumps(manifest, indent=1)
     path = f"pskit-cluster/{stack}.json"
     write = f"mkdir -p pskit-cluster\ncat > {path} <<'PSKIT_MANIFEST'\n{doc}\nPSKIT_MANIFEST\n"
+    if data_path:
+        write += f"as_root mkdir -p {_shq(data_path)}\n"
     if orchestrator == "swarm":
         run = (f"dk stack deploy --prune --resolve-image never -c {path} {_shq(stack)}\n"
                + _wait(f"dk service ls --filter label=com.docker.stack.namespace={stack} --format '{{{{.Replicas}}}}'"

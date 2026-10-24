@@ -86,6 +86,41 @@ def server_target(root: Path, name: str) -> Dict[str, Any]:
     return {"method": "ssh", **get_server(root, name), "server": str(name)}
 
 
+_SERVER_PATH = re.compile(r"^/[A-Za-z0-9._/-]*$")
+_LOOPBACK_DEFAULT = "127.0.0.1"
+SETTINGS = ("home", "bind", "data_dir")
+
+
+def server_settings(raw: Dict[str, Any]) -> Dict[str, str]:
+    """The optional per-server defaults, validated:
+
+    * ``home``: where pskit keeps files on the server (functions in ``<home>/<service>-<stage>``, cluster scripts and
+      image copies in ``<home>/pskit-cluster``). Default ``/opt/pskit`` and the SSH user's home.
+    * ``bind``: the address the functions' host and services listen on (``0.0.0.0``, ``127.0.0.1`` or one of the
+      server's IPs); a specific IP is also its address in a cluster.
+    * ``data_dir``: where data lives (the functions' ``data_dir``, services' data as bind mounts instead of Docker
+      volumes, a cluster master's main-replica data).
+    """
+    out: Dict[str, str] = {}
+    for key in ("home", "data_dir"):
+        value = str(raw.get(key) or "").strip().rstrip("/")
+        if not value:
+            continue
+        if not _SERVER_PATH.match(value) or "/../" in value + "/" or len(value) > 200:
+            raise ServerError(f"{key} must be an absolute Linux path such as /srv/pskit (letters, digits, . _ - /)")
+        out[key] = value
+    bind = str(raw.get("bind") or "").strip()
+    if bind:
+        import ipaddress
+
+        try:
+            ipaddress.IPv4Address(bind)
+        except ValueError:
+            raise ServerError("bind must be an IPv4 address: 0.0.0.0 (all), 127.0.0.1 or one of the server's IPs") from None
+        out["bind"] = bind
+    return out
+
+
 def save_server(root: Path, name: str, raw: Dict[str, Any], *, description: str = "") -> Dict[str, Any]:
     """Add or replace server ``name`` (validated like a service target; a password is saved to a file)."""
     from .onprem_services import ServiceError, normalize_target
@@ -105,6 +140,7 @@ def save_server(root: Path, name: str, raw: Dict[str, Any], *, description: str 
         raise ServerError(str(exc)) from None
     item = {k: target[k] for k in _KEEP if target.get(k) not in (None, "")}
     item["sudo"] = bool(target.get("sudo"))
+    item.update(server_settings(raw))
     if description:
         item["description"] = str(description)[:200]
     servers = load_servers(root)
@@ -272,5 +308,12 @@ def apply_to_deploy(options: Dict[str, Any], root: Path, server: Optional[str] =
     if item.get("sudo") and "sudo" not in deploy:
         deploy["sudo"] = True
     deploy["server"] = str(name)
+    # The server's own defaults; pskit.yml wins (its host only when it is not the default loopback).
+    if item.get("home") and not deploy.get("path"):
+        deploy["home"] = item["home"]
+    if item.get("bind") and str(options.get("host") or _LOOPBACK_DEFAULT) == _LOOPBACK_DEFAULT:
+        options["host"] = item["bind"]
+    if item.get("data_dir") and not options.get("data_dir"):
+        options["data_dir"] = item["data_dir"]
     options["deploy"] = deploy
     return str(name)

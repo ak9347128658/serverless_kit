@@ -1,6 +1,7 @@
 import type { LogsResponse, LogStream } from "../types";
 import type {
   ClusterAlertEntry,
+  ClusterRequests,
   ClusterStatus,
   OnPremCluster,
   OnPremClustersState,
@@ -234,6 +235,11 @@ export const api = {
   clusters: () => request<OnPremClustersState>("GET", "/api/onprem-clusters"),
   clusterCreate: (body: { name: string; orchestrator: string; master: string; advertise?: string }) =>
     request<{ job_id: string }>("POST", "/api/onprem-clusters", body),
+  clusterRequests: (name: string, stack: string, since: number) =>
+    request<ClusterRequests>(
+      "GET",
+      `/api/onprem-clusters/${encodeURIComponent(name)}/requests?${new URLSearchParams({ stack, since: String(since), limit: since ? "500" : "100" })}`,
+    ),
   clusterStatus: (name: string) => request<ClusterStatus>("GET", `/api/onprem-clusters/${encodeURIComponent(name)}/status`),
   clusterCheck: (name: string) => request<ClusterStatus>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/check`, {}),
   clusterTestAlert: (name: string) => request<ClusterAlertEntry>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/test-alert`, {}),

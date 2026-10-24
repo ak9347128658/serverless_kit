@@ -85,6 +85,11 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
                   <td>
                     <b className="mono">{s.name}</b>
                     {s.description && <div className="muted small">{s.description}</div>}
+                    {(s.home || s.bind || s.data_dir) && (
+                      <div className="muted small mono">
+                        {[s.home && `home ${s.home}`, s.bind && `bind ${s.bind}`, s.data_dir && `data ${s.data_dir}`].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
                   </td>
                   <td className="mono small">{s.label}</td>
                   <td className="small">
@@ -178,11 +183,18 @@ export function ServerForm({ initial, taken, onClose, onSaved }: { initial: OnPr
   const [password, setPassword] = useState("");
   const [sudo, setSudo] = useState(!!initial?.sudo);
   const [description, setDescription] = useState(initial?.description || "");
+  const [home, setHome] = useState(initial?.home || "");
+  const [bind, setBind] = useState(initial?.bind || "");
+  const [dataDir, setDataDir] = useState(initial?.data_dir || "");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const nameError = !SERVER_NAME_RE.test(name) ? "start with a letter; letters, digits, _ . -" : !initial && taken.includes(name) ? "already saved" : null;
   const hostError = !host.trim() ? "host name or IP" : null;
   const authError = auth === "key" && !pem.trim() ? "path of the private key" : auth === "password" && !password && !initial?.password_file ? "the SSH password" : null;
+  const pathError = (value: string) => (value.trim() && !/^\/[A-Za-z0-9._/-]*$/.test(value.trim()) ? "an absolute Linux path, e.g. /srv/pskit" : null);
+  const homeError = pathError(home);
+  const dataDirError = pathError(dataDir);
+  const bindError = bind.trim() && !/^(\d{1,3}\.){3}\d{1,3}$/.test(bind.trim()) ? "an IPv4 address: 0.0.0.0, 127.0.0.1 or one of the server's IPs" : null;
 
   const save = async () => {
     setSaving(true);
@@ -190,6 +202,9 @@ export function ServerForm({ initial, taken, onClose, onSaved }: { initial: OnPr
     const target: JsonObject = { host: host.trim(), user: user.trim() || "root", port: port || 22, sudo, auth };
     if (auth === "key") target.identity_file = pem.trim();
     if (auth === "password" && password) target.password = password;
+    target.home = home.trim();
+    target.bind = bind.trim();
+    target.data_dir = dataDir.trim();
     try {
       await api.onpremServerSave(name, target, description);
       onSaved(name);
@@ -206,7 +221,12 @@ export function ServerForm({ initial, taken, onClose, onSaved }: { initial: OnPr
       title={initial ? `Edit server ${initial.name}` : "Add a server"}
       onClose={onClose}
       actions={
-        <button type="button" className="btn btn-primary" disabled={!!nameError || !!hostError || !!authError || saving} onClick={() => void save()}>
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={!!nameError || !!hostError || !!authError || !!homeError || !!bindError || !!dataDirError || saving}
+          onClick={() => void save()}
+        >
           {saving ? "Saving…" : "Save and test"}
         </button>
       }
@@ -250,6 +270,28 @@ export function ServerForm({ initial, taken, onClose, onSaved }: { initial: OnPr
           </FormRow>
         )}
         <Toggle checked={sudo} onChange={setSudo} label="Use sudo (the user is not root and not in the docker group)" />
+        <h4>On this server (optional)</h4>
+        <FormRow
+          label="Home path"
+          error={homeError}
+          help="Where pskit keeps files: functions deploy to <home>/<service>-<stage>, cluster scripts and image copies go to <home>/pskit-cluster. Empty: /opt/pskit for functions, the SSH user's home for cluster files."
+        >
+          <TextInput mono value={home} placeholder="/opt/pskit" onChange={setHome} invalid={!!homeError} />
+        </FormRow>
+        <FormRow
+          label="Bind address"
+          error={bindError}
+          help="The address the functions' host and services listen on: 0.0.0.0 (every interface), 127.0.0.1 (only the server itself, reached over SSH) or one of its IPs (e.g. the private one). A specific IP is also its address in a cluster. Empty: 127.0.0.1 for functions, 0.0.0.0 for services. A host set in pskit.yml (other than 127.0.0.1) wins."
+        >
+          <TextInput mono value={bind} placeholder="0.0.0.0 / 10.0.0.5" onChange={setBind} invalid={!!bindError} />
+        </FormRow>
+        <FormRow
+          label="Data directory"
+          error={dataDirError}
+          help="Where data lives: services keep their data in <data>/<container> (a folder you can back up, instead of a Docker volume), the functions' built-in queues / buckets go to it (provider.options.data_dir), and a cluster master keeps the main replica's data in <data>/<stack>. Applies to what you create or deploy from now on."
+        >
+          <TextInput mono value={dataDir} placeholder="/data/pskit" onChange={setDataDir} invalid={!!dataDirError} />
+        </FormRow>
         <FormRow label="Description">
           <TextInput value={description} onChange={setDescription} placeholder="optional note" />
         </FormRow>

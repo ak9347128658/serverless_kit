@@ -881,6 +881,8 @@ class Host:
         if self.role == "web" and not self.main_url:
             raise ValueError("a web replica needs PSKIT_MAIN_URL (the main replica)")
         self.replica = str(os.environ.get("PSKIT_REPLICA") or socket.gethostname())
+        # The cluster server (orchestrator node) this replica runs on: shown with each request.
+        self.node = str(os.environ.get("PSKIT_NODE") or "")
         token = str(self.spec.get("admin_token") or "")
         self.broker = ForwardingBroker(self.spec, self.main_url, token) if self.role == "web" else Broker(self.spec)
         # web: invocations and log entries not yet sent to the main replica.
@@ -1078,6 +1080,10 @@ class Host:
                 fields["failed_records"] = len(result.failed)
         if error is not None:
             fields["error"] = f"{type(error).__name__}: {error}"
+        if self.role != "all":  # a cluster replica: which one (and which server) handled it
+            fields["replica"] = self.replica
+            if self.node:
+                fields["node"] = self.node
         message = f"{summary} ({duration} ms)"
         if error is not None:
             message += f" {fields['error']}"
@@ -1557,6 +1563,22 @@ class Host:
             self._unshipped = (invocations + self._unshipped)[-5000:]
         return False
 
+    def requests(self, since: int = 0, limit: int = 200) -> Dict[str, Any]:
+        """Recent invocations (HTTP requests and other events), oldest first, with the replica and server that ran
+        each one: the live request view. Poll with ``since=next``."""
+        page = self.logs.query(since=since, limit=limit, source="invocation")
+        items = []
+        for entry in page.get("entries") or []:
+            fields = entry.get("fields") or {}
+            items.append({
+                "seq": entry.get("seq"), "ts": entry.get("ts"), "function": entry.get("function"),
+                "level": entry.get("level"), "request_id": entry.get("request_id"),
+                **{k: fields.get(k) for k in ("event_type", "method", "path", "status", "duration_ms", "error",
+                                              "replica", "node")},
+            })
+        return {"items": items, "next": page.get("next"), "role": self.role, "replica": self.replica,
+                "node": self.node}
+
     def ingest_logs(self, payload: Any) -> Dict[str, Any]:
         """main: log entries and invocation counts sent by a web replica."""
         if not isinstance(payload, dict):
@@ -1697,6 +1719,11 @@ class Host:
                     return self._json(200, {"items": host.logs.functions()})
                 if parts == ["stats"]:
                     return self._json(200, host.stats())
+                if parts == ["requests"]:
+                    if self.command != "GET":
+                        return self._json(405, {"error": "GET the recent requests"})
+                    return self._json(200, host.requests(_int_arg(query, "since", 0),
+                                                         min(500, _int_arg(query, "limit", 200))))
                 if len(parts) == 2 and parts[0] == "smtp":
                     if self.command != "POST":
                         return self._json(405, {"error": "POST the mail"})

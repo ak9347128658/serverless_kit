@@ -351,6 +351,12 @@ export interface OnPremServer {
   password_file?: string;
   sudo?: boolean;
   description?: string;
+  /** Where pskit keeps files on the server (functions in <home>/<service>-<stage>, cluster files in <home>/pskit-cluster). */
+  home?: string;
+  /** Address the functions' host and services listen on; a specific IP is also its cluster address. */
+  bind?: string;
+  /** Where data lives: services' data as bind mounts, the functions' data_dir, a cluster master's main-replica data. */
+  data_dir?: string;
 }
 
 /** Where an on-prem stage was last deployed (`GET /api/onprem-servers?stage=`). */
@@ -563,6 +569,33 @@ export interface ClusterStatus {
   checked_at: string;
   alert?: ClusterAlertEntry | { skipped: string; next_after_minutes: number };
   error?: string;
+}
+
+/** One request (or other event) a replica handled: `GET /api/onprem-clusters/<name>/requests`. */
+export interface ClusterRequest {
+  seq: number;
+  ts: string;
+  function: string | null;
+  level: string;
+  request_id?: string | null;
+  event_type?: string | null;
+  method?: string | null;
+  path?: string | null;
+  status?: number | null;
+  duration_ms?: number | null;
+  error?: string | null;
+  replica?: string | null;
+  node?: string | null;
+  /** The saved server that ran it (from the node). */
+  server: string;
+}
+
+export interface ClusterRequests {
+  stack: string;
+  stacks: string[];
+  items: ClusterRequest[];
+  next: number;
+  servers: Record<string, number>;
 }
 
 export interface OnPremClustersState {

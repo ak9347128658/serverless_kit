@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-24
+
+### Added
+- **Live requests on a cluster**: the cluster page's *Live requests* card and `pskit cluster requests NAME --follow`
+  show each request as it happens with the server and replica that handled it (plus requests per server). The
+  studio polls every 2 s only while the card is on screen and the tab is visible. Replicas get `PSKIT_NODE` from
+  the orchestrator (Swarm, k3s, Nomad); the host serves `GET /__pskit/requests?since=N`.
+- **Saved servers: home path, bind address, data directory** (studio *Add a server*, `servers add --home --bind
+  --data-dir`). Defaults for what runs there: functions deploy to `<home>/<service>-<stage>`, listen on the bind
+  address and keep data in the data directory; services publish their port on the bind address and keep data in
+  `<data>/<container>` (bind mount); a cluster keeps its files in `<home>/pskit-cluster`, uses a specific bind IP
+  as the server's cluster address, and keeps the main replica's data in `<data>/<stack>` on the master.
+
+### Changed
+- The *New scaling cluster* dialog: the name field is labelled *Cluster name*, focused, always pre-filled with a
+  free name (`prod`, `prod-2`, ...) and lower-cased as you type.
+
 ## [1.9.0] - 2026-10-24
 
 ### Added

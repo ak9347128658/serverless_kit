@@ -1068,7 +1068,8 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
     if not address:
         # On a cluster: the server's cluster address, which the replicas on every server reach.
         address = cluster_address or (target["host"] if target["method"] == "ssh" else "127.0.0.1")
-    bind = str(body.get("bind") or ("0.0.0.0" if target["method"] == "ssh" else "127.0.0.1"))  # noqa: S104
+    default_bind = target.get("bind") or ("0.0.0.0" if target["method"] == "ssh" else "127.0.0.1")  # noqa: S104
+    bind = str(body.get("bind") or default_bind)
     if bind not in ("0.0.0.0", "127.0.0.1") and not re.match(r"^[0-9.]{7,15}$", bind):  # noqa: S104
         raise ServiceError("bind must be 0.0.0.0, 127.0.0.1 or an IPv4 address of the server")
     attach = body.get("attach") or []
@@ -1130,8 +1131,16 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
         "bind": bind,
         "attach": list(attach),
         "container": _container_name(project, key),
-        "volume": _container_name(project, key) + "-data" if spec["data"] else "",
+        "volume": data_mount(target, _container_name(project, key)) if spec["data"] else "",
+        "data_dir": str(target.get("data_dir") or ""),
     }
+
+
+def data_mount(target: Dict[str, Any], name: str) -> str:
+    """Where a container's data lives: ``<data_dir>/<name>`` (a bind mount) when the server has a data directory,
+    else the Docker volume ``<name>-data``."""
+    data_dir = str(target.get("data_dir") or "").rstrip("/")
+    return f"{data_dir}/{name}" if data_dir else f"{name}-data"
 
 
 def host_port(item: Dict[str, Any], container_port: int) -> int:
@@ -1468,7 +1477,7 @@ def sidecar_args(req: Dict[str, Any], side: Dict[str, Any], password: str) -> Li
     for env_name, template in (side.get("env") or {}).items():
         argv += ["-e", f"{env_name}={_fill(template, values)}"]
     if side.get("data"):
-        argv += ["-v", f"{name}-data:{side['data']}"]
+        argv += ["-v", f"{data_mount({'data_dir': req.get('data_dir')}, name)}:{side['data']}"]
     argv.append(side["image"])
     argv += [_fill(part, values) for part in side.get("command") or ()]
     return argv
@@ -1480,6 +1489,8 @@ def _start_sidecars(req: Dict[str, Any], spec: Dict[str, Any], target: Dict[str,
     for side in spec["sidecars"]:
         name = f"{req['container']}-{side['name']}"
         sh(docker_argv(target, ["rm", "-f", name]), check=False, show=False)
+        if side.get("data") and req.get("data_dir"):
+            _make_volume(target, sh, data_mount({"data_dir": req["data_dir"]}, name))
         sh(docker_argv(target, ["pull", side["image"]]))
         sh(docker_argv(target, sidecar_args(req, side, password)))
         if side.get("health"):
@@ -1534,7 +1545,7 @@ def create(
         _start_sidecars(req, spec, target, sh, password, emit, wait_seconds)
     sh(docker_argv(target, ["pull", req["image"]]))
     if req["volume"]:
-        sh(docker_argv(target, ["volume", "create", req["volume"]]), show=False)
+        _make_volume(target, sh, req["volume"])
     sh(docker_argv(target, run_args(req, password)))
     if req["service"] == "smtp":
         emit("installing smtp-server and mailparser in the container (once, about a minute)...")
@@ -1565,6 +1576,7 @@ def create(
         "image": req["image"],
         "container": req["container"],
         "volume": req["volume"],
+        **({"data_dir": req["data_dir"]} if req.get("data_dir") else {}),
         "port": req["port"],
         "address": req["address"],
         "bind": req["bind"],
@@ -1594,6 +1606,23 @@ def create(
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _make_volume(target: Dict[str, Any], sh: _Runner, volume: str) -> None:
+    """A Docker volume, or the bind-mounted folder under the server's data directory."""
+    if not volume.startswith("/"):
+        sh(docker_argv(target, ["volume", "create", volume]), show=False)
+        return
+    path = _shq(volume)
+    sh(_ssh_argv(target, f"mkdir -p {path} 2>/dev/null || sudo -n mkdir -p {path}"), show=False)
+
+
+def _drop_volume(target: Dict[str, Any], sh: _Runner, volume: str) -> None:
+    if not volume.startswith("/"):
+        sh(docker_argv(target, ["volume", "rm", volume]), check=False, show=False)
+        return
+    path = _shq(volume)
+    sh(_ssh_argv(target, f"rm -rf {path} 2>/dev/null || sudo -n rm -rf {path}"), check=False)
 
 
 def _ensure_docker(target: Dict[str, Any], sh: _Runner, *, install: bool) -> None:
@@ -1861,11 +1890,11 @@ def remove(
         for side in entry.get("sidecars") or []:
             sh(docker_argv(entry["target"], ["rm", "-f", side]), check=False)
             if delete_data:
-                sh(docker_argv(entry["target"], ["volume", "rm", f"{side}-data"]), check=False, show=False)
+                _drop_volume(entry["target"], sh, data_mount({"data_dir": entry.get("data_dir")}, side))
         # After the service container: a network with a connected container cannot be removed.
         sh(docker_argv(entry["target"], ["network", "rm", _network(entry)]), check=False, show=False)
         if delete_data and entry.get("volume"):
-            sh(docker_argv(entry["target"], ["volume", "rm", entry["volume"]]), check=False)
+            _drop_volume(entry["target"], sh, str(entry["volume"]))
         elif entry.get("volume"):
             emit(f"kept the data volume {entry['volume']} (delete it with --delete-data)")
         env_file = root / str(entry.get("env_file") or DEFAULT_ENV_FILE)

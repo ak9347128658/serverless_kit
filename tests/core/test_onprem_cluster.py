@@ -482,3 +482,107 @@ def test_nomad_scale_re_registers_the_job(servers):
     assert "--data @pskit-cluster/pskit-shop-dev-scale.json http://127.0.0.1:4646/v1/jobs" in text
     _sh_ok(text)
     assert clu.get_cluster(servers, "lab")["deployments"]["pskit-shop-dev"]["replicas"] == 6
+
+
+# ------------------------------------------------------------------------------------------- live requests
+class FakeControl:
+    def __init__(self, items):
+        self.items = items
+        self.calls = []
+
+    def request(self, method, path, body=None, query=None, timeout=None):
+        self.calls.append((method, path, query))
+        return {"items": [dict(i) for i in self.items], "next": 42}
+
+
+def test_requests_feed_maps_nodes_to_servers(servers):
+    fake = FakeSSH()
+    clu.create_cluster(servers, "prod", "swarm", "edge1", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge2", lambda _l: None, run=fake)
+    with pytest.raises(clu.ClusterError, match="nothing is deployed"):
+        clu.requests_feed(servers, "prod")
+    clu._update(servers, "prod", lambda c: c.setdefault("deployments", {}).__setitem__(
+        "pskit-shop-dev", {"stage": "dev", "endpoint": "http://10.0.0.5:8080", "port": 8080}))
+    control = FakeControl([
+        {"seq": 1, "method": "GET", "path": "/hello", "replica": "node-10.0.0.6-1", "node": "node-10.0.0.6"},
+        {"seq": 2, "event_type": "schedule", "replica": "main", "node": ""},
+        {"seq": 3, "method": "GET", "path": "/hello", "replica": "x-1", "node": "node-10.0.0.6"},
+    ])
+    page = clu.requests_feed(servers, "prod", since=7, control=control)
+    assert [i["server"] for i in page["items"]] == ["edge2", "edge1", "edge2"]
+    assert page["servers"] == {"edge2": 2, "edge1": 1} and page["next"] == 42 and page["stack"] == "pskit-shop-dev"
+    assert control.calls == [("GET", "/__pskit/requests", {"since": 7, "limit": 200})]
+    with pytest.raises(clu.ClusterError, match="not deployed"):
+        clu.requests_feed(servers, "prod", "other", control=control)
+
+
+def test_manifests_tell_replicas_their_node():
+    swarm = scripts.swarm_stack("s", "i", port=8080, replicas=2, master_node="m", cpu=0.25, memory_mb=256)
+    assert swarm["services"]["web"]["environment"]["PSKIT_NODE"] == "{{.Node.Hostname}}"
+    k8s = scripts.kubernetes_manifest("s", "i", port=8080, replicas=2, master_node="m", cpu=0.25, memory_mb=256)
+    envs = [c["env"] for d in k8s["items"] if d["kind"] == "Deployment" for c in d["spec"]["template"]["spec"]["containers"]]
+    assert all({"name": "PSKIT_NODE", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}} in e for e in envs)
+    nomad = scripts.nomad_job("s", "i", port=8080, replicas=2, master_node="m", master_addr="10.0.0.5", cpu=0.25,
+                              memory_mb=256)
+    assert all(g["Tasks"][0]["Env"]["PSKIT_NODE"] == "${node.unique.name}" for g in nomad["Job"]["TaskGroups"])
+
+
+# ------------------------------------------------------------------------------------------- server settings
+def test_server_home_bind_and_data_dir(tmp_path):
+    from py_serverless_kit.core import onprem_services as svc
+
+    srv.save_server(tmp_path, "box", {"host": "10.0.0.9", "user": "root", "auth": "agent", "home": "/srv/pskit/",
+                                       "bind": "10.0.0.9", "data_dir": "/data/pskit"})
+    item = srv.get_server(tmp_path, "box")
+    assert (item["home"], item["bind"], item["data_dir"]) == ("/srv/pskit", "10.0.0.9", "/data/pskit")
+    for bad, message in (({"home": "relative/x"}, "absolute"), ({"data_dir": "/a/../etc"}, "absolute"),
+                         ({"bind": "eth0"}, "IPv4")):
+        with pytest.raises(srv.ServerError, match=message):
+            srv.save_server(tmp_path, "bad", {"host": "10.0.0.9", "auth": "agent", **bad})
+
+    # functions: the server's defaults unless pskit.yml says otherwise
+    options: dict = {"host": "127.0.0.1", "deploy": {"server": "box"}}
+    srv.apply_to_deploy(options, tmp_path)
+    assert options["host"] == "10.0.0.9" and options["data_dir"] == "/data/pskit"
+    assert options["deploy"]["home"] == "/srv/pskit"
+    from py_serverless_kit.providers.onprem_spec import parse_deploy
+
+    spec = parse_deploy({"deploy": {**options["deploy"], "python": "system"}}, service="shop", stage="dev",
+                        runtime="python3.12", architecture="x86_64")
+    assert spec.remote_path == "/srv/pskit/shop-dev"
+    options = {"host": "0.0.0.0", "data_dir": "/mine", "deploy": {"server": "box", "path": "/opt/app"}}
+    srv.apply_to_deploy(options, tmp_path)
+    assert options["host"] == "0.0.0.0" and options["data_dir"] == "/mine" and "home" not in options["deploy"]
+
+    # services: published on the bind address, data in <data_dir>/<container>
+    req = svc.check_request({"key": "cache", "service": "redis", "target": {"server": "box"}}, tmp_path, None)
+    assert req["bind"] == "10.0.0.9" and req["volume"] == "/data/pskit/pskit-cache"
+    argv = svc.run_args(req, "secret")
+    assert "/data/pskit/pskit-cache:/data" in argv and "10.0.0.9:6379:6379" in argv
+    calls = []
+    sh = svc._Runner(lambda _l: None, lambda argv, _out: (calls.append(argv[-1]), (0, ""))[1])
+    svc._make_volume(req["target"], sh, req["volume"])
+    svc._drop_volume(req["target"], sh, req["volume"])
+    assert "mkdir -p '/data/pskit/pskit-cache'" in calls[0] and "rm -rf '/data/pskit/pskit-cache'" in calls[1]
+
+
+def test_cluster_uses_home_bind_and_data_dir(tmp_path):
+    srv.save_server(tmp_path, "m1", {"host": "10.0.0.5", "user": "root", "auth": "agent", "home": "/srv/pskit",
+                                      "bind": "192.168.1.5", "data_dir": "/data/pskit"})
+    fake = FakeSSH()
+    item = clu.create_cluster(tmp_path, "prod", "swarm", "m1", lambda _l: None, run=fake)
+    assert item["advertise"] == "192.168.1.5"  # a specific bind address is the cluster address
+    commands = [c[-1] for c in fake.calls if c[0] not in ("scp", "sshpass")]
+    assert any(c.startswith("mkdir -p /srv/pskit/pskit-cluster") for c in commands)
+    assert "cd /srv/pskit && sh pskit-cluster/master.sh" in commands
+    assert any(c[-1].endswith(":/srv/pskit/pskit-cluster/master.sh") for c in fake.calls if c[0] == "scp")
+
+    stack = scripts.swarm_stack("s", "i", port=8080, replicas=2, master_node="m", cpu=0.25, memory_mb=256,
+                                data_root="/data/pskit")
+    assert stack["services"]["main"]["volumes"] == ["/data/pskit/s:/var/pskit/data"] and "volumes" not in stack
+    nomad = scripts.nomad_job("s", "i", port=8080, replicas=1, master_node="m", master_addr="a", cpu=0.25,
+                              memory_mb=256, data_root="/data/pskit")
+    assert nomad["Job"]["TaskGroups"][0]["Tasks"][0]["Config"]["volumes"] == ["/data/pskit/s:/var/pskit/data"]
+    apply = scripts.apply_script("swarm", "s", stack, 8080, data_path="/data/pskit/s")
+    assert "as_root mkdir -p '/data/pskit/s'" in apply
+    _sh_ok(apply)
