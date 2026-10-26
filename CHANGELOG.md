@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-26
+
+### Added
+- **AWS Secrets Manager compatible server** in `aws/secretsmanager`, in Python (`python/server.py`, standard library
+  only) and Node.js (`nodejs/server.js`, no npm packages), with a Dockerfile for each and a `docker-compose.yml`.
+  boto3, the AWS SDKs, the AWS CLI and `get_secret()` / `getSecret()` work with it unchanged through
+  `endpoint_url`. Every request is checked with AWS Signature Version 4 (wrong secret key, unknown access key and
+  requests older than 15 minutes are refused). It supports CreateSecret, GetSecretValue, BatchGetSecretValue,
+  PutSecretValue, UpdateSecret, DescribeSecret, ListSecrets (filters, paging), DeleteSecret (recovery window or
+  force), RestoreSecret, ListSecretVersionIds, UpdateSecretVersionStage (AWSCURRENT / AWSPREVIOUS), tags,
+  GetRandomPassword and resource policies (stored). Rotation and replica regions are not supported. Both servers
+  keep the same JSON data file (mode 600, written atomically), so they are interchangeable.
+- **Its own web console** at `/ui/` (`aws/secretsmanager/ui/index.html`), signed in with the access key ID and
+  secret key (or `SM_UI_PASSWORD`): list and filter, create (key/value or plaintext, generate a password), show and
+  copy values, new versions, make an old version current, description and tags, delete with a recovery window,
+  restore. HttpOnly `SameSite=Strict` session cookie, a per-session request token, a lock-out after ten failed
+  sign-ins and a strict Content-Security-Policy.
+- **On-prem services `secretsmanager` (Python) and `secretsmanager-node` (Node.js)** under *Secret managers*
+  (`pskit resources onprem create secrets --service secretsmanager --user AKIAPROD`). They run on the stock
+  `python:3.12-alpine` / `node:22-alpine` image: pskit copies the server and the console into the container with
+  `docker cp` (with scp first on an SSH server), so nothing is built or pushed. The user is the access key ID and
+  the password the secret key; the env file gets `PSKIT_<KEY>_DRIVER=aws`, `_URL`, `_REGION`, `_ACCESS_KEY` and
+  `_SECRET_KEY`. Port 4584, data volume and *Backup*, *Web UI → Secrets console*, pskit's *Browse secrets*, an AWS
+  CLI console and a *How to use* page with boto3, AWS SDK for JavaScript v3, AWS CLI and `get_secret()` examples.
+  The wheel ships the `aws/` folder as `py_serverless_kit/aws`.
+
 ## [1.10.5] - 2026-10-24
 
 ### Fixed

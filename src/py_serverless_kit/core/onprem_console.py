@@ -58,6 +58,9 @@ CONSOLES: Dict[str, Dict[str, Any]] = {
                                                                      "sqs get-queue-attributes --queue-url http://localhost:4566/000000000000/jobs --attribute-names All"]},
     "elasticmq": {"label": "aws sqs (helper)", "input": "cli", "examples": ["sqs list-queues",
                                                                             "sqs get-queue-attributes --queue-url http://elasticmq:9324/000000000000/jobs --attribute-names All"]},
+    "secretsmanager": {"label": "aws secretsmanager (helper)", "input": "cli", "examples": [
+        "secretsmanager list-secrets", "secretsmanager create-secret --name api-key --secret-string abc123",
+        "secretsmanager get-secret-value --secret-id api-key", "secretsmanager get-random-password"]},
     "openbao": {"label": "bao (Vault CLI)", "input": "cli", "examples": ["kv list secret", "kv get secret/db-password",
                                                                        "kv put secret/api-key value=abc123", "status"]},
     "memcached": {"label": "memcached text protocol", "input": "text", "examples": ["stats", "stats items", "version"]},
@@ -65,6 +68,8 @@ CONSOLES: Dict[str, Dict[str, Any]] = {
     "fake-gcs": {"label": "Cloud Storage JSON API (GET path)", "input": "text", "examples": ["/storage/v1/b",
                                                                                               "/storage/v1/b/files/o"]},
 }
+
+CONSOLES["secretsmanager-node"] = CONSOLES["secretsmanager"]
 
 
 class ConsoleError(Exception):
@@ -157,7 +162,7 @@ def command_args(entry: Dict[str, Any], line: str) -> Tuple[str, List[str]]:
     if service == "minio":
         script = 'mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc "$@"'
         return "exec", ["sh", "-c", script, "mc", *_split(line)]
-    if service == "rustfs":
+    if service in ("rustfs", "secretsmanager", "secretsmanager-node"):
         access, secret = _secret(entry, "_ACCESS_KEY"), _secret(entry, "_SECRET_KEY")
         return AWS_CLI, ["env", f"AWS_ACCESS_KEY_ID={access}", f"AWS_SECRET_ACCESS_KEY={secret}",
                          "AWS_DEFAULT_REGION=us-east-1", "aws", "--endpoint-url", f"http://{container}:{port}",

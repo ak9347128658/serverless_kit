@@ -195,7 +195,7 @@ put_secret("last-run", "2026-10-22")                 # Vault / OpenBao and Secre
 The store comes from environment variables, so the code does not change: `PSKIT_SECRETS_DRIVER` = `vault`
 (HashiCorp Vault / OpenBao, with `PSKIT_SECRETS_URL` and `_TOKEN`), `aws` (AWS Secrets Manager; Lambda's credentials)
 or `env` (default: `PSKIT_SECRET_<NAME>`, then `<NAME>`). `store="other"` reads `PSKIT_OTHER_*`. Values are cached for
-60 s. On premises a one-click OpenBao or LocalStack writes these variables for you:
+60 s. On premises a one-click OpenBao, Secrets Manager compatible server or LocalStack writes these variables for you:
 [resource-guides/onprem/secrets.md](resource-guides/onprem/secrets.md).
 
 ## Environment variables

@@ -3,7 +3,8 @@
 * **Object storage**: S3 (MinIO, RustFS, LocalStack, LocalEmu) and Cloud Storage (fake-gcs-server): buckets, folders,
   paginated object lists, upload / download / delete / copy / rename, metadata, share links (S3 presigned URLs),
   bucket versioning and policies (S3).
-* **Secrets**: OpenBao / Vault KV v2 (folders, versions) and AWS Secrets Manager emulators (LocalStack, LocalEmu).
+* **Secrets**: OpenBao / Vault KV v2 (folders, versions) and AWS Secrets Manager APIs (LocalStack, LocalEmu and
+  pskit's own Secrets Manager compatible server, which checks the signature with its keys).
   OpenBao's release images ship without its web UI, so this is the UI for it.
 
 Requests go to the service's address and port, or over SSH to ``127.0.0.1:<port>`` on its server when the port is not
@@ -38,6 +39,8 @@ BROWSERS: Dict[str, List[str]] = {
     "localemu": ["s3", "aws-secrets"],
     "fake-gcs": ["gcs"],
     "openbao": ["vault"],
+    "secretsmanager": ["aws-secrets"],
+    "secretsmanager-node": ["aws-secrets"],
 }
 _BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
@@ -511,12 +514,15 @@ def _vault(entry: Dict[str, Any], action: str, body: Dict[str, Any]) -> Dict[str
 def _aws_secrets(entry: Dict[str, Any], action: str, body: Dict[str, Any]) -> Dict[str, Any]:
     control = _client(entry)
     host = control.base_url.split("://", 1)[1]
+    # The emulators accept any key; pskit's Secrets Manager server checks the signature with the service's keys.
+    access = _env_value(entry, "_ACCESS_KEY") or "test"
+    secret = _env_value(entry, "_SECRET_KEY") or "test"
 
     def call(target: str, payload: Dict[str, Any], ok: Tuple[int, ...] = (200,)) -> Tuple[int, Dict[str, Any]]:
         data = json.dumps(payload).encode()
         headers = sign("POST", host, "/", {}, {"content-type": "application/x-amz-json-1.1",
                                                 "x-amz-target": f"secretsmanager.{target}"},
-                       hashlib.sha256(data).hexdigest(), "test", "test", REGION, datetime.now(timezone.utc),
+                       hashlib.sha256(data).hexdigest(), access, secret, REGION, datetime.now(timezone.utc),
                        service="secretsmanager")
         status, _h, out = _fetch(control, "POST", "/", data, headers)
         parsed = json.loads(out) if out.strip() else {}

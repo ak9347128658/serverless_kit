@@ -30,6 +30,7 @@ one. It can also install Python or Docker on an SSH server.
 | SMTP server (Node.js) | smtp: runs functions with each mail | `smtp` trigger ([guide](../../smtp/README.md)) | 25 | none | DNS guide |
 | Python 3, Docker | runtime on an SSH server | — | — | — | |
 | LocalEmu | queue, storage, secrets | `sqs`, `s3`, Secrets Manager (one port) | 4566 | none | Dashboard (`/_localemu/dashboard`) and pskit's browser |
+| AWS Secrets Manager compatible (Python / Node.js) | secrets (`aws` driver) | `get_secret()`, boto3, AWS SDKs with the endpoint; SigV4 with the user / password | 4584 | data directory | Secrets console (`/ui/`) and pskit's browser |
 | Infisical | secrets (`infisical` driver) | `get_secret()` with a machine identity | 8080 | — | Infisical web UI (own sign-up) |
 | Grafana | dashboards | URL, admin user and password | 3000 | data directory | Grafana |
 | Prometheus | metrics | URL | 9090 | — | Prometheus UI |
@@ -61,7 +62,7 @@ opens pskit's UI in the studio:
 | MinIO, RustFS, LocalStack, LocalEmu | **Buckets (S3)** | Create and delete buckets (with every object and old version); folders and breadcrumbs; filter by name; 25 to 1000 objects per page with next / previous; upload several files (up to 64 MB each); download; info (size, type, ETag, metadata); old versions (list, download); rename / move and copy; share links valid 1 hour, 1 day or 7 days (S3 presigned URLs); bucket versioning on / off; bucket policy (private, public read, or your JSON) |
 | fake-gcs-server | **Buckets (Cloud Storage)** | The same, without versioning, policies and signed links |
 | OpenBao | **Secrets** | Folders, open a secret (values hidden until *Show values*), copy a value, versions (pick an old one), add / edit (each save is a new version), delete |
-| LocalStack, LocalEmu | **Secrets (Secrets Manager)** | List with paging, open, add / edit, delete |
+| LocalStack, LocalEmu, AWS Secrets Manager compatible | **Secrets (Secrets Manager)** | List with paging, open, add / edit, delete |
 
 The studio talks to the service from your machine. When its port is closed by a firewall, it goes over the server's
 SSH login instead (`127.0.0.1:<port>` on the server). Credentials stay in `.pskit/onprem-services.json` and never

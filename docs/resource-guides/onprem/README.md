@@ -16,7 +16,7 @@ triggers (studio: *Resources → On-prem services*; CLI: `pskit resources onprem
 | `database` | — | self-hosted PostgreSQL / MySQL, a cloud database | [database.md](database.md) |
 | `cache` | — | Redis / Valkey, Memcached | [cache.md](cache.md) |
 | `custom` | — | SMTP, LDAP, internal APIs, anything | [custom.md](custom.md) |
-| secrets | — | OpenBao / Vault, AWS Secrets Manager (LocalStack on premises), environment variables: `get_secret()` | [secrets.md](secrets.md) |
+| secrets | — | OpenBao / Vault, AWS Secrets Manager (pskit's compatible server or LocalStack on premises), environment variables: `get_secret()` | [secrets.md](secrets.md) |
 
 ## How the host uses resources
 

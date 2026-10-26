@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
-from . import onprem_smtp
+from . import onprem_secretsmanager, onprem_smtp
 from .onprem_apps import DEFAULT_USERS, NO_AUTH_APPS, SELF_LOGIN, apps
 from .onprem_browser import browsers_for
 from .onprem_runtimes import RUNTIME_SPECS, check_version, install_script
@@ -523,6 +523,24 @@ SERVICES: Dict[str, Dict[str, Any]] = {
         group="Mail",
     ),
 }
+
+# Built by core/onprem_secretsmanager.py from aws/secretsmanager: pskit's AWS Secrets Manager compatible server.
+for _name, _sm in onprem_secretsmanager.SERVICES.items():
+    SERVICES[_name] = _svc(
+        f"AWS Secrets Manager compatible ({_sm['lang']})",
+        _sm["image"],
+        onprem_secretsmanager.PORT,
+        ("secrets",),
+        data="/data",
+        health=onprem_secretsmanager.health(_name),
+        backup="tar czf - -C /data .",
+        backup_ext="tar.gz",
+        notes=f"pskit's own Secrets Manager server ({_sm['lang']}, code in aws/secretsmanager): the Secrets Manager "
+        "API with SigV4 authentication (user = access key ID, password = secret access key). boto3, the AWS SDKs, "
+        "the AWS CLI and get_secret() work with its endpoint. Versions and stages, tags, delete with a recovery "
+        "window, restore. Its own web console (/ui/) signs in with the same user and password.",
+        gui=({"port": onprem_secretsmanager.PORT, "path": "/ui/", "label": "Secrets console", "login": "user"},),
+    )
 
 for _name, _path in (("azurite", "/"), ("fake-gcs", "/storage/v1/b"), ("elasticmq", "/"), ("mailpit", "/")):
     SERVICES[_name]["ready_path"] = _path
@@ -1463,6 +1481,10 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
                                  "client_secret_env": f"{prefix}_CLIENT_SECRET", "project_id_env": f"{prefix}_PROJECT_ID"}
             notes.append(f"open {url}, create the admin account, a project and a machine identity (Universal Auth); "
                          f"fill {prefix}_CLIENT_ID, {prefix}_CLIENT_SECRET and {prefix}_PROJECT_ID in the env file")
+        elif service in onprem_secretsmanager.SERVICES:
+            conn = onprem_secretsmanager.connection(req, password, prefix)
+            env.update(conn["env"])
+            res["connection"] = conn["connection"]
         elif service == "openbao":
             env.update({f"{prefix}_DRIVER": "vault", f"{prefix}_URL": url, f"{prefix}_TOKEN": password,
                         f"{prefix}_MOUNT": "secret"})
@@ -1625,7 +1647,10 @@ def create(
     sh(docker_argv(target, ["pull", req["image"]]))
     if req["volume"]:
         _prepare_volume(req, spec, target, sh, emit)
-    sh(docker_argv(target, run_args(req, password)))
+    if req["service"] in onprem_secretsmanager.SERVICES:
+        onprem_secretsmanager.launch(req, password, target, sh)
+    else:
+        sh(docker_argv(target, run_args(req, password)))
     if req["service"] == "smtp":
         emit("installing smtp-server and mailparser in the container (once, about a minute)...")
         wait_seconds = max(wait_seconds, 300)
@@ -2281,16 +2306,20 @@ def service_usage(root: Path, key: str, *, reveal: bool = False, probe: bool = T
             + ":\n"
         )
         md.append("```bash\n" + "\n".join(exports) + "\n```\n")
-    flavor = flavor_for(str(res.get("type")), res.get("options") or {}, res.get("connection") or {}, entry["service"])
-    snip = direct(flavor, values) if flavor else None
-    md.append(markdown(
-        "Use it from any program",
-        "Any script, web app, cron job or service (not only pskit functions) can add, read and consume data "
-        "with the service's own client library:",
-        None,
-        snip,
-        "With the client library",
-    ))
+    if entry["service"] in onprem_secretsmanager.SERVICES:
+        md.append(onprem_secretsmanager.usage_markdown(entry, _var_prefix(key)))
+    else:
+        flavor = flavor_for(str(res.get("type")), res.get("options") or {}, res.get("connection") or {},
+                            entry["service"])
+        snip = direct(flavor, values) if flavor else None
+        md.append(markdown(
+            "Use it from any program",
+            "Any script, web app, cron job or service (not only pskit functions) can add, read and consume data "
+            "with the service's own client library:",
+            None,
+            snip,
+            "With the client library",
+        ))
     md.append(
         "## Use it from pskit functions\n\n"
         f"Add it to `pskit.yml` (*Add to pskit.yml*, or it was added on create), then open **Resources → How to use** "
