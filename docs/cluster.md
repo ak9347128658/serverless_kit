@@ -397,6 +397,7 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 | What | Where |
 |---|---|
 | Clusters, joined servers, load balancer, limits, alert settings, recent alerts, deployments | `.pskit/onprem-clusters.json` (out of git) |
+| All of the above on another machine | `pskit settings export` here, `pskit settings import` there (one encrypted file with the SSH logins and keys; [cli.md](cli.md#pskit-settings)) |
 | The load balancer's nginx config | `~/pskit-cluster/lb/conf.d/` on the load balancer server (one file per deployment) |
 | SSH logins | the saved servers (`.pskit/onprem-servers.json`; passwords in `.pskit/ssh/`) |
 | Join tokens | never stored: read from the master at each join; the join script deletes itself |

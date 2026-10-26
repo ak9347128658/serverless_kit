@@ -149,6 +149,9 @@ Operate
               pskit cluster requests prod --follow
               pskit cluster list
               pskit cluster remove prod --yes
+  settings    export | import  (.pskit settings and secrets to another machine, encrypted)
+              pskit settings export -o prod.pskit-settings
+              pskit settings import prod.pskit-settings
   client      info | install-node | tunnel
               pskit client info
               pskit client install-node
@@ -1773,6 +1776,88 @@ def cluster_balancer_logs(name: str, lines: int, config_path: Optional[str]) -> 
     from ..core.onprem_cluster import balancer_logs
 
     click.echo(_cluster_call(balancer_logs, _cluster_root(config_path), name, lines).rstrip("\n"))
+
+
+# ----------------------------------------------------------------------------- settings
+@cli.group(short_help="Export / import this project's .pskit settings and secrets (encrypted).")
+def settings() -> None:
+    """Move the settings .pskit keeps out of git to another machine: one passphrase-encrypted file.
+
+    \b
+    Inside: saved servers, scaling clusters (and load balancers), on-prem services with their passwords,
+    SSH passwords and the SSH keys the servers use (also from ~/.ssh), where each on-prem stage was last
+    deployed, studio test events, and env files named by env_file in pskit.yml. Not inside: Terraform state.
+
+    \b
+    Examples:
+      pskit settings export -o prod.pskit-settings     # asks for a passphrase (twice)
+      pskit settings import prod.pskit-settings --dry-run
+      pskit settings import prod.pskit-settings        # merges; --replace drops entries the file lacks
+      PSKIT_SETTINGS_PASSPHRASE=... pskit settings import prod.pskit-settings --yes   # from a script
+    """
+
+
+def _passphrase(confirm: bool) -> str:
+    value = os.environ.get("PSKIT_SETTINGS_PASSPHRASE")
+    if value:
+        return value
+    return str(click.prompt("Passphrase", hide_input=True, confirmation_prompt=confirm))
+
+
+@settings.command("export")
+@click.option("-o", "--output", default=None, help="File to write (default: <service>.pskit-settings).")
+@_CONFIG_OPTION
+def settings_export(output: Optional[str], config_path: Optional[str]) -> None:
+    """Write every local setting and secret of this project to one encrypted file."""
+    from ..core.settings_bundle import SettingsError, env_files_of, export_settings
+
+    root, _path, raw = _raw_project(config_path)
+    target = Path(output or f"{raw.get('service') or 'pskit'}.pskit-settings")
+    try:
+        text, summary = export_settings(root, _passphrase(True), env_files=env_files_of(raw), pskit_version=__version__)
+    except SettingsError as exc:
+        raise click.ClickException(str(exc)) from None
+    target.write_bytes(text.encode("utf-8"))
+    for group, names in sorted((summary.get("entries") or {}).items()):
+        echo(f"  {group}: {', '.join(names) or '-'}")
+    echo(f"  {len(summary['files'])} file(s), {len(summary['keys'])} SSH key file(s) from outside the project")
+    for warning in summary["warnings"]:
+        echo(f"  WARNING: {warning}")
+    ok(f"wrote {target}. It holds passwords and keys: share it only with the passphrase kept apart.")
+
+
+@settings.command("import")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--replace", is_flag=True, help="Drop saved servers, clusters and services the file does not have.")
+@click.option("--dry-run", is_flag=True, help="Only show what would change.")
+@click.option("--yes", is_flag=True, help="Do not ask.")
+@_CONFIG_OPTION
+def settings_import(file: str, replace: bool, dry_run: bool, yes: bool, config_path: Optional[str]) -> None:
+    """Write the settings of an exported FILE into this project (the current ones are backed up first)."""
+    from ..core.settings_bundle import SettingsError, decrypt, import_settings, preview
+
+    root, _path, _raw = _raw_project(config_path)
+    try:
+        payload = decrypt(Path(file).read_text("utf-8"), _passphrase(False))
+        plan = preview(root, payload, replace=replace)
+    except SettingsError as exc:
+        raise click.ClickException(str(exc)) from None
+    echo(f"  exported {plan.get('created_at')} with pskit {plan.get('pskit_version') or '?'} from {plan.get('source_root')}")
+    for group, change in sorted(plan["stores"].items()):
+        parts = [f"{k} {', '.join(v)}" for k, v in change.items() if v]
+        echo(f"  {group}: {'; '.join(parts) or 'nothing'}")
+    for item in plan["changes"]:
+        echo(f"  {item['action']:<8} {item['path']}")
+    for key in plan["key_files"]:
+        echo(f"  key      {key['source']} -> {key['path']}")
+    if dry_run:
+        return
+    if not yes:
+        click.confirm(f"Import into {root}?", abort=True)
+    result = import_settings(root, payload, replace=replace)
+    if result.get("backup"):
+        echo(f"  previous settings saved to {result['backup']}")
+    ok(f"imported {len(result['written'])} file(s)")
 
 
 # ----------------------------------------------------------------------------- client

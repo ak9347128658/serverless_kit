@@ -211,6 +211,43 @@ Scale on-prem functions over a master plus joined servers (Docker Swarm, Kuberne
 (`--server NAME` goes back to one server; the stage remembers either). `pskit resources onprem create KEY --service S
 --cluster NAME [--node SERVER]` places a resource on a server of the cluster.
 
+## `pskit settings`
+
+`.pskit` is kept out of git, so a fresh clone on another machine has no saved servers, clusters or SSH logins.
+`settings` moves them in one passphrase-encrypted file. In the studio: *Setup & credentials → Move settings to
+another machine*.
+
+| Command | |
+|---|---|
+| `settings export [-o FILE]` | write `<service>.pskit-settings` (asks for a passphrase twice) |
+| `settings import FILE [--dry-run] [--replace] [--yes]` | show what changes, back up the current settings to `.pskit/backups/settings-<time>.json`, then write them |
+
+What the file holds:
+
+| Inside | |
+|---|---|
+| `.pskit/onprem-servers.json` | saved servers |
+| `.pskit/onprem-clusters.json` | scaling clusters, their load balancers, deployments, alert settings |
+| `.pskit/onprem-services.json` | on-prem services (Redis, Postgres, MinIO, ...) with their passwords and tokens |
+| `.pskit/ssh/` | SSH passwords typed in the studio |
+| SSH key files | keys the servers and services use, also from outside the project (`~/.ssh/edge.pem`): written to `.pskit/ssh/keys/` on import, and the settings point there |
+| `.pskit/onprem-<stage>/onprem_deployed.json`, `deployment.json` | where each on-prem stage was last deployed, with its admin token, so `pskit logs`, `test`, `info` and the studio reach it at once |
+| `.pskit/studio/test-events.json` | the studio's saved test events |
+| env files | files named by `env_file` in `pskit.yml`, when they are inside the project |
+
+Not inside: Terraform state (on-prem deploys do not need it; keep a cloud stage's state in a remote backend),
+build output and backups. Paths inside the project are stored relative to it, so the project can sit in another
+folder, or on another OS, after the import.
+
+**Merge or replace.** By default saved servers, clusters and services merge by name: entries in the file are
+added or replace the local ones with the same name, and the others stay. `--replace` (studio: *Replace*) drops
+local entries the file does not have. Other files are replaced.
+
+**Encryption.** The file is always encrypted (passphrase of at least 8 characters): scrypt derives the keys, and
+the payload is encrypted and authenticated with HMAC-SHA256 (encrypt-then-MAC). A wrong passphrase or a changed
+file is refused before anything is written. Send the file and the passphrase by different channels. From a script,
+set `PSKIT_SETTINGS_PASSPHRASE` instead of typing it.
+
 ## `pskit client`
 
 Call the deployed on-prem host from scripts. Details: [client.md](client.md).
@@ -467,3 +504,4 @@ pskit tf -- import aws_s3_bucket.b_uploads my-existing-bucket
 | `PSKIT_TERRAFORM_BIN` | path or name of `terraform` / `tofu` |
 | `PSKIT_LOG_FORMAT`, `PSKIT_LOG_LEVEL`, `LOG_LEVEL` | runtime logging (CLI defaults to `text`) |
 | `PSKIT_DEBUG` | include exception details in local/remote 500s |
+| `PSKIT_SETTINGS_PASSPHRASE` | `pskit settings export` / `import` without a prompt |

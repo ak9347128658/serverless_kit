@@ -143,7 +143,7 @@ def make_handler(app: Studio) -> type:
                 length = int(self.headers.get("content-length") or "0")
             except ValueError:
                 raise StudioError(400, "invalid content-length") from None
-            limit = MAX_UPLOAD_BODY if "/browse/" in self.path else MAX_BODY
+            limit = MAX_UPLOAD_BODY if "/browse/" in self.path or "/settings-bundle/" in self.path else MAX_BODY
             if length < 0 or length > limit:
                 raise StudioError(413, f"request body must be at most {limit} bytes")
             return length
@@ -374,6 +374,8 @@ def make_handler(app: Studio) -> type:
                 action = str(body.get("action") or "")
                 job = app.jobs.run_process("login", system.login_command(action), label=f"login: {action}")
                 return 202, {"job_id": job.id}
+            if parts and parts[0] == "settings-bundle" and method == "POST":
+                return self._settings_bundle(parts[1:], _obj(self._body()))
             if parts == ["setup", "ssh-test"] and method == "POST":
                 body = _obj(self._body())
                 job = app.jobs.run_process("ssh-test", system.ssh_command(body.get("deploy")), label="SSH test")
@@ -547,6 +549,29 @@ def make_handler(app: Studio) -> type:
             except svc.ServiceError as exc:
                 raise StudioError(400, str(exc)) from None
             raise StudioError(404 if method == "GET" else 405, "unknown on-prem service endpoint")
+
+        def _settings_bundle(self, rest: List[str], body: Dict[str, Any]) -> Tuple[int, Any]:
+            """Export / preview / import the project's ``.pskit`` settings and secrets as one encrypted file."""
+            from ..core import settings_bundle as bundle
+
+            root = app.root
+            passphrase = str(body.get("passphrase") or "")
+            try:
+                if rest == ["export"]:
+                    raw = app.raw_config()
+                    text, summary = bundle.export_settings(root, passphrase, env_files=bundle.env_files_of(raw),
+                                                           pskit_version=__version__)
+                    name = f"{raw.get('service') or 'pskit'}{bundle.SUFFIX}"
+                    return 200, {"filename": name, "content": text, "summary": summary}
+                if rest in (["preview"], ["import"]):
+                    payload = bundle.decrypt(str(body.get("content") or ""), passphrase)
+                    replace = bool(body.get("replace"))
+                    if rest == ["preview"]:
+                        return 200, bundle.preview(root, payload, replace=replace)
+                    return 200, bundle.import_settings(root, payload, replace=replace)
+            except bundle.SettingsError as exc:
+                raise StudioError(400, str(exc)) from None
+            raise StudioError(404, "unknown settings endpoint")
 
         def _onprem_clusters(self, method: str, rest: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
             """Scaling clusters (Swarm / Kubernetes / Nomad): create, join / remove servers, monitor, scale, alerts."""

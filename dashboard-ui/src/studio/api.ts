@@ -6,6 +6,9 @@ import type {
   ClusterStatus,
   OnPremCluster,
   OnPremClustersState,
+  SettingsImportResult,
+  SettingsPreview,
+  SettingsSummary,
   DiscoverResult,
   OnPremConsoleInfo,
   OnPremConsoleResult,
@@ -188,6 +191,12 @@ export const api = {
     request<Record<string, unknown>>("POST", "/api/setup/aws-profile", body),
   login: (action: string) => request<{ job_id: string }>("POST", "/api/setup/login", { action }),
   sshTest: (deploy: JsonObject) => request<{ job_id: string }>("POST", "/api/setup/ssh-test", { deploy }),
+  settingsExport: (passphrase: string) =>
+    request<{ filename: string; content: string; summary: SettingsSummary }>("POST", "/api/settings-bundle/export", { passphrase }),
+  settingsPreview: (content: string, passphrase: string, replace: boolean) =>
+    request<SettingsPreview>("POST", "/api/settings-bundle/preview", { content, passphrase, replace }),
+  settingsImport: (content: string, passphrase: string, replace: boolean) =>
+    request<SettingsImportResult>("POST", "/api/settings-bundle/import", { content, passphrase, replace }),
   logs: (
     provider: string,
     stage: string,

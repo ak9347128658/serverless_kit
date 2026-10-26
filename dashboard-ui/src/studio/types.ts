@@ -480,6 +480,32 @@ export interface GuidePage {
   markdown: string;
 }
 
+/** What a `.pskit-settings` file holds (names only, never secrets). */
+export interface SettingsSummary {
+  created_at?: string;
+  pskit_version?: string;
+  source_root?: string;
+  files: string[];
+  /** SSH key files from outside the project, by their path on the exporting machine. */
+  keys: string[];
+  warnings: string[];
+  /** `<store>.<group>` (e.g. `onprem-servers.servers`) -> entry names. */
+  entries?: Record<string, string[]>;
+}
+
+/** `POST /api/settings-bundle/preview`: what an import would change. */
+export interface SettingsPreview extends SettingsSummary {
+  mode: "merge" | "replace";
+  changes: { path: string; action: "add" | "replace" }[];
+  stores: Record<string, { add: string[]; replace: string[]; keep?: string[]; remove?: string[] }>;
+  key_files: { source: string; path: string }[];
+}
+
+export interface SettingsImportResult extends SettingsPreview {
+  written: string[];
+  backup: string | null;
+}
+
 /** A scaling cluster (`GET /api/onprem-clusters`): Docker Swarm, Kubernetes (k3s) or Nomad on saved servers. */
 export type Orchestrator = "swarm" | "kubernetes" | "nomad";
 

@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-26
+
+### Added
+- **Move a project's local settings to another machine**: `pskit settings export [-o FILE]` and
+  `pskit settings import FILE [--dry-run] [--replace] [--yes]`, and in the studio *Setup & credentials → Move
+  settings to another machine* (export with a passphrase and download; pick a file, preview, import). `.pskit`
+  stays out of git; the file carries what a fresh clone lacks: saved servers, scaling clusters with their load
+  balancers, on-prem services with their passwords and tokens, SSH passwords, the SSH key files the servers use
+  (also from `~/.ssh`, written to `.pskit/ssh/keys/` on import), where each on-prem stage was last deployed (so
+  logs, test and info work at once), the studio's test events, and env files named by `env_file` in `pskit.yml`.
+  Paths inside the project are stored relative to it, so the project can live in another folder or OS.
+- The file is always encrypted with a passphrase (at least 8 characters): scrypt key derivation, HMAC-SHA256
+  counter-mode encryption and an HMAC-SHA256 tag (encrypt-then-MAC), standard library only. A wrong passphrase,
+  a changed file or a path that would leave the project is refused before anything is written.
+- Import merges saved servers, clusters and services by name (the file's entries win, others stay); `--replace`
+  drops local entries the file lacks. The current settings are backed up to `.pskit/backups/settings-<time>.json`
+  first. Terraform state is not included. `PSKIT_SETTINGS_PASSPHRASE` skips the prompt in scripts.
+- Studio API: `POST /api/settings-bundle/export`, `/preview` and `/import`.
+
 ## [2.0.0] - 2026-10-26
 
 ### Added

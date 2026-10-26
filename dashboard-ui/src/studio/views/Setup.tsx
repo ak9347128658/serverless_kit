@@ -2,13 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { ErrorBanner, Spinner } from "../../components/Feedback";
 import { api, errorMessage } from "../api";
 import { JobConsole } from "../components/Console";
-import { useToast } from "../components/Feedback";
+import { useConfirm, useToast } from "../components/Feedback";
 import { ComboInput, FieldForm, FormRow, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { useJob } from "../jobs";
 import { href } from "../route";
 import { useStudio } from "../store";
-import type { DevEnvStatus, EnvHint, JsonObject, SetupCheck, SetupResult } from "../types";
+import type { DevEnvStatus, EnvHint, JsonObject, SettingsPreview, SettingsSummary, SetupCheck, SetupResult } from "../types";
 import { asObject, getIn, str } from "../util";
 
 type Os = "windows" | "macos" | "linux";
@@ -163,6 +163,216 @@ export function SetupView() {
       )}
       <ProjectEnv />
       {provider === "onprem" && <OnPremConnection />}
+      <SettingsTransfer />
+    </div>
+  );
+}
+
+const MIN_PASSPHRASE = 8;
+
+/** Export / import the settings `.pskit` keeps out of git (servers, clusters, services, SSH logins) as one encrypted file. */
+function SettingsTransfer() {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [passphrase, setPassphrase] = useState("");
+  const [again, setAgain] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exported, setExported] = useState<SettingsSummary | null>(null);
+  const [file, setFile] = useState<{ name: string; content: string } | null>(null);
+  const [importPass, setImportPass] = useState("");
+  const [replace, setReplace] = useState(false);
+  const [plan, setPlan] = useState<SettingsPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const doExport = async () => {
+    setExporting(true);
+    try {
+      const r = await api.settingsExport(passphrase);
+      const url = URL.createObjectURL(new Blob([r.content], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = r.filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setExported(r.summary);
+      setPassphrase("");
+      setAgain("");
+      toast(`Downloaded ${r.filename}`, "ok");
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const pick = (picked: File | undefined) => {
+    setPlan(null);
+    setError(null);
+    if (!picked) return setFile(null);
+    picked.text().then(
+      (content) => setFile({ name: picked.name, content }),
+      () => setError("could not read that file"),
+    );
+  };
+
+  const doPreview = async (mode = replace) => {
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setPlan(await api.settingsPreview(file.content, importPass, mode));
+    } catch (exc) {
+      setPlan(null);
+      setError(errorMessage(exc));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doImport = async () => {
+    if (!file || !plan) return;
+    const removed = Object.values(plan.stores).reduce((n, s) => n + (s.remove?.length || 0), 0);
+    const ok = await confirm({
+      title: "Import these settings?",
+      body: `${plan.changes.length} file(s) are written into this project${removed ? `, and ${removed} saved entr${removed === 1 ? "y" : "ies"} not in the file are removed` : ""}. The current settings are backed up to .pskit/backups first.`,
+      confirmLabel: "Import",
+      danger: removed > 0,
+    });
+    if (ok !== "confirm") return;
+    setBusy(true);
+    try {
+      const r = await api.settingsImport(file.content, importPass, replace);
+      toast(`Imported ${r.written.length} file(s)${r.backup ? `; previous settings in ${r.backup}` : ""}`, "ok");
+      setPlan(null);
+      setFile(null);
+      setImportPass("");
+    } catch (exc) {
+      setError(errorMessage(exc));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const tooShort = passphrase.length > 0 && passphrase.length < MIN_PASSPHRASE;
+  const mismatch = again.length > 0 && again !== passphrase;
+  return (
+    <Section title="Move settings to another machine" hint="export / import .pskit, encrypted">
+      <p className="muted small">
+        <code className="mono">.pskit</code> stays out of git, so a fresh clone has no saved servers, clusters, load balancers, on-prem services or SSH
+        logins. Export them here, then import the file on the other machine (also from a shell: <code className="mono">pskit settings export</code> /{" "}
+        <code className="mono">import</code>). The file holds <b>secrets</b>: SSH passwords and keys (also those in <code className="mono">~/.ssh</code>),
+        service passwords and tokens, admin tokens and env files named in <code className="mono">pskit.yml</code>. It is always encrypted with your
+        passphrase; send the passphrase another way. Terraform state is not included.
+      </p>
+      <h4>Export</h4>
+      <div className="row-gap wrap">
+        <FormRow label="Passphrase" error={tooShort ? `at least ${MIN_PASSPHRASE} characters` : null}>
+          <TextInput type="password" value={passphrase} onChange={setPassphrase} invalid={tooShort} />
+        </FormRow>
+        <FormRow label="Again" error={mismatch ? "does not match" : null}>
+          <TextInput type="password" value={again} onChange={setAgain} invalid={mismatch} />
+        </FormRow>
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={exporting || passphrase.length < MIN_PASSPHRASE || again !== passphrase}
+          onClick={() => void doExport()}
+        >
+          {exporting ? "Exporting…" : "Export settings"}
+        </button>
+      </div>
+      {exported && <SettingsContents summary={exported} />}
+
+      <h4>Import</h4>
+      <div className="row-gap wrap">
+        <FormRow label="Settings file">
+          <input type="file" accept=".pskit-settings,.json" onChange={(e) => pick(e.target.files?.[0])} />
+        </FormRow>
+        <FormRow label="Passphrase">
+          <TextInput type="password" value={importPass} onChange={setImportPass} />
+        </FormRow>
+        <button type="button" className="btn" disabled={!file || !importPass || busy} onClick={() => void doPreview()}>
+          {busy && !plan ? "Checking…" : "Preview"}
+        </button>
+      </div>
+      <Toggle
+        checked={replace}
+        onChange={(on) => {
+          setReplace(on);
+          if (plan) void doPreview(on);
+        }}
+        label="Replace: remove saved servers, clusters and services that are not in the file (default: merge, the file's entries win)"
+      />
+      {error && <div className="form-error">{error}</div>}
+      {plan && (
+        <>
+          <p className="muted small">
+            Exported {plan.created_at ? new Date(plan.created_at).toLocaleString() : ""} with pskit {plan.pskit_version || "?"} from{" "}
+            <span className="mono">{plan.source_root}</span>.
+          </p>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Settings</th>
+                <th>Added</th>
+                <th>Replaced</th>
+                <th>{plan.mode === "replace" ? "Removed" : "Kept"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(plan.stores).map(([group, s]) => (
+                <tr key={group}>
+                  <td className="mono small">{group}</td>
+                  <td className="small">{s.add.join(", ") || "–"}</td>
+                  <td className="small">{s.replace.join(", ") || "–"}</td>
+                  <td className={`small${s.remove?.length ? " warn-text" : ""}`}>{(s.remove || s.keep || []).join(", ") || "–"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <ul className="small mono">
+            {plan.changes.map((c) => (
+              <li key={c.path}>
+                {c.action === "add" ? "+" : "~"} {c.path}
+              </li>
+            ))}
+            {plan.key_files.map((k) => (
+              <li key={k.path}>
+                + {k.path} <span className="muted">(SSH key from {k.source})</span>
+              </li>
+            ))}
+          </ul>
+          {plan.warnings.map((w) => (
+            <div key={w} className="hint-box warn small">
+              {w}
+            </div>
+          ))}
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void doImport()}>
+            {busy ? "Importing…" : `Import into this project`}
+          </button>
+        </>
+      )}
+    </Section>
+  );
+}
+
+function SettingsContents({ summary }: { summary: SettingsSummary }) {
+  return (
+    <div className="hint-box small">
+      <b>In the file:</b>{" "}
+      {Object.entries(summary.entries || {})
+        .map(([group, names]) => `${group.replace(/^onprem-/, "")}: ${names.join(", ") || "–"}`)
+        .join(" · ") || "no saved servers, clusters or services"}
+      {" · "}
+      {summary.files.length} file(s){summary.keys.length > 0 && `, ${summary.keys.length} SSH key(s) from outside the project`}
+      {summary.warnings.map((w) => (
+        <div key={w} className="warn-text">
+          {w}
+        </div>
+      ))}
     </div>
   );
 }

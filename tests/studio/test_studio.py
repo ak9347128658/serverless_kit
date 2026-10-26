@@ -596,3 +596,23 @@ def test_onprem_servers_console_and_terminal_api(studio, monkeypatch):
     assert call(base, "GET", "/api/onprem-terminals")[1]["terminals"][0]["url"] == "http://127.0.0.1:7681/t/"
     assert call(base, "POST", "/api/onprem-terminals/nope/stop", {})[0] == 400
     assert call(base, "POST", "/api/onprem-servers/edge1/remove", {})[0] == 200
+
+
+def test_settings_bundle_api(studio):
+    from py_serverless_kit.core import onprem_servers as srv
+
+    base, root, _ = studio
+    srv.save_server(root, "edge1", {"host": "10.0.0.5", "user": "root", "auth": "password", "password": "pw-1"})
+    assert call(base, "POST", "/api/settings-bundle/export", {"passphrase": "short"})[0] == 400
+    status, exported = call(base, "POST", "/api/settings-bundle/export", {"passphrase": "a long passphrase"})
+    assert status == 200 and exported["filename"].endswith(".pskit-settings")
+    assert "pw-1" not in exported["content"] and exported["summary"]["entries"]["onprem-servers.servers"] == ["edge1"]
+
+    srv.remove_server(root, "edge1")
+    body = {"content": exported["content"], "passphrase": "a long passphrase"}
+    status, plan = call(base, "POST", "/api/settings-bundle/preview", body)
+    assert status == 200 and plan["stores"]["onprem-servers.servers"]["add"] == ["edge1"]
+    assert call(base, "POST", "/api/settings-bundle/import", {**body, "passphrase": "wrong one!"})[0] == 400
+    status, result = call(base, "POST", "/api/settings-bundle/import", body)
+    assert status == 200 and ".pskit/onprem-servers.json" in result["written"]
+    assert Path(srv.load_servers(root)["edge1"]["password_file"]).read_text("utf-8") == "pw-1"
