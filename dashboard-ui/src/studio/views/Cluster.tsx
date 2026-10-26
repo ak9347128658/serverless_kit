@@ -9,7 +9,18 @@ import { ServerForm } from "../components/OnPremMachines";
 import { useJob } from "../jobs";
 import { href, navigate } from "../route";
 import { useStudio } from "../store";
-import type { ClusterBalance, ClusterNodeStatus, ClusterRequest, ClusterStatus, JsonObject, OnPremCluster, OnPremClustersState, Orchestrator } from "../types";
+import type {
+  ClusterAction,
+  ClusterBalance,
+  ClusterBalancerStatus,
+  ClusterNodeStatus,
+  ClusterRequest,
+  ClusterStatus,
+  JsonObject,
+  OnPremCluster,
+  OnPremClustersState,
+  Orchestrator,
+} from "../types";
 import { asObject } from "../util";
 import { DeployedLogs } from "./Logs";
 
@@ -113,6 +124,7 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
   const [statusError, setStatusError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
+  const [balancing, setBalancing] = useState(false);
   const job = useJob(jobId);
   const confirm = useConfirm();
   const toast = useToast();
@@ -153,7 +165,7 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
     }
   }, [job.status, reload, refresh]);
 
-  const startJob = async (action: "join" | "leave" | "scale" | "remove", body: JsonObject = {}) => {
+  const startJob = async (action: ClusterAction, body: JsonObject = {}) => {
     try {
       const { job_id } = await api.clusterAction(cluster.name, action, body);
       setJobId(job_id);
@@ -180,6 +192,16 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
       danger: true,
     });
     if (ok === "confirm") void startJob("remove");
+  };
+
+  const removeBalancer = async () => {
+    const ok = await confirm({
+      title: `Remove the load balancer of ${cluster.name}?`,
+      body: `nginx stops on ${cluster.balancer?.server}, so its URL stops answering. The functions keep running on the cluster and users reach the servers on their own ports again.`,
+      confirmLabel: "Remove load balancer",
+      danger: true,
+    });
+    if (ok === "confirm") void startJob("balancer-remove");
   };
 
   const nodes: ClusterNodeStatus[] =
@@ -289,6 +311,15 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
         {status?.orchestrator_error && <div className="form-error small">Master: {status.orchestrator_error}</div>}
       </div>
 
+      <LoadBalancer
+        cluster={cluster}
+        status={status?.balancer ?? null}
+        busy={job.status === "running"}
+        onSetUp={() => setBalancing(true)}
+        onSync={() => void startJob("balancer-sync")}
+        onRemove={() => void removeBalancer()}
+      />
+
       <Workloads cluster={cluster} status={status} onScale={(stack, replicas) => void startJob("scale", { stack, replicas })} />
       <LiveRequests cluster={cluster} />
       <ClusterLogs cluster={cluster} />
@@ -307,7 +338,228 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
           onServersChanged={reload}
         />
       )}
+      {balancing && (
+        <BalancerDrawer
+          cluster={cluster}
+          state={state}
+          onClose={() => setBalancing(false)}
+          onSet={(body) => {
+            setBalancing(false);
+            void startJob("balancer-set", body);
+          }}
+          onServersChanged={reload}
+        />
+      )}
     </>
+  );
+}
+
+/** The load balancer card: nginx on a server outside the cluster, its health, each deployment's URL, its log. */
+function LoadBalancer({
+  cluster,
+  status,
+  busy,
+  onSetUp,
+  onSync,
+  onRemove,
+}: {
+  cluster: OnPremCluster;
+  status: ClusterBalancerStatus | null;
+  busy: boolean;
+  onSetUp: () => void;
+  onSync: () => void;
+  onRemove: () => void;
+}) {
+  const balancer = cluster.balancer;
+  const [logs, setLogs] = useState<string | null>(null);
+  const [logsBusy, setLogsBusy] = useState(false);
+  const toast = useToast();
+
+  const loadLogs = async () => {
+    setLogsBusy(true);
+    try {
+      setLogs((await api.clusterBalancerLogs(cluster.name, 200)).text || "(no requests yet)");
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+    } finally {
+      setLogsBusy(false);
+    }
+  };
+
+  if (!balancer)
+    return (
+      <div className="card card-pad">
+        <div className="row-between wrap">
+          <div>
+            <h3>Load balancer</h3>
+            <p className="muted small">
+              Optional: one URL for the whole cluster. pskit runs nginx in Docker on one more saved server <b>outside</b> the cluster and spreads each
+              deployment&apos;s HTTP over the servers
+              {cluster.orchestrator === "nomad"
+                ? " (on Nomad the web replicas share the requests; the master's main replica is only a backup)"
+                : " (each server's port already reaches every replica; the load balancer adds one URL and skips a server that is down)"}
+              . Deploy, remove, join and leave keep it up to date. Same as <code className="mono">pskit cluster balancer set {cluster.name} SERVER</code>.
+            </p>
+          </div>
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={onSetUp}>
+            + Set up load balancer
+          </button>
+        </div>
+      </div>
+    );
+
+  const urls = Object.entries(status?.urls || balancer.urls || {});
+  return (
+    <div className="card card-pad">
+      <div className="row-between wrap">
+        <div>
+          <h3>Load balancer</h3>
+          <div className="muted small">
+            <b className="mono">{balancer.server}</b> ({balancer.address}) · nginx on port {balancer.port} ·{" "}
+            {!status ? (
+              "…"
+            ) : !status.reachable ? (
+              <span className="badge badge-err" title={status.error}>
+                offline
+              </span>
+            ) : (
+              <span className={`badge ${status.running ? "badge-ok" : "badge-err"}`}>nginx {status.state}</span>
+            )}
+          </div>
+        </div>
+        <span className="row-gap wrap">
+          <button type="button" className="btn btn-sm" disabled={busy} onClick={onSync} title="Rewrite its config from the servers and deployments now">
+            Sync now
+          </button>
+          <button type="button" className="btn btn-sm" disabled={logsBusy} onClick={() => void loadLogs()}>
+            {logsBusy ? "Loading…" : logs === null ? "Show log" : "Refresh log"}
+          </button>
+          <button type="button" className="btn btn-sm" disabled={busy} onClick={onSetUp}>
+            Change
+          </button>
+          <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={onRemove}>
+            Remove
+          </button>
+        </span>
+      </div>
+      {status && !status.reachable && status.error && <div className="form-error small">{status.error}</div>}
+      {status?.reachable && !status.running && (
+        <div className="hint-box warn">nginx is not running on {balancer.server}. Sync now starts it again (and shows why when it cannot).</div>
+      )}
+      {status?.reachable && (
+        <div className="row-gap wrap">
+          <FormRow label="CPU" inline>
+            <Meter value={status.cpu} limit={cluster.capacity.cpu} />
+          </FormRow>
+          <FormRow label="Memory" inline>
+            <Meter value={status.memory} limit={cluster.capacity.memory} />
+          </FormRow>
+          <FormRow label="Disk" inline>
+            <Meter value={status.disk} limit={cluster.capacity.disk} suffix={status.disk_gb ? ` of ${status.disk_gb} GB` : ""} />
+          </FormRow>
+        </div>
+      )}
+      {!urls.length ? (
+        <p className="muted small">Nothing deployed yet: each deployment gets its URL here when you deploy to the cluster.</p>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Deployment</th>
+              <th>Public URL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {urls.map(([stack, url]) => (
+              <tr key={stack}>
+                <td className="mono">{stack}</td>
+                <td className="mono small">
+                  <a href={url} target="_blank" rel="noreferrer">
+                    {url}
+                  </a>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p className="muted small">
+        Logs, tests and the admin API keep using the master&apos;s address. A second deployment on this cluster needs its own port here: <i>Port on the load
+        balancer</i> above.
+      </p>
+      {logs !== null && (
+        <>
+          <p className="muted small">
+            One line per request; <code className="mono">upstream=</code> is the server that answered. Same as{" "}
+            <code className="mono">pskit cluster balancer logs {cluster.name}</code>.
+          </p>
+          <pre className="code-block">{logs}</pre>
+        </>
+      )}
+    </div>
+  );
+}
+
+function BalancerDrawer({
+  cluster,
+  state,
+  onClose,
+  onSet,
+  onServersChanged,
+}: {
+  cluster: OnPremCluster;
+  state: OnPremClustersState;
+  onClose: () => void;
+  onSet: (body: JsonObject) => void;
+  onServersChanged: () => void;
+}) {
+  const current = cluster.balancer;
+  const [server, setServer] = useState(current?.server || "");
+  const [port, setPort] = useState<number | undefined>(current?.port ?? 80);
+  const [address, setAddress] = useState(current?.address || "");
+  const exclude = inCluster(state);
+  if (current) exclude.delete(current.server);
+  const moving = !!current && !!server && server !== current.server;
+  return (
+    <Drawer
+      open
+      title={current ? `Load balancer of ${cluster.name}` : `Set up a load balancer for ${cluster.name}`}
+      onClose={onClose}
+      actions={
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={!server || !port}
+          onClick={() => onSet({ server, port: port ?? 80, ...(address ? { address } : {}) })}
+        >
+          {current ? "Apply" : "Set up"}
+        </button>
+      }
+    >
+      <p className="muted small">
+        pskit installs Docker on the server over SSH and runs nginx there (container <code className="mono">pskit-lb</code>). The server must not be part of
+        a cluster, and must reach the functions&apos; port on every server of {cluster.name}. Users call its port.
+      </p>
+      <FormRow label="Server" required help="A saved server outside the cluster. Root or passwordless sudo.">
+        <ServerChoice
+          state={state}
+          value={server}
+          onChange={(name) => {
+            setServer(name);
+            setAddress(current && name === current.server ? current.address : "");
+          }}
+          exclude={exclude}
+          onServersChanged={onServersChanged}
+        />
+      </FormRow>
+      <FormRow label="Port" help="The port users call on the load balancer (80 for http://its-address/).">
+        <NumberInput value={port} min={1} max={65535} integer onChange={setPort} />
+      </FormRow>
+      <FormRow label="Address in the URL (optional)" help="The IP or name users reach it at. Default: its SSH host.">
+        <TextInput value={address} onChange={setAddress} placeholder="10.0.0.9" mono />
+      </FormRow>
+      {moving && <div className="hint-box">The load balancer moves to {server}; nginx on {current?.server} is removed once the new one runs.</div>}
+    </Drawer>
   );
 }
 
@@ -387,6 +639,22 @@ function ProjectBinding({ cluster }: { cluster: OnPremCluster }) {
           <FormRow label="Memory per replica (MB)" inline>
             <NumberInput value={num("memory", 256)} min={32} max={262144} integer onChange={(v) => set({ memory: v ?? 256 })} />
           </FormRow>
+          {cluster.balancer && (
+            <FormRow
+              label="Port on the load balancer"
+              help={`Empty: ${cluster.balancer.port}. Each deployment on this cluster needs its own (options.cluster.balancer_port).`}
+              inline
+            >
+              <NumberInput
+                value={typeof current.balancer_port === "number" ? current.balancer_port : undefined}
+                min={1}
+                max={65535}
+                integer
+                placeholder={String(cluster.balancer.port)}
+                onChange={(v) => set({ balancer_port: v === undefined ? undefined : v } as JsonObject)}
+              />
+            </FormRow>
+          )}
           <span className="muted small">
             Save, then <a href={href("deploy")}>Deploy</a>. Reservations decide how many replicas fit on a server; when none fit, the cluster counts as full.
           </span>
@@ -492,7 +760,7 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
       ) : (
         <>
           <p className="muted small">
-            Every request to <span className="mono">{cluster.deployments[stack]?.endpoint}</span> and which server and replica handled it (the main replica
+            Every request to <span className="mono">{cluster.balancer?.urls?.[stack] || cluster.deployments[stack]?.endpoint}</span> and which server and replica handled it (the main replica
             on the master runs schedules, queue / storage / topic triggers and workflows). The table lists every server, including ones with no traffic yet.
             Updates every 2 s while this card is on screen; the same as <code className="mono">pskit cluster requests {cluster.name} --follow</code>.
           </p>
@@ -504,6 +772,7 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
                   <tr>
                     <th>Server</th>
                     <th>Answers</th>
+                    {shape?.mode === "balancer" && <th>Load balancer</th>}
                     <th>HTTP</th>
                     <th>Share</th>
                     <th>URL</th>
@@ -524,6 +793,19 @@ function LiveRequests({ cluster }: { cluster: OnPremCluster }) {
                           </button>
                         </td>
                         <td>{row.serves === "main" ? "main replica" : "web replica"}</td>
+                        {shape?.mode === "balancer" && (
+                          <td>
+                            {row.balancer === "primary" ? (
+                              <span className="badge badge-ok">shares</span>
+                            ) : row.balancer === "backup" ? (
+                              <span className="badge" title="Answers only while every other server is down">
+                                backup
+                              </span>
+                            ) : (
+                              "–"
+                            )}
+                          </td>
+                        )}
                         <td>
                           <span className="live-bar" style={{ display: "inline-block", width: 80, verticalAlign: "middle" }}>
                             <span style={{ width: `${(100 * row.requests) / top}%` }} />
@@ -693,9 +975,20 @@ function Workloads({ cluster, status, onScale }: { cluster: OnPremCluster; statu
                     <div className="muted small mono">{dep.image}</div>
                   </td>
                   <td className="mono small">
-                    <a href={dep.endpoint} target="_blank" rel="noreferrer">
-                      {dep.endpoint}
-                    </a>
+                    {cluster.balancer?.urls?.[stack] ? (
+                      <>
+                        <a href={cluster.balancer.urls[stack]} target="_blank" rel="noreferrer" title="Public URL on the load balancer">
+                          {cluster.balancer.urls[stack]}
+                        </a>
+                        <div className="muted" title="The master: logs, tests and the admin API">
+                          {dep.endpoint}
+                        </div>
+                      </>
+                    ) : (
+                      <a href={dep.endpoint} target="_blank" rel="noreferrer">
+                        {dep.endpoint}
+                      </a>
+                    )}
                   </td>
                   <td className="small">
                     {live.length
@@ -892,8 +1185,9 @@ function ServerChoice({
   );
 }
 
+/** Servers already taken: members of a cluster, or a cluster's load balancer. */
 function inCluster(state: OnPremClustersState): Set<string> {
-  return new Set(state.clusters.flatMap((c) => c.nodes.map((n) => n.server)));
+  return new Set(state.clusters.flatMap((c) => [...c.nodes.map((n) => n.server), ...(c.balancer ? [c.balancer.server] : [])]));
 }
 
 function CreateClusterDrawer({

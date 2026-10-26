@@ -60,8 +60,9 @@ The main replica listens on the master's port. Each web replica listens on its o
 check does not go through a load balancer, and the deploy succeeds without one.
 
 Send traffic to the master and the main replica handles it. Send traffic to another server and that server's web
-replica handles it. Put nginx, HAProxy or Traefik in front of the servers only when you want a single URL that
-spreads requests across the web replicas.
+replica handles it. For a single URL that spreads requests across the web replicas, let pskit run a
+[load balancer](#load-balancer-one-url-for-the-whole-cluster-optional) on one more server, or put your own nginx,
+HAProxy or Traefik in front.
 
 While that wait runs, the deploy prints each Nomad allocation and the main replica's logs every 10 seconds, as
 they happen. If the port never answers, the output ends with `nomad job status` and those logs.
@@ -184,6 +185,83 @@ pskit resources onprem create orders-db --service postgres --cluster prod --node
 | Kubernetes (k3s) | 6443/tcp (to the master), 8472/udp, 10250/tcp |
 | Nomad | 4646-4648/tcp, 4648/udp |
 | **From users** | the functions' `port` (default 8080) on every server. Swarm and k3s spread HTTP from any server. On Nomad each server answers for itself |
+| **With a load balancer** | from users: its port (default 80) on the load balancer. From the load balancer: the functions' `port` on every cluster server |
+
+## Load balancer: one URL for the whole cluster (optional)
+
+Add one more saved server **outside** the cluster as its load balancer. pskit runs nginx there in Docker
+(container `pskit-lb`, host network) and spreads each deployment's HTTP over the cluster's servers. It works the
+same way for all three orchestrators:
+
+```
+                users ──► http://<lb1>/  (nginx on lb1, port 80)
+                              │  fewest open connections first
+            ┌─────────────────┼─────────────────┐
+            ▼                 ▼                 ▼
+     edge1 (master)       edge2 (join)      edge3 (join)      :8080 on each
+```
+
+```bash
+pskit resources onprem servers add lb1 --ssh root@10.0.0.9 --pem ~/.ssh/edge.pem
+pskit cluster balancer set prod lb1              # installs Docker + nginx on lb1; --port 8000 for another port
+pskit deploy --cluster prod
+#   pskit-shop-prod is running on cluster prod: http://10.0.0.5:8080
+#   Updating the load balancer on lb1 ...
+#     http://10.0.0.9 -> pskit-shop-prod on edge2, edge3 (backup edge1)
+#   Public URL (load balancer on lb1): http://10.0.0.9
+```
+
+| Orchestrator | Behind the load balancer |
+|---|---|
+| Swarm, k3s | every server (each server's port already reaches every web replica; the load balancer adds one URL and skips a server that is down) |
+| Nomad | the servers with a web replica. The master's main replica is a **backup**: it answers only while every web replica is down, so it stays free for schedules, queues and workflows. With no joined server yet, the master serves alone |
+
+**pskit keeps it up to date.** You do not edit nginx config:
+
+| When | What happens on the load balancer |
+|---|---|
+| `pskit deploy` | the deployment is added (or updated) and its URL printed |
+| `pskit cluster join` | the new server is added |
+| `pskit cluster leave` | the server is taken off **before** it is drained, so no request goes to a server that is stopping |
+| `pskit remove` | the deployment is taken off **before** its replicas stop, so users do not get 502 in between |
+| `pskit cluster balancer sync prod` | rewritten now (after the load balancer was offline during one of the above) |
+
+Each change is checked by `nginx -t` in a throwaway container first. A config nginx refuses leaves the running one
+untouched, and nginx reloads without dropping connections. If the load balancer is offline during a deploy, join
+or leave, that step still goes through and prints a warning with the `sync` command to run later.
+
+**Logs, tests and the admin API do not change.** The deployment's endpoint stays the master's address
+(`pskit info`, `pskit logs`, `pskit test` and the studio use it), and `pskit cluster requests` still shows which
+server handled each request. The load balancer has its own access log, one line per request with the server that
+answered:
+
+```bash
+pskit cluster balancer logs prod -n 200
+#   2026-10-26T05:39:44+00:00 203.0.113.7 port=80 "GET /hello HTTP/1.1" 200 17 0.004s upstream=10.0.0.6:8080 0.003s
+```
+
+`pskit cluster status prod` shows the load balancer's CPU, memory and disk, whether nginx runs, and each
+deployment's URL on it. `pskit cluster list` shows the same URLs.
+
+**Several deployments on one cluster** each need their own port on the load balancer. The first one uses the
+load balancer's port (80); give the others one in `pskit.yml`, and the deploy stops with this hint when two would
+share a port:
+
+```yaml
+provider:
+  name: onprem
+  options:
+    cluster: {name: prod, replicas: 3, balancer_port: 8081}
+```
+
+What nginx does with each request: picks the server with the fewest open connections; a server that fails 3 times
+rests for 10 seconds; a request that cannot connect, times out, or gets 502 / 503 / 504 is tried on another
+server (up to 3, never for a `POST` that already reached a server); WebSocket upgrades pass through; up to 100 MB
+request bodies and 900 seconds per request. It passes `X-Forwarded-For`, `X-Real-IP` and `X-Forwarded-Proto`.
+For HTTPS, put your TLS terminator in front of it, or use your own nginx / HAProxy instead of this one.
+
+`pskit cluster balancer remove prod` stops nginx and forgets the load balancer. The functions keep running on the
+cluster, and users reach the servers on their own ports again.
 
 ## Live requests: which server handled what
 
@@ -318,7 +396,8 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 
 | What | Where |
 |---|---|
-| Clusters, joined servers, limits, alert settings, recent alerts, deployments | `.pskit/onprem-clusters.json` (out of git) |
+| Clusters, joined servers, load balancer, limits, alert settings, recent alerts, deployments | `.pskit/onprem-clusters.json` (out of git) |
+| The load balancer's nginx config | `~/pskit-cluster/lb/conf.d/` on the load balancer server (one file per deployment) |
 | SSH logins | the saved servers (`.pskit/onprem-servers.json`; passwords in `.pskit/ssh/`) |
 | Join tokens | never stored: read from the master at each join; the join script deletes itself |
 | Scripts and manifests pskit runs | `~/pskit-cluster/` on the servers |
@@ -336,6 +415,8 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 | `pskit cluster alerts NAME [--function F] [--stage S] [--webhook URL] [--cooldown M] [--cpu/--memory/--disk %] [--test]` | alert settings |
 | `pskit cluster scale NAME --replicas N [--stack S]` | web replicas now (until the next deploy) |
 | `pskit cluster requests NAME [--follow] [--stack S]` | recent requests, and each server's URL with its share of HTTP |
+| `pskit cluster balancer set NAME SERVER [--port 80] [--address IP]` | nginx on a server outside the cluster: one URL for all of it |
+| `pskit cluster balancer sync NAME` / `logs NAME [-n 100]` / `remove NAME` | rewrite its config now / its access log / stop it |
 | `pskit cluster list` / `pskit cluster remove NAME` | list / forget a cluster |
 | `pskit deploy --cluster NAME` / `pskit deploy --server NAME` | deploy the functions to the cluster / to one server |
 | `pskit resources onprem create KEY --service S --cluster NAME [--node SERVER]` | a resource on a server of the cluster |
@@ -347,6 +428,8 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 * The main replica is one process on the master: schedules, built-in queues and workflow executions do not
   scale out. Use a queue driver (Redis, SQS, ...) when queue consumers must scale with the replicas.
 * Nomad serves each server on its own port. The master's port is the main replica, and each other server runs
-  one web replica. Add nginx, HAProxy or Traefik only when you want one URL for all of them.
+  one web replica. For one URL for all of them, add a [load balancer](#load-balancer-one-url-for-the-whole-cluster-optional).
+* The load balancer is one server: if it goes down, its URL does. For no single point there, put two behind a
+  floating IP (keepalived) or DNS with both addresses, each set up with the same nginx config.
 * The orchestrators' own security is yours to tighten: limit the cluster ports to your network, and enable Nomad
   ACLs or Kubernetes RBAC as your policies need.

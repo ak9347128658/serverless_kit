@@ -1,5 +1,6 @@
 import type { LogsResponse, LogStream } from "../types";
 import type {
+  ClusterAction,
   ClusterAlertEntry,
   ClusterRequests,
   ClusterStatus,
@@ -244,8 +245,10 @@ export const api = {
   clusterCheck: (name: string) => request<ClusterStatus>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/check`, {}),
   clusterTestAlert: (name: string) => request<ClusterAlertEntry>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/test-alert`, {}),
   clusterSettings: (name: string, body: JsonObject) => request<OnPremCluster>("PUT", `/api/onprem-clusters/${encodeURIComponent(name)}/settings`, body),
-  clusterAction: (name: string, action: "join" | "leave" | "scale" | "remove", body: JsonObject = {}) =>
+  clusterAction: (name: string, action: ClusterAction, body: JsonObject = {}) =>
     request<{ job_id: string }>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/${action}`, body),
+  clusterBalancerLogs: (name: string, lines: number) =>
+    request<{ text: string }>("GET", `/api/onprem-clusters/${encodeURIComponent(name)}/balancer-logs?lines=${lines}`),
   onpremApply: (raw: JsonObject, key: string, attach?: string[]) =>
     request<{ raw: JsonObject }>("POST", "/api/onprem-services/apply", { raw, key, attach }),
   onpremUnapply: (raw: JsonObject, key: string) => request<{ raw: JsonObject }>("POST", "/api/onprem-services/unapply", { raw, key }),

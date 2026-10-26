@@ -10,6 +10,11 @@ Functions use a cluster with ``provider.options.cluster`` in pskit.yml (``cluste
 changes: the host runs on one machine. Resources (``pskit resources onprem create``) run on one server, or on one
 server of a cluster (``--cluster prod``: the server with the most free memory, or ``--node``); see :func:`place`.
 
+A cluster can have a **load balancer**: one more saved server, outside the orchestrator, that runs nginx in Docker
+(``pskit cluster balancer set prod lb1``) and spreads each deployment's HTTP over the cluster's servers. pskit
+rewrites its config on every deploy, remove, join and leave; see :func:`set_balancer`. Logs, tests and the admin
+API keep going to the master, as without one.
+
 Stored in ``.pskit/onprem-clusters.json`` (out of git): orchestrator, master, joined servers, capacity limits,
 alert settings, recent alerts and what is deployed. Logins stay in the saved servers.
 """
@@ -52,6 +57,7 @@ ORCHESTRATORS: Dict[str, Dict[str, str]] = {
 }
 DEFAULT_CAPACITY = {"cpu": 85, "memory": 85, "disk": 90}
 DEFAULT_ALERT = {"function": "", "stage": "", "webhook": "", "cooldown_minutes": 30}
+DEFAULT_BALANCER_PORT = 80
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 _MAX_ALERTS = 50
 Emit = Callable[[str], None]
@@ -126,8 +132,19 @@ def public(name: str, item: Dict[str, Any]) -> Dict[str, Any]:
         "watch": item.get("watch") or {"enabled": False, "interval_seconds": 60},
         "alerts": list(item.get("alerts") or [])[-_MAX_ALERTS:],
         "deployments": item.get("deployments") or {},
+        "balancer": _balancer_public(item),
         "created_at": item.get("created_at"),
     }
+
+
+def _balancer_public(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The load balancer and each deployment's URL on it, or None."""
+    balancer = item.get("balancer")
+    if not isinstance(balancer, dict) or not balancer.get("server"):
+        return None
+    urls = {stack: _balancer_url(balancer, _listen_port(balancer, dep))
+            for stack, dep in sorted((item.get("deployments") or {}).items())}
+    return {**balancer, "urls": urls}
 
 
 def _now() -> str:
@@ -216,6 +233,7 @@ def create_cluster(
     for other, item in clusters.items():
         if master in (item.get("nodes") or {}):
             raise ClusterError(f"server {master!r} is already in cluster {other!r}")
+    _not_a_balancer(clusters, master)
     target = _target(root, master)
     if run is None:
         check_ssh_login(target)
@@ -250,6 +268,7 @@ def join_server(root: Path, name: str, server: str, emit: Emit, *, advertise: st
     for other, item in load_clusters(root).items():
         if server in (item.get("nodes") or {}):
             raise ClusterError(f"server {server!r} is already in cluster {other!r}")
+    _not_a_balancer(load_clusters(root), server)
     orch = cluster["orchestrator"]
     master = _target(root, cluster["master"])
     target = _target(root, server)
@@ -282,6 +301,7 @@ def join_server(root: Path, name: str, server: str, emit: Emit, *, advertise: st
     _update(root, name, lambda c: c.setdefault("nodes", {}).__setitem__(
         server, {"role": "worker", "node": node, "address": addr, "joined_at": _now()}))
     emit(f"{server} joined {name} as node {node}. Replicas spread to it as the orchestrator schedules them.")
+    sync_balancer(root, name, emit, run=run)
     return public(name, get_cluster(root, name))
 
 
@@ -297,6 +317,10 @@ def leave_server(root: Path, name: str, server: str, emit: Emit, *, run: Optiona
     master = _target(root, cluster["master"])
     node_name = str(node.get("node") or "")
     node_id = _nomad_node_id(master, node_name, emit, run) if orch == "nomad" else ""
+    if cluster.get("balancer"):
+        # Stop sending requests to it first, so draining does not cut requests in flight through the balancer.
+        others = {s: n for s, n in (cluster.get("nodes") or {}).items() if s != server}
+        sync_balancer(root, name, emit, run=run, cluster={**cluster, "nodes": others})
     emit(f"Draining {server} (node {node_name}) ...")
     _script(master, scripts.drain_script(orch, node_name, node_id), emit, run, label="drain", check=False)
     emit(f"Stopping the agent on {server} ...")
@@ -315,11 +339,16 @@ def remove_cluster(root: Path, name: str, emit: Emit) -> None:
     """Forget the cluster (servers keep their orchestrator; deployed functions keep running)."""
     with _LOCK:
         clusters = load_clusters(root)
-        if clusters.pop(str(name), None) is None:
+        removed = clusters.pop(str(name), None)
+        if removed is None:
             raise ClusterError(_unknown(root, name))
         _save(root, clusters)
     _untag_resources(root, name, None, emit)
     emit(f"Forgot cluster {name}. The servers keep running; remove deployments first with pskit remove.")
+    balancer = (removed.get("balancer") or {}).get("server")
+    if balancer:
+        emit(f"The load balancer on {balancer} keeps running too: pskit cluster balancer remove {name} first, or"
+             f" docker rm -f {scripts.BALANCER_CONTAINER} on {balancer}.")
 
 
 def _nomad_node_id(master: Dict[str, Any], node: str, emit: Emit, run: Optional[RunFn]) -> str:
@@ -509,9 +538,14 @@ def deploy_spec(root: Path, options: Dict[str, Any]) -> Dict[str, Any]:
         raise ClusterError("options.cluster.cpu must be 0.05..64 (CPU cores each replica reserves)")
     if isinstance(memory, bool) or not isinstance(memory, int) or not 32 <= memory <= 262144:
         raise ClusterError("options.cluster.memory must be 32..262144 (MB each replica reserves)")
-    unknown = sorted(set(body) - {"name", "replicas", "cpu", "memory"})
+    balancer_port = body.get("balancer_port")
+    if balancer_port is not None and (isinstance(balancer_port, bool) or not isinstance(balancer_port, int)
+                                      or not 1 <= balancer_port <= 65535):
+        raise ClusterError("options.cluster.balancer_port must be a port 1..65535 (on the cluster's load balancer)")
+    unknown = sorted(set(body) - {"name", "replicas", "cpu", "memory", "balancer_port"})
     if unknown:
-        raise ClusterError(f"unknown options.cluster keys {unknown}; expected name, replicas, cpu, memory")
+        raise ClusterError(f"unknown options.cluster keys {unknown}; expected name, replicas, cpu, memory,"
+                           " balancer_port")
     master = get_server_item(root, str(cluster["master"]))
     deploy = options.get("deploy")
     deploy = deploy if isinstance(deploy, dict) else {}
@@ -528,6 +562,8 @@ def deploy_spec(root: Path, options: Dict[str, Any]) -> Dict[str, Any]:
     options["deploy"] = new
     settings = {"name": name, "orchestrator": cluster["orchestrator"], "replicas": replicas, "cpu": float(cpu),
                 "memory": memory}
+    if balancer_port is not None:
+        settings["balancer_port"] = balancer_port
     options["cluster"] = settings
     return settings
 
@@ -555,6 +591,9 @@ def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn]
     orch = str(info["orchestrator"])
     stack = scripts.stack_name(str(spec["service"]), str(spec["stage"]))
     port = int(spec.get("port") or 8080)
+    root = Path(str(info.get("project_root") or app_dir.parents[2]))
+    balancer_port = int(info["balancer_port"]) if info.get("balancer_port") else None
+    _check_listen_port(root, str(info["name"]), stack, balancer_port)
     runner = _Runner(emit, run)
     emit(f"Building the function host image for {stack} ...")
     if run is None:
@@ -599,13 +638,20 @@ def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn]
     endpoint = str(spec.get("endpoint") or f"http://{info['advertise']}:{port}")
     record = {"service": spec["service"], "stage": spec["stage"], "image": image, "replicas": replicas, "port": port,
               "endpoint": endpoint, "work_dir": str(app_dir.parent.resolve()), "deployed_at": _now()}
-    root = Path(str(info.get("project_root") or app_dir.parents[2]))
+    if balancer_port:
+        record["balancer_port"] = balancer_port
     try:
-        _update(root, str(info["name"]), lambda c: c.setdefault("deployments", {}).__setitem__(stack, record))
+        cluster = _update(root, str(info["name"]), lambda c: c.setdefault("deployments", {}).__setitem__(stack, record))
     except ClusterError:
-        pass
+        cluster = {}
     emit(f"{stack} is running on cluster {info['name']}: {endpoint}")
-    if orch == "nomad":
+    balancer = cluster.get("balancer") if isinstance(cluster.get("balancer"), dict) else None
+    if balancer:
+        record["url"] = _balancer_url(balancer, _listen_port(balancer, record))
+        sync_balancer(root, str(info["name"]), emit, run=run)
+        emit(f"  Public URL (load balancer on {balancer['server']}): {record['url']}")
+        emit(f"  {endpoint} stays the master's address: logs, tests and the admin API use it.")
+    elif orch == "nomad":
         others = [name for name in nodes if name != master_server]
         where = ", ".join(others) if others else "no other server yet"
         emit("  Nomad does not load-balance. This address is the main replica on the master.")
@@ -631,13 +677,16 @@ def destroy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn
     info = json.loads((app_dir / CLUSTER_SPEC).read_text("utf-8"))
     stack = scripts.stack_name(str(spec["service"]), str(spec["stage"]))
     master = info["nodes"][str(info["master"])]
-    _script(master["target"], scripts.destroy_script(str(info["orchestrator"]), stack), emit, run,
-            label=f"destroy-{stack}", check=False)
     root = Path(str(info.get("project_root") or app_dir.parents[2]))
     try:
-        _update(root, str(info["name"]), lambda c: (c.get("deployments") or {}).pop(stack, None))
+        cluster = _update(root, str(info["name"]), lambda c: (c.get("deployments") or {}).pop(stack, None))
     except ClusterError:
-        pass
+        cluster = {}
+    if cluster.get("balancer"):
+        # Off the load balancer before the replicas stop, so it does not answer 502 in between.
+        sync_balancer(root, str(info["name"]), emit, run=run)
+    _script(master["target"], scripts.destroy_script(str(info["orchestrator"]), stack), emit, run,
+            label=f"destroy-{stack}", check=False)
 
 
 def scale(root: Path, name: str, stack: str, replicas: int, emit: Emit, run: Optional[RunFn] = None) -> Dict[str, Any]:
@@ -658,6 +707,221 @@ def scale(root: Path, name: str, stack: str, replicas: int, emit: Emit, run: Opt
     _update(root, name, lambda c: c["deployments"][stack].__setitem__("replicas", int(replicas)))
     emit(f"{stack}: {replicas} web replica(s)")
     return public(name, get_cluster(root, name))
+
+
+# ----------------------------------------------------------------------------------------------- load balancer
+def set_balancer(root: Path, name: str, server: str, emit: Emit, *, port: int = DEFAULT_BALANCER_PORT,
+                 address: str = "", run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Make saved server ``server`` (not a member of any cluster) the load balancer of cluster ``name``.
+
+    It runs nginx in Docker (container ``pskit-lb``, host network). Each deployment answers on ``port`` there
+    (``options.cluster.balancer_port`` gives one deployment its own) and is spread over the cluster's servers:
+    every server for Swarm and k3s; for Nomad the web replicas, with the master's main replica as a backup.
+    Running it again changes the port or address; naming another server moves the load balancer there."""
+    cluster = get_cluster(root, name)
+    if isinstance(port, bool) or not 1 <= int(port) <= 65535:
+        raise ClusterError("the load balancer port must be 1..65535")
+    clusters = load_clusters(root)
+    for other, item in clusters.items():
+        if server in (item.get("nodes") or {}):
+            raise ClusterError(f"server {server!r} is in cluster {other!r}. The load balancer is a server outside the"
+                               " cluster: save another one (pskit resources onprem servers add) and use it")
+    _not_a_balancer(clusters, server, allow=name)
+    target = _target(root, server)
+    if run is None:
+        check_ssh_login(target)
+    addr = address or _bind_address(target) or _ip(str(target["host"]))
+    try:
+        scripts._hostport(addr, int(port))
+    except ValueError as exc:
+        raise ClusterError(str(exc)) from None
+    previous: Dict[str, Any] = dict(cluster.get("balancer") or {})
+    balancer = {"server": server, "address": addr, "port": int(port), "set_at": _now()}
+    emit(f"Setting up the load balancer (nginx in Docker) on {server} ({addr}) ...")
+    _apply_balancer(root, name, {**cluster, "balancer": balancer}, emit, run)
+    _update(root, name, lambda c: c.__setitem__("balancer", balancer))
+    if previous.get("server") and previous["server"] != server:
+        emit(f"Removing the old load balancer from {previous['server']} ...")
+        _teardown_balancer(root, str(previous["server"]), emit, run)
+    emit(f"Load balancer of {name}: {_balancer_url(balancer, int(port))}. Deploys, removes, joins and leaves update it.")
+    return public(name, get_cluster(root, name))
+
+
+def remove_balancer(root: Path, name: str, emit: Emit, *, run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Stop nginx on the load balancer server and forget it (the deployments keep running on the cluster)."""
+    cluster = get_cluster(root, name)
+    balancer = cluster.get("balancer")
+    if not isinstance(balancer, dict) or not balancer.get("server"):
+        raise ClusterError(f"cluster {name} has no load balancer")
+    emit(f"Stopping the load balancer on {balancer['server']} ...")
+    _teardown_balancer(root, str(balancer["server"]), emit, run)
+    _update(root, name, lambda c: c.pop("balancer", None))
+    emit(f"Cluster {name} has no load balancer now. Users reach the servers on their own ports again.")
+    return public(name, get_cluster(root, name))
+
+
+def sync_balancer(root: Path, name: str, emit: Emit, *, run: Optional[RunFn] = None,
+                  cluster: Optional[Dict[str, Any]] = None, strict: bool = False) -> bool:
+    """Rewrite the load balancer's config from the cluster's servers and deployments (``cluster`` replaces the
+    saved one, e.g. without a server that is leaving). No load balancer: nothing to do.
+
+    A load balancer that cannot be reached only warns (the deploy or join itself went through) unless ``strict``."""
+    current = cluster if cluster is not None else get_cluster(root, name)
+    balancer = current.get("balancer")
+    if not isinstance(balancer, dict) or not balancer.get("server"):
+        if strict:
+            raise ClusterError(f"cluster {name} has no load balancer (pskit cluster balancer set {name} SERVER)")
+        return False
+    emit(f"Updating the load balancer on {balancer['server']} ...")
+    try:
+        _apply_balancer(root, name, current, emit, run)
+    except (ServiceError, ClusterError) as exc:
+        if strict:
+            raise
+        emit(f"  WARNING: could not update the load balancer on {balancer['server']}: {exc}."
+             f" Once it is reachable: pskit cluster balancer sync {name}")
+        return False
+    return True
+
+
+def balancer_logs(root: Path, name: str, lines: int = 100, *, run: Optional[RunFn] = None) -> str:
+    """The load balancer's last ``lines`` log lines: one per request with the server that answered
+    (``upstream=``), and nginx errors."""
+    balancer = get_cluster(root, name).get("balancer")
+    if not isinstance(balancer, dict) or not balancer.get("server"):
+        raise ClusterError(f"cluster {name} has no load balancer")
+    target = _target(root, str(balancer["server"]))
+    return _script(target, scripts.balancer_logs_script(max(1, min(int(lines), 10000))), lambda _l: None, run,
+                   label="balancer-logs", show=False)
+
+
+def _apply_balancer(root: Path, name: str, cluster: Dict[str, Any], emit: Emit, run: Optional[RunFn]) -> None:
+    balancer = cluster["balancer"]
+    target = _target(root, str(balancer["server"]))
+    files, used, warnings = _balancer_files(cluster)
+    for warning in warnings:
+        emit(f"  WARNING: {warning}")
+    out = _script(target, scripts.balancer_apply_script(files, sorted(used)), emit, run, label="balancer",
+                  show=False, check=False)
+    if "PSKIT_LB_DONE=1" not in out:
+        tail = [line for line in out.strip().splitlines() if line.strip()][-8:]
+        raise ClusterError("the load balancer did not start: " + (" | ".join(tail) or "no output"))
+    healthy = set(_values(out, "PSKIT_LB_OK"))
+    primary, backup = _backends(cluster)
+    spread = ", ".join(primary) + (f" (backup {', '.join(backup)})" if backup else "")
+    for listen, stack in sorted(used.items()):
+        url = _balancer_url(balancer, listen)
+        if str(listen) in healthy:
+            emit(f"  {url} -> {stack} on {spread}")
+        else:
+            emit(f"  WARNING: {url}/__pskit/health did not answer yet ({stack} on {spread}). The replicas may still"
+                 f" be starting, or the load balancer cannot reach port"
+                 f" {(cluster.get('deployments') or {}).get(stack, {}).get('port') or 8080} on them (firewall)."
+                 f" Check: pskit cluster status {name}")
+    if not used:
+        emit("  nginx is ready; deployments appear on it when you deploy to the cluster")
+
+
+def _balancer_files(cluster: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[int, str], List[str]]:
+    """nginx files for every deployment, ``{listen port: stack}`` and warnings for deployments left out."""
+    balancer = cluster["balancer"]
+    nodes = cluster.get("nodes") or {}
+    primary, backup = _backends(cluster)
+    address = {s: str(nodes[s].get("address")) for s in primary + backup}
+    files = {"00-pskit.conf": scripts.BALANCER_COMMON}
+    used: Dict[int, str] = {}
+    warnings: List[str] = []
+    for stack, dep in sorted((cluster.get("deployments") or {}).items()):
+        listen = _listen_port(balancer, dep)
+        if listen in used:
+            warnings.append(f"{stack} is not on the load balancer: port {listen} there already serves {used[listen]}."
+                            " Give it its own with provider.options.cluster.balancer_port and deploy again")
+            continue
+        if not primary:
+            warnings.append(f"{stack} is not on the load balancer: the cluster has no server with an address")
+            continue
+        try:
+            files[f"{stack}.conf"] = scripts.balancer_conf(stack, listen, int(dep.get("port") or 8080),
+                                                           [address[s] for s in primary], [address[s] for s in backup])
+        except ValueError as exc:
+            raise ClusterError(str(exc)) from None
+        used[listen] = stack
+    return files, used, warnings
+
+
+def _backends(cluster: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """``(primary, backup)`` servers behind the load balancer. Swarm and k3s: every server (each one's port
+    reaches every web replica). Nomad: the servers with a web replica; the master's main replica is the backup."""
+    nodes = cluster.get("nodes") or {}
+    master = str(cluster.get("master") or "")
+    servers = sorted(s for s, n in nodes.items() if (n or {}).get("address"))
+    if cluster.get("orchestrator") == "nomad":
+        workers = [s for s in servers if s != master]
+        if workers:
+            return workers, [master] if master in servers else []
+    return servers, []
+
+
+def _listen_port(balancer: Dict[str, Any], dep: Dict[str, Any]) -> int:
+    return int(dep.get("balancer_port") or balancer.get("port") or DEFAULT_BALANCER_PORT)
+
+
+def _balancer_url(balancer: Dict[str, Any], port: int) -> str:
+    host = str(balancer.get("address") or "")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}" if int(port) == 80 else f"http://{host}:{int(port)}"
+
+
+def _check_listen_port(root: Path, name: str, stack: str, balancer_port: Optional[int]) -> None:
+    """Before a deploy: two deployments cannot share a port on the load balancer."""
+    try:
+        cluster = get_cluster(root, name)
+    except ClusterError:
+        return
+    balancer = cluster.get("balancer")
+    if not isinstance(balancer, dict) or not balancer.get("server"):
+        return
+    deployments = cluster.get("deployments") or {}
+    taken = {_listen_port(balancer, dep): other for other, dep in deployments.items() if other != stack}
+    listen = _listen_port(balancer, {"balancer_port": balancer_port})
+    if listen in taken:
+        free = next(p for p in range(8081, 65536) if p not in taken)
+        raise ClusterError(f"port {listen} on the load balancer {balancer['server']} already serves {taken[listen]}."
+                           f" Give this deployment its own port: provider.options.cluster.balancer_port: {free}")
+
+
+def _not_a_balancer(clusters: Dict[str, Dict[str, Any]], server: str, allow: str = "") -> None:
+    for other, item in clusters.items():
+        if other != allow and ((item.get("balancer") or {}).get("server")) == server:
+            raise ClusterError(f"server {server!r} is the load balancer of cluster {other!r}"
+                               f" (pskit cluster balancer remove {other} first)")
+
+
+def _teardown_balancer(root: Path, server: str, emit: Emit, run: Optional[RunFn]) -> None:
+    try:
+        _script(_target(root, server), scripts.balancer_remove_script(), emit, run, label="balancer-remove",
+                show=False, check=False)
+    except (ServiceError, ClusterError) as exc:
+        emit(f"  {server} did not answer ({exc}). Remove it there later: docker rm -f {scripts.BALANCER_CONTAINER}")
+
+
+def _balancer_view(root: Path, cluster: Dict[str, Any], run: Optional[RunFn]) -> Optional[Dict[str, Any]]:
+    """For status: the load balancer's server use, whether nginx runs, and each deployment's URL."""
+    shown = _balancer_public(cluster)
+    if shown is None:
+        return None
+    try:
+        target = _target(root, str(shown["server"]))
+    except ClusterError as exc:
+        return {**shown, "reachable": False, "error": str(exc), "state": "unknown", "running": False}
+    metrics = node_metrics(target, run)
+    state = "unknown"
+    if metrics.get("reachable"):
+        code, text = (run or _default_run)(_ssh_argv(target, scripts.balancer_state_command()), None)
+        lines = text.strip().splitlines()
+        state = lines[-1].strip() if not code and lines else "unknown"
+    return {**shown, **metrics, "state": state, "running": state == "running"}
 
 
 # ----------------------------------------------------------------------------------------------- status
@@ -800,13 +1064,23 @@ def _balance(cluster: Dict[str, Any], dep: Dict[str, Any], http_counts: Dict[str
     total = sum(row["requests"] for row in rows)
     for row in rows:
         row["share"] = round(100.0 * row["requests"] / total, 1) if total else 0.0
-    if spreads:
+    balancer = cluster.get("balancer") if isinstance(cluster.get("balancer"), dict) else None
+    url = ""
+    if balancer:
+        url = _balancer_url(balancer, _listen_port(balancer, dep or {}))
+        primary, backup = _backends(cluster)
+        for row in rows:
+            row["balancer"] = "primary" if row["server"] in primary else "backup" if row["server"] in backup else ""
+        note = f"The load balancer {url} spreads HTTP across " + ", ".join(primary) + (
+            f" ({', '.join(backup)} only while those are down)." if backup else ".")
+    elif spreads:
         note = "Any server's port spreads HTTP across the web replicas."
     else:
         note = ("The master's URL is the main replica. Each other server's URL is one web replica. "
                 "A load balancer is optional, and only when you want one URL for all of them.")
-    return {"orchestrator": orch, "mode": "mesh" if spreads else "per-server", "spreads": spreads,
-            "note": note, "port": port, "servers": rows}
+    mode = "balancer" if balancer else "mesh" if spreads else "per-server"
+    return {"orchestrator": orch, "mode": mode, "spreads": spreads or bool(balancer), "note": note, "port": port,
+            "servers": rows, "balancer_url": url}
 
 
 def _ts_ms(ts: str) -> int:
@@ -1076,11 +1350,13 @@ def status(root: Path, name: str, run: Optional[RunFn] = None) -> Dict[str, Any]
             targets[server] = _target(root, server)
         except ClusterError as exc:
             errors[server] = str(exc)
-    with ThreadPoolExecutor(max_workers=min(16, len(targets) + 1)) as pool:
+    with ThreadPoolExecutor(max_workers=min(16, len(targets) + 2)) as pool:
         orch_future = pool.submit(_orchestrator_view, targets.get(cluster["master"]), orch, run)
+        balancer_future = pool.submit(_balancer_view, root, cluster, run)
         futures = {s: pool.submit(node_metrics, t, run) for s, t in targets.items()}
         metrics = {s: f.result() for s, f in futures.items()}
         view = orch_future.result()
+        balancer = balancer_future.result()
     resources = resources_of(root, name)
     rows = []
     for server, node in sorted(servers.items(), key=lambda kv: (kv[1].get("role") != "master", kv[0])):
@@ -1106,7 +1382,7 @@ def status(root: Path, name: str, run: Optional[RunFn] = None) -> Dict[str, Any]
     if view.get("error"):
         reasons.append(f"the master did not answer: {view['error']}")
     return {
-        "name": name, "orchestrator": orch, "capacity": capacity, "nodes": rows,
+        "name": name, "orchestrator": orch, "capacity": capacity, "nodes": rows, "balancer": balancer,
         "workloads": view.get("workloads") or [], "resources": resources, "pending": pending,
         "full": full or bool(pending) or not usable,
         "reasons": reasons, "orchestrator_error": view.get("error"), "checked_at": _now(),

@@ -935,3 +935,162 @@ def test_cluster_uses_home_bind_and_data_dir(tmp_path):
     apply = scripts.apply_script("swarm", "s", stack, 8080, data_path="/data/pskit/s")
     assert "as_root mkdir -p '/data/pskit/s'" in apply
     _sh_ok(apply)
+
+
+# ------------------------------------------------------------------------------------------- load balancer
+def _lb_run(fake: FakeSSH, ok: str = "80"):
+    """FakeSSH plus a load balancer that starts, and a built image with a fixed id."""
+
+    def run(argv, stdout):
+        if argv[-1] == "sh pskit-cluster/balancer.sh":
+            fake.calls.append(argv)
+            return 0, f"pulled\nPSKIT_LB_OK={ok}\nPSKIT_LB_DONE=1\n"
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return 0, "sha256:0123456789abcdef\n"
+        return fake(argv, stdout)
+
+    return run
+
+
+def _lb_scripts(fake: FakeSSH) -> List[str]:
+    return [text for host, text in fake.scripts if host == "10.0.0.9" and "nginx -t" in text]
+
+
+def _deploy(servers: Path, run, lines: List[str], **settings) -> dict:
+    app = servers / ".pskit" / "onprem-dev" / "onprem_app"
+    app.mkdir(parents=True, exist_ok=True)
+    body = {"name": "prod", "orchestrator": "nomad", "replicas": 2, "cpu": 0.25, "memory": 256, **settings}
+    (app / clu.CLUSTER_SPEC).write_text(json.dumps(clu.cluster_file(servers, body)), "utf-8")
+    spec = {"service": "shop", "stage": "dev", "port": 8080, "endpoint": "http://10.0.0.5:8080"}
+    return clu.deploy(app, spec, lines.append, run=run)
+
+
+def test_balancer_conf_and_scripts():
+    conf = scripts.balancer_conf("pskit-shop-dev", 80, 8080, ["10.0.0.6", "10.0.0.7"], ["10.0.0.5"])
+    assert "upstream pskit_pskit_shop_dev {" in conf and "listen 80;" in conf
+    assert "server 10.0.0.6:8080 max_fails=3 fail_timeout=10s;" in conf
+    assert "server 10.0.0.5:8080 backup;" in conf and "least_conn;" in conf
+    assert "proxy_pass http://pskit_pskit_shop_dev;" in conf
+    assert "server [fd00::6]:8080" in scripts.balancer_conf("s", 80, 8080, ["fd00::6"])
+    with pytest.raises(ValueError):
+        scripts.balancer_conf("s", 80, 8080, ["10.0.0.6; evil"])
+    apply = scripts.balancer_apply_script({"00-pskit.conf": scripts.BALANCER_COMMON, "s.conf": conf}, [80, 8081])
+    assert "nginx -t" in apply and "nginx -s reload" in apply and "--network host" in apply
+    assert '-v "$lb/conf.d:/etc/nginx/conf.d:ro" nginx:1.27-alpine' in apply
+    assert "for p in 80 8081; do" in apply and apply.endswith("echo PSKIT_LB_DONE=1\n")
+    for text in (apply, scripts.balancer_apply_script({}, []), scripts.balancer_remove_script(),
+                 scripts.balancer_logs_script(50)):
+        assert text.startswith("#!/bin/sh\nset -eu\n")
+        _sh_ok(text)
+
+
+def test_balancer_follows_deploy_join_leave_and_remove(servers):
+    srv.save_server(servers, "lb1", {"host": "10.0.0.9", "user": "root", "auth": "agent"})
+    fake = FakeSSH()
+    run = _lb_run(fake)
+    lines: List[str] = []
+    clu.create_cluster(servers, "prod", "nomad", "edge1", lines.append, run=run)
+    clu.join_server(servers, "prod", "edge2", lines.append, run=run)
+    item = clu.set_balancer(servers, "prod", "lb1", lines.append, run=run)
+    assert item["balancer"]["server"] == "lb1" and item["balancer"]["port"] == 80
+    assert "upstream pskit_" not in _lb_scripts(fake)[-1]  # nothing deployed yet
+
+    record = _deploy(servers, run, lines)
+    assert record["url"] == "http://10.0.0.9" and record["endpoint"] == "http://10.0.0.5:8080"
+    conf = _lb_scripts(fake)[-1]
+    assert "server 10.0.0.6:8080 max_fails=3" in conf and "server 10.0.0.5:8080 backup;" in conf
+    assert any("Public URL (load balancer on lb1): http://10.0.0.9" in line for line in lines)
+    assert not any("Nomad does not load-balance" in line for line in lines)
+    assert clu.list_clusters(servers)[0]["balancer"]["urls"] == {"pskit-shop-dev": "http://10.0.0.9"}
+
+    clu.join_server(servers, "prod", "edge3", lines.append, run=run)
+    assert "server 10.0.0.7:8080 max_fails=3" in _lb_scripts(fake)[-1]
+
+    clu.leave_server(servers, "prod", "edge3", lines.append, run=run)
+    texts = [text for _host, text in fake.scripts]
+    last_lb = max(i for i, t in enumerate(texts) if "nginx -t" in t)
+    drain = max(i for i, t in enumerate(texts) if "/drain" in t)
+    assert last_lb < drain  # off the load balancer before its replicas move
+    assert "10.0.0.7" not in texts[last_lb]
+
+    app = servers / ".pskit" / "onprem-dev" / "onprem_app"
+    clu.destroy(app, {"service": "shop", "stage": "dev"}, lines.append, run=run)
+    texts = [text for _host, text in fake.scripts]
+    last_lb = max(i for i, t in enumerate(texts) if "nginx -t" in t)
+    assert "pskit-shop-dev.conf" not in texts[last_lb]
+    assert last_lb < max(i for i, t in enumerate(texts) if "v1/job/pskit-shop-dev?purge=true" in t)
+
+    clu.remove_balancer(servers, "prod", lines.append, run=run)
+    assert any(host == "10.0.0.9" and "dk rm -f pskit-lb" in text for host, text in fake.scripts)
+    assert clu.get_cluster(servers, "prod").get("balancer") is None
+    with pytest.raises(clu.ClusterError, match="no load balancer"):
+        clu.remove_balancer(servers, "prod", lines.append, run=run)
+
+
+def test_swarm_balancer_spreads_over_every_server(servers):
+    srv.save_server(servers, "lb1", {"host": "10.0.0.9", "user": "root", "auth": "agent"})
+    fake = FakeSSH()
+    run = _lb_run(fake)
+    clu.create_cluster(servers, "mesh", "swarm", "edge1", lambda _l: None, run=run)
+    clu.join_server(servers, "mesh", "edge2", lambda _l: None, run=run)
+    clu._update(servers, "mesh", lambda c: c.setdefault("deployments", {}).__setitem__(
+        "pskit-shop-dev", {"stage": "dev", "endpoint": "http://10.0.0.5:8080", "port": 8080}))
+    clu.set_balancer(servers, "mesh", "lb1", lambda _l: None, port=8000, run=run)
+    conf = _lb_scripts(fake)[-1]
+    assert "listen 8000;" in conf and "backup;" not in conf
+    assert "server 10.0.0.5:8080 max_fails=3" in conf and "server 10.0.0.6:8080 max_fails=3" in conf
+    page = clu.requests_feed(servers, "mesh", control=FakeControl([]))
+    assert page["balance"]["mode"] == "balancer" and page["balance"]["balancer_url"] == "http://10.0.0.9:8000"
+    assert {row["balancer"] for row in page["balance"]["servers"]} == {"primary"}
+
+
+def test_balancer_refuses_members_and_shared_ports(servers):
+    srv.save_server(servers, "lb1", {"host": "10.0.0.9", "user": "root", "auth": "agent"})
+    fake = FakeSSH()
+    run = _lb_run(fake)
+    clu.create_cluster(servers, "prod", "nomad", "edge1", lambda _l: None, run=run)
+    with pytest.raises(clu.ClusterError, match="outside the cluster"):
+        clu.set_balancer(servers, "prod", "edge1", lambda _l: None, run=run)
+    clu.set_balancer(servers, "prod", "lb1", lambda _l: None, run=run)
+    with pytest.raises(clu.ClusterError, match="load balancer of cluster 'prod'"):
+        clu.join_server(servers, "prod", "lb1", lambda _l: None, run=run)
+    with pytest.raises(clu.ClusterError, match="load balancer of cluster 'prod'"):
+        clu.create_cluster(servers, "other", "swarm", "lb1", lambda _l: None, run=run)
+
+    clu._update(servers, "prod", lambda c: c.setdefault("deployments", {}).__setitem__(
+        "pskit-api-dev", {"stage": "dev", "port": 9000}))
+    with pytest.raises(clu.ClusterError, match="balancer_port: 8081"):
+        _deploy(servers, run, [])
+    record = _deploy(servers, run, [], balancer_port=8081)
+    assert record["url"] == "http://10.0.0.9:8081"
+    assert clu.get_cluster(servers, "prod")["deployments"]["pskit-shop-dev"]["balancer_port"] == 8081
+    conf = _lb_scripts(fake)[-1]
+    assert "listen 80;" in conf and "listen 8081;" in conf
+
+    options = {"cluster": {"name": "prod", "balancer_port": 8081}}
+    assert clu.deploy_spec(servers, options)["balancer_port"] == 8081
+    with pytest.raises(clu.ClusterError, match="balancer_port"):
+        clu.deploy_spec(servers, {"cluster": {"name": "prod", "balancer_port": 0}})
+
+
+def test_unreachable_balancer_only_warns_and_status_shows_it(servers):
+    srv.save_server(servers, "lb1", {"host": "10.0.0.9", "user": "root", "auth": "agent"})
+    fake = FakeSSH({"10.0.0.5": (STAT_B, 2000000)})
+    clu.create_cluster(servers, "prod", "nomad", "edge1", lambda _l: None, run=_lb_run(fake))
+    clu.set_balancer(servers, "prod", "lb1", lambda _l: None, run=_lb_run(fake))
+
+    def broken(argv, stdout):
+        if argv[-1] == "sh pskit-cluster/balancer.sh":
+            return 1, "pskit: nginx refused the new load balancer config; the running one is unchanged\n"
+        return fake(argv, stdout)
+
+    lines: List[str] = []
+    assert clu.sync_balancer(servers, "prod", lines.append, run=broken) is False
+    assert any("WARNING: could not update the load balancer" in line and "balancer sync prod" in line
+               for line in lines)
+    with pytest.raises(clu.ClusterError, match="nginx refused"):
+        clu.sync_balancer(servers, "prod", lines.append, run=broken, strict=True)
+
+    current = clu.status(servers, "prod", run=fake)
+    assert current["balancer"]["server"] == "lb1" and current["balancer"]["reachable"] is False
+    assert current["balancer"]["running"] is False

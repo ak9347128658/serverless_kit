@@ -136,9 +136,10 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  cluster     create | join | leave | status | check | watch | alerts | requests | scale | list | remove
+  cluster     create | join | leave | status | check | watch | alerts | requests | scale | balancer | list | remove
               pskit cluster create prod --orchestrator swarm --master edge1
               pskit cluster join prod edge2
+              pskit cluster balancer set prod lb1
               pskit cluster leave prod edge2 --yes
               pskit cluster status prod
               pskit cluster check prod
@@ -1388,6 +1389,7 @@ def cluster() -> None:
       pskit cluster scale prod --replicas 6
       pskit cluster requests prod --follow          # which server handled each request, live
       pskit cluster leave prod edge2
+      pskit cluster balancer set prod lb1          # one URL (nginx on lb1) for every server
 
     Functions use it with provider.options.cluster in pskit.yml (cluster: prod, or {name: prod, replicas: 3}),
     or per deploy: pskit deploy --cluster prod (the stage remembers it; pskit deploy --server NAME goes back to one
@@ -1431,8 +1433,12 @@ def cluster_list(as_json: bool, config_path: Optional[str]) -> None:
     for item in items:
         servers = ", ".join(f"{n['server']}{' (master)' if n.get('role') == 'master' else ''}" for n in item["nodes"])
         echo(f"  {item['name']:<14} {item['orchestrator_label']:<18} {servers}")
+        balancer = item.get("balancer") or {}
+        if balancer:
+            echo(f"      load balancer: {balancer['server']} ({balancer.get('address')}, port {balancer.get('port')})")
         for stack, dep in sorted(item["deployments"].items()):
-            echo(f"      {stack}: {dep.get('replicas')} replica(s) {dep.get('endpoint')}")
+            url = (balancer.get("urls") or {}).get(stack)
+            echo(f"      {stack}: {dep.get('replicas')} replica(s) {url or dep.get('endpoint')}")
 
 
 @cluster.command("create")
@@ -1496,6 +1502,17 @@ def _print_cluster_status(current: dict) -> None:
             state = n["availability"]
         echo(f"  {n['server']:<14} {n.get('role') or '':<7} {state:<9} {pct(n.get('cpu')):>5} {pct(n.get('memory')):>5}"
              f" {pct(n.get('disk')):>5}  {n.get('load', '')}{flag}")
+    lb = current.get("balancer")
+    if lb:
+        if not lb.get("reachable"):
+            echo(f"  {lb['server']:<14} {'lb':<7} {'offline':<9}  {lb.get('error', '')}")
+        else:
+            echo(f"  {lb['server']:<14} {'lb':<7} {'nginx ' + str(lb.get('state')):<9} {pct(lb.get('cpu')):>5}"
+                 f" {pct(lb.get('memory')):>5} {pct(lb.get('disk')):>5}  {lb.get('load', '')}")
+        for stack, url in sorted((lb.get("urls") or {}).items()):
+            echo(f"  balancer {stack}: {url}")
+        if not lb.get("running"):
+            fail(f"the load balancer on {lb['server']} is not running: pskit cluster balancer sync {current['name']}")
     echo(f"  limits: cpu {cap['cpu']}%  memory {cap['memory']}%  disk {cap['disk']}%")
     for w in current["workloads"]:
         echo(f"  workload {w['name']}: {w['running']}/{w['desired']} running")
@@ -1686,6 +1703,76 @@ def cluster_remove(name: str, yes: bool, config_path: Optional[str]) -> None:
     if not yes:
         click.confirm(f"Forget cluster {name}?", abort=True)
     _cluster_call(remove_cluster, _cluster_root(config_path), name, echo)
+
+
+@cluster.group("balancer")
+def cluster_balancer() -> None:
+    """A load balancer in front of the cluster: one more saved server (outside the cluster) running nginx.
+
+    \b
+    Examples:
+      pskit cluster balancer set prod lb1             # http://<lb1>/ spreads over the cluster's servers
+      pskit cluster balancer set prod lb1 --port 8000
+      pskit cluster balancer logs prod -n 200         # one line per request, with the server that answered
+      pskit cluster balancer sync prod                # rewrite its config now (deploy / join / leave do it)
+      pskit cluster balancer remove prod
+
+    pskit deploy, pskit remove, cluster join and cluster leave update it. Logs, tests and the admin API keep
+    using the master. A second deployment on the same cluster needs its own port:
+    provider.options.cluster.balancer_port.
+    """
+
+
+@cluster_balancer.command("set")
+@click.argument("name")
+@click.argument("server")
+@click.option("--port", default=80, show_default=True, type=click.IntRange(1, 65535),
+              help="Port users call on the load balancer.")
+@click.option("--address", default="", help="Its address in the URL users call (default: the server's host).")
+@_CONFIG_OPTION
+def cluster_balancer_set(name: str, server: str, port: int, address: str, config_path: Optional[str]) -> None:
+    """Make saved SERVER the load balancer of cluster NAME (installs Docker and nginx there)."""
+    from ..core.onprem_cluster import set_balancer
+
+    item = _cluster_call(set_balancer, _cluster_root(config_path), name, server, echo, port=port, address=address)
+    ok(f"{server} is the load balancer of {name}")
+    for stack, url in sorted((item.get("balancer") or {}).get("urls", {}).items()):
+        echo(f"  {stack}: {url}")
+
+
+@cluster_balancer.command("remove")
+@click.argument("name")
+@click.option("--yes", is_flag=True, help="Do not ask.")
+@_CONFIG_OPTION
+def cluster_balancer_remove(name: str, yes: bool, config_path: Optional[str]) -> None:
+    """Stop the load balancer of cluster NAME (the functions keep running on the cluster)."""
+    from ..core.onprem_cluster import remove_balancer
+
+    if not yes:
+        click.confirm(f"Stop the load balancer of cluster {name}? Its URL stops answering.", abort=True)
+    _cluster_call(remove_balancer, _cluster_root(config_path), name, echo)
+
+
+@cluster_balancer.command("sync")
+@click.argument("name")
+@_CONFIG_OPTION
+def cluster_balancer_sync(name: str, config_path: Optional[str]) -> None:
+    """Rewrite the load balancer's config from the cluster's servers and deployments."""
+    from ..core.onprem_cluster import sync_balancer
+
+    _cluster_call(sync_balancer, _cluster_root(config_path), name, echo, strict=True)
+    ok("load balancer updated")
+
+
+@cluster_balancer.command("logs")
+@click.argument("name")
+@click.option("-n", "--lines", default=100, show_default=True, type=click.IntRange(1, 10000))
+@_CONFIG_OPTION
+def cluster_balancer_logs(name: str, lines: int, config_path: Optional[str]) -> None:
+    """The load balancer's recent requests (upstream= is the server that answered) and errors."""
+    from ..core.onprem_cluster import balancer_logs
+
+    click.echo(_cluster_call(balancer_logs, _cluster_root(config_path), name, lines).rstrip("\n"))
 
 
 # ----------------------------------------------------------------------------- client

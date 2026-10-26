@@ -483,6 +483,9 @@ export interface GuidePage {
 /** A scaling cluster (`GET /api/onprem-clusters`): Docker Swarm, Kubernetes (k3s) or Nomad on saved servers. */
 export type Orchestrator = "swarm" | "kubernetes" | "nomad";
 
+/** `POST /api/onprem-clusters/<name>/<action>`: each one runs as a job. */
+export type ClusterAction = "join" | "leave" | "scale" | "remove" | "balancer-set" | "balancer-remove" | "balancer-sync";
+
 export interface ClusterNode {
   server: string;
   role: "master" | "worker";
@@ -507,6 +510,31 @@ export interface ClusterDeployment {
   port: number;
   endpoint: string;
   deployed_at: string;
+  /** Its own port on the load balancer (`options.cluster.balancer_port`); else the load balancer's port. */
+  balancer_port?: number;
+}
+
+/** nginx on a saved server outside the cluster, spreading each deployment's HTTP over the cluster's servers. */
+export interface ClusterBalancer {
+  server: string;
+  address: string;
+  port: number;
+  set_at?: string;
+  /** Each deployment's URL on the load balancer. */
+  urls: Record<string, string>;
+}
+
+export interface ClusterBalancerStatus extends ClusterBalancer {
+  reachable: boolean;
+  error?: string;
+  cpu?: number | null;
+  memory?: number | null;
+  disk?: number | null;
+  disk_gb?: number;
+  load?: string;
+  /** The `pskit-lb` container: running, exited, missing, unknown. */
+  state: string;
+  running: boolean;
 }
 
 export interface OnPremCluster {
@@ -521,6 +549,7 @@ export interface OnPremCluster {
   watch: { enabled: boolean; interval_seconds: number };
   alerts: ClusterAlertEntry[];
   deployments: Record<string, ClusterDeployment>;
+  balancer?: ClusterBalancer | null;
   created_at?: string;
 }
 
@@ -562,6 +591,7 @@ export interface ClusterStatus {
   orchestrator: Orchestrator;
   capacity: { cpu: number; memory: number; disk: number };
   nodes: ClusterNodeStatus[];
+  balancer?: ClusterBalancerStatus | null;
   workloads: { name: string; running: number; desired: number }[];
   resources?: ClusterResource[];
   pending: string[];
@@ -602,16 +632,19 @@ export interface ClusterBalanceServer {
   serves: "web" | "main" | string;
   requests: number;
   share: number;
+  /** With a load balancer: `primary` (shares requests) or `backup` (only while every primary is down). */
+  balancer?: "primary" | "backup" | "";
 }
 
 /** How HTTP for one deployment is spread across the cluster. Servers with zero requests are included. */
 export interface ClusterBalance {
   orchestrator: string;
-  mode: "mesh" | "per-server";
+  mode: "mesh" | "per-server" | "balancer";
   spreads: boolean;
   note: string;
   port: number;
   servers: ClusterBalanceServer[];
+  balancer_url?: string;
 }
 
 export interface ClusterRequests {

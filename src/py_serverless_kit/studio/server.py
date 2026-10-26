@@ -602,12 +602,15 @@ def make_handler(app: Studio) -> type:
                 if len(rest) == 2 and rest[1] == "test-alert" and method == "POST":
                     current = watcher.last.get(rest[0]) or {"orchestrator": clu.get_cluster(root, rest[0])["orchestrator"]}
                     return 200, clu.send_alert(root, rest[0], current, test=True)
-                if len(rest) == 2 and rest[1] in ("join", "leave", "scale", "remove") and method == "POST":
+                if len(rest) == 2 and rest[1] == "balancer-logs" and method == "GET":
+                    return 200, {"text": clu.balancer_logs(root, rest[0], _int(params, "lines", 100))}
+                actions = ("join", "leave", "scale", "remove", "balancer-set", "balancer-remove", "balancer-sync")
+                if len(rest) == 2 and rest[1] in actions and method == "POST":
                     name, action = rest
                     body = _obj(self._body())
                     clu.get_cluster(root, name)  # 400 for an unknown cluster before starting a job
                     server = str(body.get("server") or "")
-                    if action in ("join", "leave") and not server:
+                    if action in ("join", "leave", "balancer-set") and not server:
                         raise StudioError(400, "server is required")
 
                     def run(job: Any) -> int:
@@ -617,12 +620,21 @@ def make_handler(app: Studio) -> type:
                             clu.leave_server(root, name, server, job.emit)
                         elif action == "scale":
                             clu.scale(root, name, str(body.get("stack") or ""), int(body.get("replicas") or 0), job.emit)
+                        elif action == "balancer-set":
+                            clu.set_balancer(root, name, server, job.emit, port=int(body.get("port") or 80),
+                                             address=str(body.get("address") or ""))
+                        elif action == "balancer-remove":
+                            clu.remove_balancer(root, name, job.emit)
+                        elif action == "balancer-sync":
+                            clu.sync_balancer(root, name, job.emit, strict=True)
                         else:
                             clu.remove_cluster(root, name, job.emit)
                         return 0
 
                     label = {"join": f"Join {server} to", "leave": f"Remove {server} from", "scale": "Scale",
-                             "remove": "Forget"}[action] + f" cluster {name}"
+                             "remove": "Forget", "balancer-set": f"Load balancer {server} for",
+                             "balancer-remove": "Remove the load balancer of",
+                             "balancer-sync": "Update the load balancer of"}[action] + f" cluster {name}"
                     return 202, {"job_id": app.jobs.run_callable("onprem-cluster", run, label=label).id}
             except (clu.ClusterError, ServiceError, ValueError) as exc:
                 raise StudioError(400, str(exc)) from None

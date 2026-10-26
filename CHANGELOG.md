@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-26
+
+### Added
+- **Load balancer for scaling clusters** (Swarm, k3s and Nomad): `pskit cluster balancer set NAME SERVER [--port 80]`
+  runs nginx in Docker (`pskit-lb`) on a saved server outside the cluster and spreads each deployment's HTTP over
+  the cluster's servers (fewest connections, failed servers rest 10 s, retries on another server). On Nomad the
+  web replicas share the requests and the master's main replica is only a backup. `pskit deploy`, `pskit remove`,
+  `cluster join` and `cluster leave` update it: a leaving server and a removed deployment come off it before they
+  stop. Every change passes `nginx -t` first and reloads without dropping connections; an offline load balancer
+  only warns (`pskit cluster balancer sync NAME` catches up). `cluster balancer logs` shows one line per request
+  with the server that answered; `cluster status` and `cluster list` show it and each deployment's URL. Logs,
+  tests and the admin API keep using the master. `options.cluster.balancer_port` gives a second deployment on the
+  same cluster its own port. Studio API: `POST /api/onprem-clusters/NAME/balancer-set|balancer-sync|balancer-remove`
+  and `GET .../balancer-logs`.
+- **Studio: Load balancer card** on the *Scaling cluster* page: set it up (pick or add a server, port, address),
+  move it to another server, *Sync now*, *Remove*, nginx state and the server's CPU / memory / disk, each
+  deployment's public URL, and the access log. *Deployed functions* shows the public URL above the master's
+  address, *Live requests* marks which servers share requests and which is the backup, and the project's cluster
+  settings get *Port on the load balancer* (`options.cluster.balancer_port`). A load balancer server is no longer
+  offered as a master or joined server.
+
 ## [1.11.0] - 2026-10-26
 
 ### Added

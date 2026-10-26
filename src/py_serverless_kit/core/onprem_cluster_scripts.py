@@ -555,6 +555,143 @@ def scale_script(orchestrator: str, stack: str, replicas: int, nomad_job_now: Op
     )
 
 
+# ---------------------------------------------------------------------------------------------- load balancer
+BALANCER_IMAGE = "nginx:1.27-alpine"
+BALANCER_CONTAINER = "pskit-lb"
+BALANCER_DIR = "pskit-cluster/lb"  # under the folder the scripts run from (the server's home path)
+_ADDRESS = re.compile(r"^[A-Za-z0-9.:\[\]-]+$")
+
+# Shared by every deployment's server block (conf.d is included in nginx's http context).
+BALANCER_COMMON = """# pskit load balancer: generated, rewritten by pskit deploy / remove / cluster join / leave
+server_tokens off;
+log_format pskit_lb '$time_iso8601 $remote_addr port=$server_port "$request" $status $body_bytes_sent '
+                    '${request_time}s upstream=$upstream_addr ${upstream_response_time}s';
+map $http_upgrade $pskit_connection {
+    default upgrade;
+    "" "";
+}
+"""
+
+
+def upstream_name(stack: str) -> str:
+    return "pskit_" + re.sub(r"[^a-z0-9]+", "_", stack.lower())
+
+
+def _hostport(address: str, port: int) -> str:
+    if not _ADDRESS.match(address):
+        raise ValueError(f"not a server address for the load balancer: {address!r}")
+    if ":" in address and not address.startswith("["):
+        address = f"[{address}]"
+    return f"{address}:{int(port)}"
+
+
+def balancer_conf(stack: str, listen: int, port: int, primary: Sequence[str], backup: Sequence[str] = ()) -> str:
+    """nginx config for one deployment: ``listen`` on the load balancer -> ``port`` on the cluster's servers.
+
+    ``primary`` share the requests (fewest open connections first; a server that fails 3 times rests 10 s).
+    ``backup`` only answer while every primary is down (Nomad: the master, whose main replica also serves HTTP)."""
+    name = upstream_name(stack)
+    servers = [f"    server {_hostport(a, port)} max_fails=3 fail_timeout=10s;" for a in primary]
+    servers += [f"    server {_hostport(a, port)} backup;" for a in backup]
+    return (
+        f"# {stack}\n"
+        f"upstream {name} {{\n    least_conn;\n" + "\n".join(servers) + "\n    keepalive 32;\n}\n"
+        "server {\n"
+        f"    listen {int(listen)};\n"
+        "    access_log /var/log/nginx/access.log pskit_lb;\n"
+        "    client_max_body_size 100m;\n"
+        "    location / {\n"
+        f"        proxy_pass http://{name};\n"
+        "        proxy_http_version 1.1;\n"
+        "        proxy_set_header Upgrade $http_upgrade;\n"
+        "        proxy_set_header Connection $pskit_connection;\n"
+        "        proxy_set_header Host $host;\n"
+        "        proxy_set_header X-Real-IP $remote_addr;\n"
+        "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        "        proxy_connect_timeout 3s;\n"
+        "        proxy_read_timeout 900s;\n"
+        "        proxy_send_timeout 900s;\n"
+        "        proxy_next_upstream error timeout http_502 http_503 http_504;\n"
+        "        proxy_next_upstream_tries 3;\n"
+        "    }\n"
+        "}\n"
+    )
+
+
+def _lb_running() -> str:
+    return f"[ \"$(dk inspect -f '{{{{.State.Running}}}}' {BALANCER_CONTAINER} 2>/dev/null || echo false)\" = true ]"
+
+
+def balancer_apply_script(files: Dict[str, str], ports: Sequence[int]) -> str:
+    """Runs on the load balancer server: install Docker, check the new nginx config in a throwaway container,
+    swap it in, reload (or start) the ``pskit-lb`` container and check ``/__pskit/health`` on each port.
+
+    A config nginx refuses leaves the running one untouched. Prints ``PSKIT_LB_OK=<port>`` or
+    ``PSKIT_LB_FAIL=<port>`` per port (a backend still starting is not an error)."""
+    image = BALANCER_IMAGE
+    write = "".join(f"cat > \"$lb/next/{name}\" <<'PSKIT_LB'\n{text}PSKIT_LB\n" for name, text in sorted(files.items()))
+    script = (
+        _header() + _docker_install_block() + _docker_ready_block()
+        + f'lb="$(pwd)/{BALANCER_DIR}"\n'
+        + 'mkdir -p "$lb/conf.d"\nrm -rf "$lb/next"\nmkdir -p "$lb/next"\n'
+        + write
+        + f"dk image inspect {image} >/dev/null 2>&1 || dk pull {image}\n"
+        + f'if ! pskit_test=$(dk run --rm -v "$lb/next:/etc/nginx/conf.d:ro" {image} nginx -t 2>&1); then\n'
+        + '  echo "$pskit_test" >&2\n'
+        + '  echo "pskit: nginx refused the new load balancer config; the running one is unchanged" >&2\n'
+        + "  exit 1\n"
+        + "fi\n"
+        # Files are replaced inside conf.d (not the folder itself): the container's bind mount keeps the folder.
+        + 'for f in "$lb"/conf.d/*.conf; do if [ -f "$f" ]; then rm -f "$f"; fi; done\n'
+        + 'for f in "$lb"/next/*.conf; do if [ -f "$f" ]; then cp "$f" "$lb/conf.d/"; fi; done\n'
+        + 'rm -rf "$lb/next"\n'
+        + f"if {_lb_running()}; then\n"
+        + f"  dk exec {BALANCER_CONTAINER} nginx -s reload\n"
+        + "else\n"
+        + f"  dk rm -f {BALANCER_CONTAINER} >/dev/null 2>&1 || true\n"
+        + f"  dk run -d --name {BALANCER_CONTAINER} --restart unless-stopped --network host"
+        + f' -v "$lb/conf.d:/etc/nginx/conf.d:ro" {image} >/dev/null\n'
+        + "fi\n"
+        + "sleep 1\n"
+        + f"if ! {_lb_running()}; then\n"
+        + f"  dk logs --tail 30 {BALANCER_CONTAINER} >&2 || true\n"
+        + '  echo "pskit: the load balancer container is not running (is the port in use?)" >&2\n'
+        + "  exit 1\n"
+        + "fi\n"
+    )
+    if ports:
+        script += (
+            f"for p in {' '.join(str(int(p)) for p in ports)}; do\n"
+            "  pskit_ok=0\n  pskit_i=0\n"
+            '  while [ "$pskit_i" -lt 10 ]; do\n'
+            '    if curl -fsS -m 3 "http://127.0.0.1:$p/__pskit/health" >/dev/null 2>&1; then pskit_ok=1; break; fi\n'
+            "    pskit_i=$((pskit_i + 1))\n    sleep 2\n"
+            "  done\n"
+            '  if [ "$pskit_ok" = 1 ]; then echo "PSKIT_LB_OK=$p"; else echo "PSKIT_LB_FAIL=$p"; fi\n'
+            "done\n"
+        )
+    return script + "echo PSKIT_LB_DONE=1\n"
+
+
+def balancer_remove_script() -> str:
+    """Runs on the load balancer server: stop and remove ``pskit-lb`` and its config."""
+    return _header() + (f"dk rm -f {BALANCER_CONTAINER} >/dev/null 2>&1 || true\n"
+                        f'rm -rf "$(pwd)/{BALANCER_DIR}"\n')
+
+
+def balancer_logs_script(lines: int) -> str:
+    """The load balancer's access and error log (one line per request, with the server that answered)."""
+    return _header() + f"dk logs --tail {int(lines)} {BALANCER_CONTAINER} 2>&1\n"
+
+
+def balancer_state_command() -> str:
+    """One line: the ``pskit-lb`` container's state (running, exited, ...) or ``missing``."""
+    fmt = "'{{.State.Status}}'"
+    return (f"docker inspect -f {fmt} {BALANCER_CONTAINER} 2>/dev/null"
+            f" || sudo -n docker inspect -f {fmt} {BALANCER_CONTAINER} 2>/dev/null || echo missing")
+
+
 # ---------------------------------------------------------------------------------------------- helpers
 def _swarm_locked_check() -> str:
     """A locked swarm manager needs its unlock key; pskit never leaves it (that would drop the swarm's data)."""
