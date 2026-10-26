@@ -31,6 +31,7 @@ one. It can also install Python or Docker on an SSH server.
 | Python 3, Docker | runtime on an SSH server | — | — | — | |
 | LocalEmu | queue, storage, secrets | `sqs`, `s3`, Secrets Manager (one port) | 4566 | none | Dashboard (`/_localemu/dashboard`) and pskit's browser |
 | AWS Secrets Manager compatible (Python / Node.js) | secrets (`aws` driver) | `get_secret()`, boto3, AWS SDKs with the endpoint; SigV4 with the user / password | 4584 | data directory | Secrets console (`/ui/`) and pskit's browser |
+| Amazon S3 compatible (Python / Node.js) | storage | `s3` with endpoint and keys; boto3, AWS SDKs, the AWS CLI; SigV4 with the user / password | 9000 | data directory (`.tar.gz`) | S3 console (`/ui/`) and pskit's browser |
 | Infisical | secrets (`infisical` driver) | `get_secret()` with a machine identity | 8080 | — | Infisical web UI (own sign-up) |
 | Grafana | dashboards | URL, admin user and password | 3000 | data directory | Grafana |
 | Prometheus | metrics | URL | 9090 | — | Prometheus UI |
@@ -59,7 +60,7 @@ opens pskit's UI in the studio:
 
 | Service | Browser | What you can do |
 |---|---|---|
-| MinIO, RustFS, LocalStack, LocalEmu | **Buckets (S3)** | Create and delete buckets (with every object and old version); folders and breadcrumbs; filter by name; 25 to 1000 objects per page with next / previous; upload several files (up to 64 MB each); download; info (size, type, ETag, metadata); old versions (list, download); rename / move and copy; share links valid 1 hour, 1 day or 7 days (S3 presigned URLs); bucket versioning on / off; bucket policy (private, public read, or your JSON) |
+| MinIO, RustFS, LocalStack, LocalEmu, Amazon S3 compatible | **Buckets (S3)** | Create and delete buckets (with every object and old version); folders and breadcrumbs; filter by name; 25 to 1000 objects per page with next / previous; upload several files (up to 64 MB each); download; info (size, type, ETag, metadata); old versions (list, download); rename / move and copy; share links valid 1 hour, 1 day or 7 days (S3 presigned URLs); bucket versioning on / off; bucket policy (private, public read, or your JSON) |
 | fake-gcs-server | **Buckets (Cloud Storage)** | The same, without versioning, policies and signed links |
 | OpenBao | **Secrets** | Folders, open a secret (values hidden until *Show values*), copy a value, versions (pick an old one), add / edit (each save is a new version), delete |
 | LocalStack, LocalEmu, AWS Secrets Manager compatible | **Secrets (Secrets Manager)** | List with paging, open, add / edit, delete |
@@ -116,7 +117,8 @@ password, then redeploy.
 
 ## Web UIs
 
-Services with a built-in UI (RabbitMQ, LavinMQ, MinIO, RustFS, ElasticMQ, NATS monitoring, Mailpit) show its URL and
+Services with a built-in UI (RabbitMQ, LavinMQ, MinIO, RustFS, ElasticMQ, NATS monitoring, Mailpit, pskit's S3 and
+Secrets Manager servers) show its URL and
 login in *How to use* and *Details*. For the others pskit starts a **companion** UI next to the service, on a private
 Docker network with it, listening on the same interface as the service:
 
@@ -329,7 +331,7 @@ Services without a web UI (and those with one) have a **Console**: type a comman
 | Kafka (Redpanda) / Apache Kafka | `rpk` / `kafka-*.sh` | `topic list`, `kafka-topics.sh --list` |
 | RabbitMQ / LavinMQ | `rabbitmqctl` / `lavinmqctl` | `list_queues name messages` |
 | NATS | `nats` (nats-box helper) | `stream ls` |
-| MinIO / RustFS | `mc` / `aws s3` | `ls local`, `s3 ls` |
+| MinIO / RustFS / Amazon S3 compatible | `mc` / `aws s3` | `ls local`, `s3 ls` |
 | ElasticMQ / LocalStack | `aws sqs` / `awslocal` | `sqs list-queues`, `secretsmanager list-secrets` |
 | OpenBao | `bao` | `kv list secret`, `kv put secret/api-key value=abc` |
 | Memcached, Mailpit, fake-gcs-server | text protocol / HTTP API | `stats`, `/api/v1/messages` |

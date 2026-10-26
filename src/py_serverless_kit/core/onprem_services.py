@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
-from . import onprem_secretsmanager, onprem_smtp
+from . import onprem_s3, onprem_secretsmanager, onprem_smtp
 from .onprem_apps import DEFAULT_USERS, NO_AUTH_APPS, SELF_LOGIN, apps
 from .onprem_browser import browsers_for
 from .onprem_runtimes import RUNTIME_SPECS, check_version, install_script
@@ -540,6 +540,24 @@ for _name, _sm in onprem_secretsmanager.SERVICES.items():
         "the AWS CLI and get_secret() work with its endpoint. Versions and stages, tags, delete with a recovery "
         "window, restore. Its own web console (/ui/) signs in with the same user and password.",
         gui=({"port": onprem_secretsmanager.PORT, "path": "/ui/", "label": "Secrets console", "login": "user"},),
+    )
+
+# Built by core/onprem_s3.py from aws/s3: pskit's Amazon S3 compatible server.
+for _name, _s3 in onprem_s3.SERVICES.items():
+    SERVICES[_name] = _svc(
+        f"Amazon S3 compatible ({_s3['lang']})",
+        _s3["image"],
+        onprem_s3.PORT,
+        ("storage",),
+        data="/data",
+        health=onprem_s3.health(_name),
+        backup="tar czf - -C /data .",
+        backup_ext="tar.gz",
+        notes=f"pskit's own S3 server ({_s3['lang']}, code in aws/s3): the S3 API with SigV4 authentication (user = "
+        "access key ID, password = secret access key). boto3, the AWS SDKs, the AWS CLI and the s3 driver work with "
+        "its endpoint. Versioning, multipart uploads, presigned URLs, policies, CORS, lifecycle rules, object lock, "
+        "website hosting. Its own web console (/ui/) signs in with the same user and password.",
+        gui=({"port": onprem_s3.PORT, "path": "/ui/", "label": "S3 console", "login": "user"},),
     )
 
 for _name, _path in (("azurite", "/"), ("fake-gcs", "/storage/v1/b"), ("elasticmq", "/"), ("mailpit", "/")):
@@ -1452,6 +1470,14 @@ def _connection(req: Dict[str, Any], password: str) -> Tuple[Dict[str, Any], Dic
             "create_bucket": True,
         }
         res["connection"] = {"console_url": f"http://{addr}:{host_port(req, 9001)}"}
+    elif service in onprem_s3.SERVICES:
+        bucket = _bucket_name(key)
+        if bucket != key:
+            res["name"] = bucket
+        s3 = onprem_s3.resource(req, password, prefix, bucket)
+        env.update(s3["env"])
+        res["options"] = s3["options"]
+        res["connection"] = s3["connection"]
     elif service == "memcached":
         res["connection"] = {"host": addr, "port": port}
     elif service == "mailpit":
@@ -1649,6 +1675,8 @@ def create(
         _prepare_volume(req, spec, target, sh, emit)
     if req["service"] in onprem_secretsmanager.SERVICES:
         onprem_secretsmanager.launch(req, password, target, sh)
+    elif req["service"] in onprem_s3.SERVICES:
+        onprem_s3.launch(req, password, target, sh)
     else:
         sh(docker_argv(target, run_args(req, password)))
     if req["service"] == "smtp":
@@ -2308,6 +2336,9 @@ def service_usage(root: Path, key: str, *, reveal: bool = False, probe: bool = T
         md.append("```bash\n" + "\n".join(exports) + "\n```\n")
     if entry["service"] in onprem_secretsmanager.SERVICES:
         md.append(onprem_secretsmanager.usage_markdown(entry, _var_prefix(key)))
+    elif entry["service"] in onprem_s3.SERVICES:
+        bucket = str((res.get("options") or {}).get("bucket") or key)
+        md.append(onprem_s3.usage_markdown(entry, _var_prefix(key), bucket))
     else:
         flavor = flavor_for(str(res.get("type")), res.get("options") or {}, res.get("connection") or {},
                             entry["service"])

@@ -30,6 +30,48 @@ resources:
     options: {driver: directory, path: /mnt/scans}
 ```
 
+## pskit's Amazon S3 compatible server (one click)
+
+*Resources → On-prem services → + Create service → Object storage → Amazon S3 compatible* (`s3` in Python, `s3-node`
+in Node.js), or the CLI:
+
+```bash
+pskit resources onprem create files --service s3 --user AKIAPROD --save                  # this machine
+pskit resources onprem create files --service s3-node --server edge1 --save              # a saved SSH server
+```
+
+It runs pskit's own S3 server, whose code is in [`aws/s3`](../../../aws/s3/README.md), on the stock `python` / `node`
+image (nothing is built or pushed). Unlike LocalStack it **checks every request's signature** (AWS Signature Version 4
+or 2): the service's *user* is the access key ID and its *password* the secret access key. The resource is a `storage`
+bucket on the `s3` driver (created on first use), so storage triggers work, and the env file gets
+`PSKIT_<KEY>_URL`, `_ACCESS_KEY` and `_SECRET_KEY` for any other program:
+
+```python
+import os, boto3
+from botocore.config import Config
+
+s3 = boto3.client("s3", endpoint_url=os.environ["PSKIT_FILES_URL"], region_name="us-east-1",
+                  aws_access_key_id=os.environ["PSKIT_FILES_ACCESS_KEY"],
+                  aws_secret_access_key=os.environ["PSKIT_FILES_SECRET_KEY"],
+                  config=Config(s3={"addressing_style": "path"}))
+s3.upload_file("report.pdf", "files", "reports/2024/report.pdf")
+print(s3.generate_presigned_url("get_object", Params={"Bucket": "files", "Key": "reports/2024/report.pdf"}))
+```
+
+It covers the S3 API that applications use: buckets, ListObjects / ListObjectsV2 / ListObjectVersions, put / get /
+head / delete / copy with ranges, conditions, metadata, tags and checksums (CRC32, CRC32C, CRC64NVME, SHA1, SHA256),
+multipart uploads, versioning and delete markers, presigned URLs and browser POST uploads, bucket policies (they decide
+what unsigned requests may do), ACLs, block public access, CORS, lifecycle rules (applied hourly), static website
+hosting, object lock (retention and legal hold) and default encryption; logging, notification and replication settings
+are stored. S3 Select, torrents and directory buckets are not supported, and objects are not encrypted at rest.
+
+Its **web console** (`http://<server>:<port>/ui/`, *Web UI → S3 console* on the service) signs in with the same user
+and password: buckets and every bucket setting, folders, drag-and-drop uploads of files and folders, downloads,
+previews, share links, copy / move / rename, versions (restore an old one), metadata, tags, ACLs and object lock.
+*Browse → Buckets (S3)* in the studio works on it too. Back it up with *Backup* (a `.tar.gz` of the data volume).
+
+Run it without pskit with the Dockerfiles in `aws/s3` (see its README).
+
 ## MinIO (or Ceph, Garage, SeaweedFS, any S3-compatible store)
 
 ### 1. Create the bucket and keys (MinIO console)

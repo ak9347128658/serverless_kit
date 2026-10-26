@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-26
+
+### Added
+- **Amazon S3 compatible server** in `aws/s3`, in Python (standard library only) and Node.js (no npm packages), with
+  a Dockerfile for each, a `docker-compose.yml` and one shared web console (`ui/index.html`, served at `/ui/`).
+  boto3, the AWS SDKs, the AWS CLI (`aws s3` and `s3api`), rclone, s3cmd and pskit's `s3` driver work unchanged
+  through the endpoint. Every request is checked with AWS Signature Version 4 (header, presigned URLs,
+  `aws-chunked` streaming uploads with chunk and trailer signatures, browser POST policies) or Version 2.
+- Buckets: create / delete / head / list (paging), location, versioning (Enabled / Suspended, `null` versions,
+  delete markers), tags, bucket policies (statements for `Principal: "*"` decide what unsigned requests may do),
+  canned and grant ACLs, block public access, ownership controls, policy status, CORS (applied to preflight and
+  responses), lifecycle rules (applied every hour: expiration by days or date, noncurrent versions, expired delete
+  markers, incomplete multipart uploads, transitions), static website hosting (`/-/website/<bucket>/` and
+  `<bucket>.s3-website.<domain>`: index and error documents, redirects, routing rules), object lock (default
+  retention, GOVERNANCE / COMPLIANCE, legal hold), default encryption; logging, notification, replication,
+  accelerate, request payment, metrics, analytics, inventory and intelligent-tiering configurations are stored.
+- Objects: put / get / head / delete / copy (metadata and tagging directives), ranges, part numbers, conditional
+  reads and writes, user metadata and standard headers, `response-*` overrides, tags, ACLs, storage classes
+  (archive classes need RestoreObject), checksums CRC32, CRC32C, CRC64NVME, SHA1, SHA256 and `Content-MD5`,
+  DeleteObjects, GetObjectAttributes, ListObjects / ListObjectsV2 / ListObjectVersions (delimiters, markers,
+  `encoding-type=url`), multipart uploads (UploadPartCopy, ListParts, ListMultipartUploads, composite and
+  full-object checksums), path-style and virtual-hosted requests. Not supported: S3 Select, torrents, directory
+  buckets; SSE headers are returned but objects are not encrypted at rest.
+- Both servers keep the same data layout (one JSON record per key, one file per version, atomic writes, mode
+  600), so they are interchangeable on one volume.
+- Console: sign in with an access key and its secret key (or `S3_UI_PASSWORD`); buckets with every setting, folder
+  browsing and search, drag-and-drop upload of files and folders with progress, downloads, previews, share links
+  (presigned GET / PUT), copy / move / rename, delete, versions (download, delete, make current, show deleted),
+  metadata, tags, ACLs, object lock, unfinished uploads, *Run lifecycle now*. HttpOnly SameSite=Strict session,
+  per-session request token, lock-out after 10 failed sign-ins, strict CSP.
+- **On-prem services `s3` (Python) and `s3-node` (Node.js)**, under *Object storage*: the stock
+  `python:3.12-alpine` / `node:22-alpine` image gets the server and the console with `docker create` + `docker cp`
+  (scp first on SSH servers) + `docker start`, so nothing is built or pushed. User = access key ID, password =
+  secret key. The resource is a `storage` bucket on the `s3` driver (storage triggers work); the env file gets
+  `PSKIT_<KEY>_URL`, `_ACCESS_KEY` and `_SECRET_KEY`. Port 9000, data volume and *Backup*, *Web UI → S3 console*,
+  *Browse → Buckets (S3)*, an `aws s3` console and a *How to use* page (boto3, AWS SDK for JavaScript, AWS CLI).
+
 ## [2.1.0] - 2026-10-26
 
 ### Added

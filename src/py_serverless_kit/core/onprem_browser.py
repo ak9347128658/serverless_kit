@@ -41,6 +41,8 @@ BROWSERS: Dict[str, List[str]] = {
     "openbao": ["vault"],
     "secretsmanager": ["aws-secrets"],
     "secretsmanager-node": ["aws-secrets"],
+    "s3": ["s3"],
+    "s3-node": ["s3"],
 }
 _BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 

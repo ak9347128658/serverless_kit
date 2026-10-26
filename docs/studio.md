@@ -130,7 +130,9 @@ The **Test** page (or **Test** on a function row) sends events to a function:
   Machine** pick one. Every service has a **Console** (redis-cli, psql, mongosh, rpk, bao, ... or a shell in its
   container) and a **Terminal**. **Secret managers**: one-click OpenBao (Vault API), pskit's AWS Secrets Manager compatible server (Python or
   Node.js, with its own console) and LocalStack Secrets Manager,
-  read from handlers with `get_secret()` ([guide](resource-guides/onprem/secrets.md)).
+  read from handlers with `get_secret()` ([guide](resource-guides/onprem/secrets.md)). **Object storage**: also
+  pskit's Amazon S3 compatible server (Python or Node.js, with its own S3 console at `/ui/`)
+  ([guide](resource-guides/onprem/storage.md)).
 - **Resources → Guides → General → Existing cloud code**: what works when you bring Lambda ARNs, boto3 Lambda / SQS
   code or S3 / Azure / GCS SDK code, on every provider ([compatibility](resource-guides/compatibility.md)). On-prem
   queue guides show the boto3 SQS code against the host.

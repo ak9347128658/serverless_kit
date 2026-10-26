@@ -79,15 +79,21 @@ def create_args(req: Dict[str, Any], password: str) -> List[str]:
 
 def launch(req: Dict[str, Any], password: str, target: Dict[str, Any], sh: Any) -> None:
     """Create the container, copy ``/app`` into it and start it. ``sh`` is the services runner."""
+    start_with_app(req, target, sh, create_args(req, password), app_files(req["service"]))
+
+
+def start_with_app(req: Dict[str, Any], target: Dict[str, Any], sh: Any, create: List[str],
+                   files: Dict[str, bytes]) -> None:
+    """``docker create``, copy ``files`` into the container's ``/app`` (scp first over SSH) and ``docker start``."""
     from ..providers.onprem_remote import scp_argv
     from .onprem_services import _ssh_argv, docker_argv, ssh_options
 
     container = req["container"]
-    sh(docker_argv(target, create_args(req, password)))
+    sh(docker_argv(target, create))
     with tempfile.TemporaryDirectory() as tmp:
         app = Path(tmp) / "app"
         app.mkdir()
-        for name, data in app_files(req["service"]).items():
+        for name, data in files.items():
             (app / name).write_bytes(data)
         if target.get("method") == "ssh":
             remote = f"/tmp/pskit-{container}-app"  # noqa: S108 - removed right after

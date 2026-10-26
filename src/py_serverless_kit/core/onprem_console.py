@@ -70,6 +70,8 @@ CONSOLES: Dict[str, Dict[str, Any]] = {
 }
 
 CONSOLES["secretsmanager-node"] = CONSOLES["secretsmanager"]
+CONSOLES["s3"] = CONSOLES["s3-node"] = {"label": "aws s3 (helper)", "input": "cli", "examples": [
+    "s3 ls", "s3api list-buckets", "s3 ls s3://files --recursive", "s3api get-bucket-versioning --bucket files"]}
 
 
 class ConsoleError(Exception):
@@ -162,7 +164,7 @@ def command_args(entry: Dict[str, Any], line: str) -> Tuple[str, List[str]]:
     if service == "minio":
         script = 'mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc "$@"'
         return "exec", ["sh", "-c", script, "mc", *_split(line)]
-    if service in ("rustfs", "secretsmanager", "secretsmanager-node"):
+    if service in ("rustfs", "secretsmanager", "secretsmanager-node", "s3", "s3-node"):
         access, secret = _secret(entry, "_ACCESS_KEY"), _secret(entry, "_SECRET_KEY")
         return AWS_CLI, ["env", f"AWS_ACCESS_KEY_ID={access}", f"AWS_SECRET_ACCESS_KEY={secret}",
                          "AWS_DEFAULT_REGION=us-east-1", "aws", "--endpoint-url", f"http://{container}:{port}",
