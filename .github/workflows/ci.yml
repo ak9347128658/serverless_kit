@@ -4,9 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 3 * * 1"  # weekly, Monday 03:00 UTC: also runs the macOS tests
+  workflow_dispatch:      # "Run workflow" button: also runs the macOS tests
 
 permissions:
   contents: read
+
+# A new push cancels the older run of the same branch / PR, so stale jobs don't hold runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -21,8 +29,6 @@ jobs:
         include:
           - os: windows-latest
             python: "3.12"
-          - os: macos-latest
-            python: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,6 +40,21 @@ jobs:
       - run: mypy
       # A hung test fails after 5 minutes with its stack trace instead of stalling the job.
       - run: pytest --timeout=300 --cov=py_serverless_kit --cov-report=term-missing
+
+  # macOS runners are few and often queued for a long time, so not on every push / PR.
+  test-macos:
+    name: tests (py3.12, macos-latest)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest --timeout=300
 
   terraform-validate:
     name: terraform validate (${{ matrix.provider }})

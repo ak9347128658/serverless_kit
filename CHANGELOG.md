@@ -18,6 +18,8 @@ All notable changes to this project are documented here. The format follows [Kee
   swarm" message shows plain numbers.
 - **CI**: `pytest-timeout` (dev dependency) fails a hung test after 5 minutes with its stack trace, and test jobs
   stop after 30 minutes.
+- **CI**: the macOS tests run weekly and from the "Run workflow" button instead of on every push / PR (macOS
+  runners are often queued), and a new push cancels the older run of the same branch.
 
 ## [2.2.0] - 2026-10-26
 
