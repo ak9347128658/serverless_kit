@@ -366,16 +366,17 @@ class WorkflowEngine {
       await this.sleep(seconds);
     } else {
       // Real waits wake up early on cancel and never outlive the deadline.
-      let limit = seconds;
-      if (this.deadline !== null) limit = Math.max(0, Math.min(seconds, this.deadline - Date.now() / 1000));
-      if (!this.cancelled && limit > 0) {
+      // setTimeout may fire a millisecond early, so sleep again until the end has really passed.
+      let end = Date.now() + seconds * 1000;
+      if (this.deadline !== null) end = Math.min(end, this.deadline * 1000);
+      while (!this.cancelled && Date.now() < end) {
         await new Promise((resolve) => {
           const wake = () => {
             clearTimeout(timer);
             this._wakers.delete(wake);
             resolve();
           };
-          const timer = setTimeout(wake, limit * 1000);
+          const timer = setTimeout(wake, Math.ceil(end - Date.now()));
           this._wakers.add(wake);
         });
       }

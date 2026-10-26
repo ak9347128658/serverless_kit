@@ -127,8 +127,9 @@ def join_script(orchestrator: str, master: str, token: str, advertise: str,
             + '  echo "already in this swarm"\n'
             + "else\n"
             + '  if [ "$state" = "active" ] && [ "$manager" = "true" ]; then\n'
-            + '    others=$(dk node ls -q | grep -vx "$node_id" | wc -l)\n'
-            + "    services=$(dk service ls -q | wc -l)\n"
+            # $((...)) drops the padding BSD wc puts before the count.
+            + '    others=$(($(dk node ls -q | grep -vx "$node_id" | wc -l)))\n'
+            + "    services=$(($(dk service ls -q | wc -l)))\n"
             + '    if [ "$others" -gt 0 ] || [ "$services" -gt 0 ]; then\n'
             + '      echo "pskit: this server manages another swarm ($others other node(s), $services service(s)).'
             + ' Remove that cluster first, or run: docker swarm leave --force" >&2\n'

@@ -12,6 +12,7 @@ jobs:
   test:
     name: tests (py${{ matrix.python }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +32,8 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check src tests
       - run: mypy
-      - run: pytest --cov=py_serverless_kit --cov-report=term-missing
+      # A hung test fails after 5 minutes with its stack trace instead of stalling the job.
+      - run: pytest --timeout=300 --cov=py_serverless_kit --cov-report=term-missing
 
   terraform-validate:
     name: terraform validate (${{ matrix.provider }})

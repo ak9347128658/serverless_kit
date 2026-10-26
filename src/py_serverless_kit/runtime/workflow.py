@@ -210,8 +210,10 @@ class WorkflowEngine:
             return
         if self.sleep is time.sleep:
             # Real waits wake up early on cancel and never outlive the deadline.
-            limit = seconds if self.deadline is None else max(0.0, min(seconds, self.deadline - time.time()))
-            self.cancel_event.wait(limit)
+            # A wait can end a moment early, so wait again until the end has really passed.
+            end = time.time() + seconds if self.deadline is None else min(time.time() + seconds, self.deadline)
+            while not self.cancel_event.is_set() and time.time() < end:
+                self.cancel_event.wait(end - time.time())
         else:
             self.sleep(seconds)
         self._checkpoint()

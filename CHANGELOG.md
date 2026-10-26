@@ -11,6 +11,13 @@ All notable changes to this project are documented here. The format follows [Kee
   no longer set `baseUrl` or `moduleResolution: "node"`, which TypeScript 7 removed (`TS5102`, `TS5108`, `TS5090`).
 - **On-premises scripts** add `/usr/local/bin`, `/usr/bin` and the other system dirs *after* the server's `PATH`
   instead of before it, so a `docker` (or other tool) the server's `PATH` chooses is no longer overridden.
+- **Workflow timeouts**: a `wait` cut short by the workflow's `timeout` could wake a moment before the deadline
+  (timers fire early) and then finish the wait instead of failing with `States.Timeout`. The Node.js and Python
+  engines now keep waiting until the end has really passed.
+- **Swarm join** counts the other nodes and services without the padding BSD `wc` adds, so the "manages another
+  swarm" message shows plain numbers.
+- **CI**: `pytest-timeout` (dev dependency) fails a hung test after 5 minutes with its stack trace, and test jobs
+  stop after 30 minutes.
 
 ## [2.2.0] - 2026-10-26
 
