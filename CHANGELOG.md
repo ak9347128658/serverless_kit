@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-10-26
+
 ### Fixed
 - **TypeScript 7**: the generated `tsconfig.pskit.json`, the `pskit init` template and `examples/21-nodejs-typescript`
   no longer set `baseUrl` or `moduleResolution: "node"`, which TypeScript 7 removed (`TS5102`, `TS5108`, `TS5090`).
