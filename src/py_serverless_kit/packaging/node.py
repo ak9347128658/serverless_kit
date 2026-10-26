@@ -197,9 +197,10 @@ def compile_typescript(project_root: Path, source: Path, out_dir: Path, work: Pa
     if user_cfg is not None:
         config["extends"] = _posix(user_cfg)
     else:
-        options.update({"module": "commonjs", "target": "es2022", "esModuleInterop": True, "moduleResolution": "node"})
+        # No baseUrl / moduleResolution: TypeScript 7 removed both (and node10 resolution).
+        options.update({"module": "commonjs", "target": "es2022", "esModuleInterop": True})
         if types is not None:
-            options.update({"baseUrl": _posix(source), "paths": {"pskit": [_posix(types / "index.d.ts")]}})
+            options["paths"] = {"pskit": [_posix(types / "index.d.ts")]}
     config["compilerOptions"] = options
     config["include"] = [f"{_posix(source)}/**/*{suffix}" for suffix in TS_SUFFIXES]
     config["exclude"] = [f"{_posix(source)}/{name}/**" for name in ("node_modules", ".pskit", "dist", "build", "tests")]

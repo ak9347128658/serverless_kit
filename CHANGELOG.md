@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+- **TypeScript 7**: the generated `tsconfig.pskit.json`, the `pskit init` template and `examples/21-nodejs-typescript`
+  no longer set `baseUrl` or `moduleResolution: "node"`, which TypeScript 7 removed (`TS5102`, `TS5108`, `TS5090`).
+- **On-premises scripts** add `/usr/local/bin`, `/usr/bin` and the other system dirs *after* the server's `PATH`
+  instead of before it, so a `docker` (or other tool) the server's `PATH` chooses is no longer overridden.
+
 ## [2.2.0] - 2026-10-26
 
 ### Added

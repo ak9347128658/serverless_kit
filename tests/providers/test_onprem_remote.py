@@ -129,7 +129,7 @@ def test_apply_ssh_systemd_restarts_and_checks_health(tmp_path: Path):
     assert "http://127.0.0.1:9090/__pskit/health" in script
     assert "journalctl" in script
     assert "sudo -n" in script
-    assert 'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"' in script
+    assert 'export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' in script
 
 
 def test_release_archive_is_one_tree(tmp_path: Path):

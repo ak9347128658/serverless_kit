@@ -234,11 +234,11 @@ def _remote_tar(container: str) -> str:
 
 
 def _shell_prelude() -> str:
-    """PATH is often tiny on a non-login SSH session, so systemctl and python3 are missed."""
+    """PATH is often tiny on a non-login SSH session, so systemctl and python3 are missed: add the usual dirs after it."""
     return (
         "#!/bin/sh\n"
         "set -eu\n"
-        'export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"\n'
+        'export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
     )
 
 

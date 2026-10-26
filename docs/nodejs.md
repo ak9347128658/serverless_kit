@@ -93,8 +93,9 @@ calls (Vault / OpenBao, AWS Secrets Manager, or environment variables); see
   `.pskit/types/pskit/index.d.ts`, and the generated `tsconfig.json` maps the module to it:
 
   ```json
-  { "compilerOptions": { "baseUrl": ".", "paths": { "pskit": [".pskit/types/pskit/index.d.ts"] } } }
+  { "compilerOptions": { "paths": { "pskit": ["./.pskit/types/pskit/index.d.ts"] } } }
   ```
+  Leave out `baseUrl` and `moduleResolution: "node"`: TypeScript 7 removed them.
 
   Run `pskit package` once (or `pskit init`) if your editor can't resolve `pskit` yet.
 
