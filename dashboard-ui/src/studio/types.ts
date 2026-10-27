@@ -46,6 +46,8 @@ export interface ProviderMeta {
   node_runtimes?: string[];
   default_runtime?: string;
   max_timeout: number;
+  /** A storage event may name a storage resource (the service) and another bucket on it. */
+  storage_service_buckets?: boolean;
   notes?: string;
   options: Field[];
   regions?: { id: string; label: string }[];

@@ -213,6 +213,19 @@ def _join_dir(base: str, child: str, posix: bool) -> str:
     return str(Path(base) / child)
 
 
+def service_bucket(driver: Dict[str, Any], bucket: str) -> Dict[str, Any]:
+    """``driver`` (a storage resource's binding) pointed at another ``bucket`` on the same service."""
+    use = str(driver.get("use") or "builtin")
+    if use == "builtin":
+        return dict(driver)
+    if use == "directory":
+        raise ValueError(
+            "a `directory` storage resource is one folder, not a service with buckets; "
+            "drop `bucket` from the event or give the resource the builtin or an s3 driver"
+        )
+    return {**driver, ("container" if use == "azure_blob" else "bucket"): bucket}
+
+
 def _safe_name(value: str, what: str) -> Optional[str]:
     text = str(value)
     if not text or text in (".", "..") or "/" in text or "\\" in text:
@@ -237,6 +250,7 @@ class OnPremProvider(Provider):
     extra_requirements = ["tzdata"]
     max_timeout = 3600
     warn_on_embedded_workflow = False
+    storage_service_buckets = True
     standalone_resources = True
     notes = (
         "Runs a long-lived Python process. Default `options.deploy.method` is `local` "
@@ -436,15 +450,28 @@ class OnPremProvider(Provider):
                 self._services(config, Path("."))
             except ValueError as exc:
                 issues.append(Issue("error", str(exc), "provider.options.services"))
+            drivers: Dict[str, Dict[str, Any]] = {}
             for key, res in sorted(config.resources.items()):
                 try:
-                    self._driver(key, res, Path("."), spec)
+                    driver = self._driver(key, res, Path("."), spec)
                 except ValueError as exc:
                     issues.append(Issue("error", str(exc), f"resources.{key}"))
+                else:
+                    if driver is not None:
+                        drivers[key] = driver
                 if res.type in DRIVERS:
                     bad_name = _safe_name(res.native_name(key), res.type)
                     if bad_name:
                         issues.append(Issue("error", bad_name, f"resources.{key}.name"))
+            for name, fn in config.functions.items():
+                for sev in fn.events_of("storage"):
+                    key = str(sev.resource or "")
+                    if key in drivers and sev.bucket != config.resources[key].native_name(key):
+                        try:
+                            service_bucket(drivers[key], sev.bucket)
+                        except ValueError as exc:
+                            issues.append(Issue("error", f"bucket {sev.bucket} on resource {key}: {exc}",
+                                                f"functions.{name}"))
         for name, fn in config.functions.items():
             for ev in fn.events_of("http"):
                 if ev.auth != "none":
@@ -776,6 +803,9 @@ class OnPremProvider(Provider):
                 res_key = body.get("resource")
                 if res_key and res_key in resources and "driver" in resources[res_key]:
                     body["driver"] = resources[res_key]["driver"]
+                    if ev.type == "storage" and body.get("bucket") != resources[res_key]["name"]:
+                        # Another bucket on that resource's storage service.
+                        body["driver"] = service_bucket(body["driver"], str(body["bucket"]))
                 events.append(body)
             functions[name] = {
                 "handler": fn.handler,
@@ -1241,6 +1271,9 @@ def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> 
             "spaces": ("region",),
             "oci": ("region", "namespace"),
             "r2": ("account_id",),
+            "b2": ("region",),
+            "linode": ("region",),
+            "scaleway": ("region",),
         }.get(provider, ())
         need(*required)
         bucket = str(value("bucket") or native)

@@ -220,7 +220,7 @@ How each one leases messages, so a crashed host never loses one (at-least-once):
 | Driver | Parameters (`*` = required) |
 |---|---|
 | `s3` | `bucket` (default: native name), `access_key` + `secret_key` (both or neither; neither = the `AWS_*` variables, then anonymous), `session_token`, `prefix`, `region`, `path_style`. With `endpoint` (MinIO, Ceph, ...) requests go there path-style. Without one they go to AWS: `https://s3.<region>.amazonaws.com`, virtual-host style. `provider:` picks a preset below |
-| `aws`, `oss`, `cos`, `obs`, `oci`, `ibm_cos`, `spaces`, `r2`, `minio` | the same parameters; the preset fills in the endpoint, addressing style and signing region (also usable as `driver: s3` + `provider: <name>`) |
+| `aws`, `oss`, `cos`, `obs`, `oci`, `ibm_cos`, `spaces`, `r2`, `minio`, `wasabi`, `b2`, `linode`, `scaleway` | the same parameters; the preset fills in the endpoint, addressing style and signing region (also usable as `driver: s3` + `provider: <name>`) |
 | `azure_blob` | auth as `azure_queue`, `container` (default: native name), `prefix` |
 | `gcs` | auth as `pubsub`, `bucket` (default: native name), `prefix`, `endpoint` (default `https://storage.googleapis.com`; fake-gcs-server via `endpoint` + `emulator: true`, or `STORAGE_EMULATOR_HOST`) |
 | `custom` | `class`*, keyword arguments as for queues |
@@ -236,8 +236,30 @@ How each one leases messages, so a crashed host never loses one (at-least-once):
 | `spaces` | `https://<region>.digitaloceanspaces.com` | virtual-host | `region` (`nyc3`) | |
 | `r2` | `https://<account_id>.r2.cloudflarestorage.com` | path | `account_id` | signing region `auto` |
 | `minio` | your `endpoint` | path | `endpoint` | |
+| `wasabi` | `https://s3.<region>.wasabisys.com` | virtual-host | | `region` defaults to `us-east-1` |
+| `b2` | `https://s3.<region>.backblazeb2.com` | virtual-host | `region` (`us-west-004`) | application key ID as `access_key` |
+| `linode` | `https://<region>.linodeobjects.com` | virtual-host | `region` (`us-east-1`) | Akamai / Linode Object Storage |
+| `scaleway` | `https://s3.<region>.scw.cloud` | virtual-host | `region` (`fr-par`) | |
 
-`endpoint`, `path_style` and `signing_region` override any preset. The drivers are tested against local fakes of each documented API, not against the live services; try a new provider with a test bucket first.
+Ceph RGW, SeaweedFS, Garage, RustFS, LocalStack, pskit's own `s3` service and other self-hosted stores: `driver: s3` with `endpoint` (path-style by default).
+
+`endpoint`, `path_style` and `signing_region` override any preset. The S3 driver also: signs for and talks to the bucket's real region when AWS (or a store that copies it) answers that the bucket lives elsewhere; falls back to the original ListObjects API on stores without ListObjectsV2; uses path-style for dotted bucket names over HTTPS (their TLS certificate does not cover them); and, with `create_bucket: true`, sends the region as `LocationConstraint` outside `us-east-1` and accepts a bucket the keys may use but not create.
+
+**One storage service, many buckets (on premises).** A storage event can name a storage resource *and* a bucket: the resource is the service (driver, endpoint, keys) and `bucket` is any bucket on it. Without `bucket`, the event watches the resource's own bucket.
+
+```yaml
+resources:
+  minio:                                   # the service: one set of keys for every bucket
+    type: storage
+    external: true
+    options: {driver: minio, endpoint: http://minio.internal:9000, bucket: uploads,
+              access_key_env: MINIO_ACCESS_KEY, secret_key_env: MINIO_SECRET_KEY}
+functions:
+  ingest:   {handler: app.handlers.ingest,   events: [{storage: {resource: minio}}]}                    # uploads
+  invoices: {handler: app.handlers.invoices, events: [{storage: {resource: minio, bucket: invoices}}]}
+```
+
+`builtin` resources make it another bucket folder under `data_dir`; a `directory` resource is a single folder and cannot. Cloud providers reject `resource` + a different `bucket` (use one of them). In the studio: *Functions → trigger → Storage → Project resource*, pick the service, then type the bucket. The drivers are tested against local fakes of each documented API, not against the live services; try a new provider with a test bucket first.
 
 Every storage driver lists the bucket (all pages) on each poll. A new or changed ETag emits `created`, a missing key emits `deleted`. Objects present at first start are recorded and not emitted. `prefix` limits the host to keys below it and is stripped from `record.key`. On a large bucket, always set `prefix`.
 

@@ -477,6 +477,8 @@ function SourceForm({
   const region = str(asObject(draft.provider).region) || meta.providers.find((p) => p.name === providerName)?.default_region;
   const fields: Field[] = (meta.events[type] || []).filter((f) => !HANDLED.has(f.key));
   const fallback = `${fnName}-${type === "storage" ? "uploads" : type === "queue" ? "jobs" : "events"}`;
+  // On-premises a storage trigger can watch any bucket on a storage resource's service.
+  const serviceBuckets = type === "storage" && !!meta.providers.find((p) => p.name === providerName)?.storage_service_buckets;
 
   const setMode = (m: SourceMode) => {
     setModeState(m);
@@ -560,11 +562,38 @@ function SourceForm({
         />
       </FormRow>
       {mode === "resource" && (
-        <FormRow label="Resource" required help="Name, managed/external and on-prem driver come from the Resources page.">
+        <FormRow
+          label={serviceBuckets ? "Storage service" : "Resource"}
+          required
+          help={
+            serviceBuckets
+              ? "The storage resource whose service (driver, endpoint, keys) the trigger watches: MinIO, RustFS, Ceph, AWS S3, R2, Wasabi or any S3-compatible store. Set it up on the Resources page."
+              : "Name, managed/external and on-prem driver come from the Resources page."
+          }
+        >
           <EnumSelect
             value={str(config.resource)}
-            options={resources.map(([k, r]) => ({ value: k, label: `${k}${asObject(r).external ? " (external)" : ""} · ${str(asObject(r).name) || k}` }))}
+            options={resources.map(([k, r]) => {
+              const driver = storageDriverName(asObject(r));
+              return {
+                value: k,
+                label: `${k}${asObject(r).external ? " (external)" : ""} · ${resourceBucket(k, asObject(r))}${type === "storage" && driver ? ` · ${driver}` : ""}`,
+              };
+            })}
             onChange={(k) => set("resource", k)}
+          />
+        </FormRow>
+      )}
+      {mode === "resource" && serviceBuckets && (
+        <FormRow
+          label="Bucket"
+          help={`Any bucket on this service; empty = the resource's own bucket (${resourceBucket(str(config.resource), asObject(asObject(draft.resources)[str(config.resource)]))}). With create_bucket on the resource, a missing bucket is created on first use.`}
+        >
+          <TextInput
+            mono
+            value={str(config.bucket)}
+            placeholder={resourceBucket(str(config.resource), asObject(asObject(draft.resources)[str(config.resource)]))}
+            onChange={(v) => set("bucket", v.trim() ? v.trim() : undefined)}
           />
         </FormRow>
       )}
@@ -625,6 +654,19 @@ function SourceForm({
       {fields.length > 0 && <FieldForm fields={fields} value={config} onChange={set} idPrefix={`ev-${type}`} compact />}
     </div>
   );
+}
+
+/** The on-prem driver of a storage resource (`options.driver` or `connection.driver`), e.g. `minio`. */
+function storageDriverName(res: JsonObject): string {
+  const raw = asObject(res.options).driver ?? asObject(res.connection).driver;
+  return typeof raw === "string" ? raw : str(asObject(raw).use);
+}
+
+/** The bucket a resource stands for: its driver's `bucket` / `container`, else its name, else its key. */
+function resourceBucket(key: string, res: JsonObject): string {
+  const options = asObject(res.options);
+  const driver = asObject(options.driver);
+  return str(driver.bucket) || str(driver.container) || str(options.bucket) || str(options.container) || str(res.name) || key;
 }
 
 /** Lists the queues / buckets / topics that exist in the account and attaches one. */

@@ -253,6 +253,20 @@ def test_schema_errors(make_project, resources, events, message):
         )
 
 
+def test_storage_event_bucket_on_a_resource_is_onprem_only(make_project):
+    project = make_project(
+        """
+        service: res
+        provider: {name: aws}
+        resources: {s: {type: storage}}
+        functions:
+          w: {handler: app.handlers.worker, events: [{storage: {resource: s, bucket: other}}, {storage: {resource: s}}]}
+        """
+    )
+    errors = [i.message for i in project.validate() if i.level == "error"]
+    assert len([e for e in errors if "on-premises only" in e]) == 1, errors
+
+
 def test_local_runner_injects_bindings(make_project):
     from py_serverless_kit.local import LocalRunner, build_event
 

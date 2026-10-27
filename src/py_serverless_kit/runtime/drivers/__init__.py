@@ -9,7 +9,8 @@ below return ``None`` for them. The others implement these interfaces
   (Alibaba Cloud), ``cloudflare_queue``, ``pskit_host`` (a built-in queue of another
   on-premises host) and ``custom`` (a class of your own);
 * storage: ``s3`` (any S3-compatible store; presets ``aws``, ``oss``, ``cos``,
-  ``obs``, ``oci``, ``ibm_cos``, ``spaces``, ``r2``, ``minio``), ``azure_blob``,
+  ``obs``, ``oci``, ``ibm_cos``, ``spaces``, ``r2``, ``minio``, ``wasabi``, ``b2``,
+  ``linode``, ``scaleway``; Ceph, SeaweedFS, Garage, RustFS... through ``s3`` with an ``endpoint``), ``azure_blob``,
   ``gcs`` and ``custom``.
 
 Any option ``<name>_env: VAR`` is read from the host's environment when the
@@ -73,7 +74,7 @@ _FILE_BACKED = ("", "builtin", "directory")
 QUEUE_DRIVERS = ("redis", "redis_stream", "sqs", "azure_queue", "pubsub", "mns", "cloudflare_queue", "pskit_host", "custom")
 # S3-compatible object stores. A preset fills in the endpoint, addressing style and
 # signing region; the user still supplies the bucket and the HMAC keys.
-S3_PRESETS = ("aws", "oss", "cos", "obs", "oci", "ibm_cos", "spaces", "r2", "minio")
+S3_PRESETS = ("aws", "oss", "cos", "obs", "oci", "ibm_cos", "spaces", "r2", "minio", "wasabi", "b2", "linode", "scaleway")
 STORAGE_DRIVERS = ("s3", "azure_blob", "gcs", "custom") + S3_PRESETS
 QUEUE_METHODS = ("submit", "claim", "settle")
 STORAGE_METHODS = ("scan", "put", "get", "delete")
@@ -148,6 +149,18 @@ def s3_preset(provider: str, b: Dict[str, Any]) -> Tuple[str, bool, str]:
     if provider == "minio":
         need("endpoint")
         return str(b["endpoint"]), True, region or "us-east-1"
+    if provider == "wasabi":  # https://docs.wasabi.com/docs/what-are-the-service-urls-for-wasabi-s-different-storage-regions
+        region = region or "us-east-1"
+        return f"https://s3.{region}.wasabisys.com", False, region
+    if provider == "b2":  # https://www.backblaze.com/docs/cloud-storage-s3-compatible-api
+        need("region")
+        return f"https://s3.{region}.backblazeb2.com", False, region
+    if provider == "linode":  # https://techdocs.akamai.com/cloud-computing/docs/object-storage
+        need("region")
+        return f"https://{region}.linodeobjects.com", False, region
+    if provider == "scaleway":  # https://www.scaleway.com/en/docs/object-storage/api-cli/using-api-call-list/
+        need("region")
+        return f"https://s3.{region}.scw.cloud", False, region
     raise ValueError(f"unknown S3-compatible provider {provider!r}; expected one of {', '.join(S3_PRESETS)}")
 
 
@@ -284,7 +297,7 @@ def _ensured(driver: Any, use: str, b: Dict[str, Any]) -> Any:
 
         return Ensured(driver, create_gcs, f"bucket {driver.bucket}")
     if use == "s3" or use in S3_PRESETS:
-        return Ensured(driver, lambda: driver.request("PUT")[0], f"bucket {driver.bucket}")
+        return Ensured(driver, driver.create_bucket, f"bucket {driver.bucket}")
     return driver
 
 

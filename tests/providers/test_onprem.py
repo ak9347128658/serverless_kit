@@ -488,3 +488,45 @@ def test_external_driver_bindings_keep_secrets_as_env_names(make_project, kind, 
     spec = _json.loads((project.work_dir / "onprem_app" / "pskit_host.json").read_text("utf-8"))
     assert spec["resources"]["res"]["driver"] == expected
     assert spec["functions"]["w"]["events"][0]["driver"] == expected
+
+
+def test_storage_event_watches_another_bucket_on_a_resource_service(make_project):
+    import json as _json
+
+    from py_serverless_kit.core.deployer import Deployer
+
+    project = make_project(
+        """
+        service: drv
+        provider: {name: onprem}
+        resources:
+          store: {type: storage, external: true, options: {driver: minio, endpoint: "http://minio:9000",
+                  bucket: files, access_key_env: A, secret_key_env: B}}
+        functions:
+          w: {handler: app.handlers.worker, events: [{storage: {resource: store, bucket: invoices}},
+                                                     {storage: {resource: store}}]}
+        """
+    )
+    assert not [i for i in project.validate() if i.level == "error"]
+    Deployer(project, echo=lambda _m: None).package(skip_deps=True)
+    spec = _json.loads((project.work_dir / "onprem_app" / "pskit_host.json").read_text("utf-8"))
+    invoices, own = spec["functions"]["w"]["events"]
+    assert invoices["bucket"] == "invoices"
+    assert invoices["driver"] == {**spec["resources"]["store"]["driver"], "bucket": "invoices"}
+    assert invoices["driver"]["endpoint"] == "http://minio:9000"
+    assert own["bucket"] == "store" and own["driver"]["bucket"] == "files"
+
+
+def test_storage_event_bucket_on_a_directory_resource_is_an_error(make_project):
+    project = make_project(
+        """
+        service: drv
+        provider: {name: onprem}
+        resources:
+          store: {type: storage, options: {driver: directory, path: ./drop}}
+        functions:
+          w: {handler: app.handlers.worker, events: [{storage: {resource: store, bucket: invoices}}]}
+        """
+    )
+    errors = [i.message for i in project.validate() if i.level == "error"]
+    assert any("is one folder" in e for e in errors), errors

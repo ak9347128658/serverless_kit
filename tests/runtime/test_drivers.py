@@ -213,6 +213,9 @@ class FakeS3(BaseHTTPRequestHandler):
     objects: Dict[str, bytes] = {}
     auth_headers: List[str] = []
     paths: List[str] = []
+    v1_only = False  # answers ListObjectsV2 with 400, pages ListObjects without NextMarker
+    home_region = ""  # requests signed for another region get AWS's 400 naming this one
+    bucket_bodies: List[bytes] = []
 
     def log_message(self, *args) -> None:
         return None
@@ -225,6 +228,21 @@ class FakeS3(BaseHTTPRequestHandler):
         bucket, _, key = path[1:].partition("/")
         return bucket, key, dict(parse_qsl(url.query))
 
+    def _wrong_region(self) -> bool:
+        home = type(self).home_region
+        if home and f"/{home}/s3/" not in self.headers.get("authorization", ""):
+            self._reply(400, f"<Error><Code>AuthorizationHeaderMalformed</Code><Region>{home}</Region></Error>".encode(),
+                        {"x-amz-bucket-region": home})
+            return True
+        return False
+
+    def _list_v1(self, query) -> None:
+        keys = sorted(k for k in self.objects if k > query.get("marker", ""))
+        page = keys[:2]
+        items = "".join(f"<Contents><Key>{k}</Key><Size>{len(self.objects[k])}</Size></Contents>" for k in page)
+        more = "true" if len(keys) > 2 else "false"
+        self._reply(200, f"<ListBucketResult><IsTruncated>{more}</IsTruncated>{items}</ListBucketResult>".encode())
+
     def _reply(self, status: int, body: bytes = b"", headers=None) -> None:
         self.send_response(status)
         for k, v in (headers or {}).items():
@@ -236,8 +254,14 @@ class FakeS3(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         bucket, key, query = self._parts()
+        if self._wrong_region():
+            return None
         if bucket != "media":
             return self._reply(404, b"<Error><Code>NoSuchBucket</Code></Error>")
+        if self.v1_only and not key:
+            if query.get("list-type") == "2":
+                return self._reply(400, b"<Error><Code>InvalidArgument</Code></Error>")
+            return self._list_v1(query)
         if query.get("list-type") == "2":
             keys = sorted(k for k in self.objects if k.startswith(query.get("prefix", "")))
             start = int(query.get("continuation-token", "0"))
@@ -264,7 +288,11 @@ class FakeS3(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # noqa: N802
         _bucket, key, _ = self._parts()
-        self.objects[key] = self.rfile.read(int(self.headers.get("content-length") or 0))
+        data = self.rfile.read(int(self.headers.get("content-length") or 0))
+        if not key:  # CreateBucket
+            type(self).bucket_bodies.append(data)
+            return self._reply(409 if _bucket == "media" else 200)
+        self.objects[key] = data
         self._reply(200)
 
     def do_DELETE(self) -> None:  # noqa: N802
@@ -278,6 +306,9 @@ def s3_server():
     FakeS3.objects = {}
     FakeS3.auth_headers = []
     FakeS3.paths = []
+    FakeS3.v1_only = False
+    FakeS3.home_region = ""
+    FakeS3.bucket_bodies = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), FakeS3)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -322,6 +353,55 @@ def test_s3_errors(s3_server):
         S3Storage("http://127.0.0.1:1", "media", timeout=2).scan()
     with pytest.raises(ValueError):
         S3Storage("ftp://x", "b")
+
+
+def test_s3_scan_falls_back_to_list_objects_v1(s3_server):
+    FakeS3.v1_only = True
+    FakeS3.objects = {f"k{i}": b"x" * i for i in range(5)}
+    assert sorted(S3Storage(s3_server, "media").scan()) == [f"k{i}" for i in range(5)]
+
+
+def test_s3_follows_the_bucket_region(s3_server):
+    FakeS3.home_region = "eu-west-1"
+    FakeS3.objects = {"a.txt": b"hi"}
+    store = S3Storage(s3_server, "media", region="us-east-1", access_key="AK", secret_key="SK")
+    assert store.get("a.txt") == b"hi"
+    assert store.region == "eu-west-1"
+    assert "/eu-west-1/s3/" in FakeS3.auth_headers[-1]
+
+
+def test_s3_create_bucket_sends_the_region(s3_server):
+    created = make_storage_driver(
+        {"use": "s3", "endpoint": s3_server, "bucket": "fresh", "region": "eu-central-1", "access_key": "AK",
+         "secret_key": "SK", "create_bucket": True}
+    )
+    created.put("a.txt", b"1")
+    assert b"<LocationConstraint>eu-central-1</LocationConstraint>" in FakeS3.bucket_bodies[0]
+    S3Storage(s3_server, "media").create_bucket()  # us-east-1: no body; 409 = already there
+    assert FakeS3.bucket_bodies[-1] == b""
+
+
+@pytest.mark.parametrize(
+    "use,binding,endpoint",
+    [
+        ("wasabi", {"region": "eu-central-1"}, "https://s3.eu-central-1.wasabisys.com"),
+        ("b2", {"region": "us-west-004"}, "https://s3.us-west-004.backblazeb2.com"),
+        ("linode", {"region": "us-east-1"}, "https://us-east-1.linodeobjects.com"),
+        ("scaleway", {"region": "fr-par"}, "https://s3.fr-par.scw.cloud"),
+    ],
+)
+def test_more_s3_presets(use, binding, endpoint):
+    store = make_storage_driver({"use": use, "bucket": "b", **binding})
+    assert f"{store.scheme}://{store.netloc}" == endpoint
+    assert store.path_style is False
+
+
+def test_dotted_bucket_uses_path_style_over_https():
+    store = S3Storage("https://s3.us-east-1.amazonaws.com", "my.site", path_style=False)
+    assert store._target("k") == ("s3.us-east-1.amazonaws.com", "/my.site/k")
+    assert S3Storage("https://s3.us-east-1.amazonaws.com", "plain", path_style=False)._target("k")[0] == (
+        "plain.s3.us-east-1.amazonaws.com"
+    )
 
 
 def test_factories_return_none_for_file_backends():

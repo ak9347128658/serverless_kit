@@ -23,7 +23,7 @@ interface Row {
 }
 
 const MANAGEABLE = ["storage", "queue", "topic", "smtp"];
-const CLOUD_ORDER = ["aws", "azure", "gcp", "alibaba", "tencent", "huawei", "oracle", "ibm", "digitalocean", "cloudflare", "self-hosted", "any"];
+const CLOUD_ORDER = ["aws", "azure", "gcp", "alibaba", "tencent", "huawei", "oracle", "ibm", "digitalocean", "cloudflare", "s3-clouds", "self-hosted", "any"];
 const CLOUD_LABEL: Record<string, string> = {
   aws: "AWS",
   azure: "Azure",
@@ -35,6 +35,7 @@ const CLOUD_LABEL: Record<string, string> = {
   ibm: "IBM Cloud",
   digitalocean: "DigitalOcean",
   cloudflare: "Cloudflare",
+  "s3-clouds": "Other S3-compatible clouds",
   "self-hosted": "Self-hosted",
   any: "Built-in & custom",
 };

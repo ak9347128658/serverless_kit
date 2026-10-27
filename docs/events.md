@@ -220,7 +220,7 @@ functions:
       - storage: {resource: uploads, prefix: in/}
 ```
 
-The event uses the resource's native name and `existing: <external>`. The functions also get the resource's connection details. On premises, a resource can move the queue to Redis or the bucket to an S3-compatible store.
+The event uses the resource's native name and `existing: <external>`. The functions also get the resource's connection details. On premises, a resource can move the queue to Redis or the bucket to an S3-compatible store, and a storage event may set both `resource` and `bucket`: that bucket on the resource's storage service ([details](resources.md#storage-drivers)).
 
 ## Provider-specific behaviour worth knowing
 

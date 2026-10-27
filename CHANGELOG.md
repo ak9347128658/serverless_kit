@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+- On premises, a storage event can set both `resource` and `bucket`: the resource is the storage service (driver,
+  endpoint, keys) and `bucket` is any bucket on it, e.g. `storage: {resource: minio, bucket: invoices}`. The studio's
+  storage trigger form picks the *Storage service* and takes the bucket name. Cloud providers reject the combination.
+- S3 presets `wasabi`, `b2` (Backblaze), `linode` (Akamai) and `scaleway`.
+
+### Fixed
+- S3-compatible storage: the driver follows a bucket that lives in another region (AWS's 301 / 400), falls back to
+  ListObjects on stores without ListObjectsV2, uses path-style for dotted bucket names over HTTPS, and with
+  `create_bucket` sends the region as `LocationConstraint` outside us-east-1 and accepts a bucket the keys may use
+  but not create.
+
 ## [2.3.4] - 2026-10-27
 
 ### Fixed

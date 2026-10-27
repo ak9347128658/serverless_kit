@@ -167,6 +167,8 @@ class Provider(ABC):
     max_timeout: ClassVar[int] = 900
     # Managed storage/queue/topic resources that no event uses are created by this provider.
     standalone_resources: ClassVar[bool] = False
+    # A storage event may name a storage resource (the service) and another bucket on it.
+    storage_service_buckets: ClassVar[bool] = False
     # Embedded workflows on a cloud function are capped by that function's timeout.
     # A long-running host (on-premises) sets this to False.
     warn_on_embedded_workflow: ClassVar[bool] = True
@@ -276,6 +278,19 @@ class Provider(ABC):
                             where,
                         )
                     )
+            if not self.storage_service_buckets:
+                for sev in fn.events_of("storage"):
+                    res = config.resources.get(sev.resource or "")
+                    if res is not None and sev.bucket != res.native_name(str(sev.resource)):
+                        issues.append(
+                            Issue(
+                                "error",
+                                f"storage event sets both `resource: {sev.resource}` and `bucket: {sev.bucket}`; "
+                                f"another bucket on a resource's service is on-premises only. On "
+                                f"{self.display_name} use one of them",
+                                where,
+                            )
+                        )
             if config.timeout_of(fn) > self.max_timeout:
                 issues.append(
                     Issue(
@@ -409,6 +424,7 @@ class Provider(ABC):
             "runtimes": sorted(self.runtimes),
             "node_runtimes": sorted(self.node_runtimes, key=lambda rt: int(rt[6:])),
             "max_timeout": self.max_timeout,
+            "storage_service_buckets": self.storage_service_buckets,
             "terraform_provider": self.terraform_source,
             "notes": self.notes,
         }

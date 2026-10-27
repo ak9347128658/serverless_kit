@@ -243,7 +243,8 @@ STORAGE_DRIVERS: List[Dict[str, Any]] = [
         "any",
         [
             _BUCKET,
-            field("endpoint", "Endpoint", help="Empty = AWS. Set it for MinIO, Ceph and others."),
+            field("endpoint", "Endpoint",
+                  help="Empty = AWS. Set it for MinIO, Ceph, SeaweedFS, Garage, RustFS, LocalStack and others."),
             field("region", "Region", default="us-east-1"),
             *_AWS_CREDS,
             _PREFIX,
@@ -285,6 +286,15 @@ STORAGE_DRIVERS: List[Dict[str, Any]] = [
     _preset(
         "minio", "MinIO", "self-hosted", [field("endpoint", "Endpoint", required=True, placeholder="http://minio:9000")]
     ),
+    _preset("wasabi", "Wasabi", "s3-clouds", [field("region", "Region", default="us-east-1")]),
+    _preset(
+        "b2", "Backblaze B2", "s3-clouds", [field("region", "Region", required=True, placeholder="us-west-004")],
+        "Application key ID as the access key.",
+    ),
+    _preset("linode", "Akamai (Linode) Object Storage", "s3-clouds",
+            [field("region", "Region", required=True, placeholder="us-east-1")]),
+    _preset("scaleway", "Scaleway Object Storage", "s3-clouds",
+            [field("region", "Region", required=True, placeholder="fr-par")]),
     _driver(
         "azure_blob",
         "Azure Blob Storage",

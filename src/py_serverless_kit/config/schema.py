@@ -141,6 +141,9 @@ class QueueEvent(_Model):
 
 
 class StorageEvent(_Model):
+    """``bucket`` alone, ``resource`` alone, or both: the bucket ``bucket`` on the storage service (endpoint,
+    keys, driver) of resource ``resource``. Combining them is on-premises only."""
+
     bucket: str = ""
     resource: Optional[str] = Field(None, description="key of a `resources:` entry of type storage")
     existing: bool = False
@@ -690,6 +693,10 @@ class ServiceConfig(_Model):
                 attr = "bucket" if ev.type == "storage" else "name"
                 native = res.native_name(key)
                 current = getattr(ev.config, attr)
+                if ev.type == "storage" and current and current != native:
+                    # Another bucket on the resource's storage service (providers that cannot say so reject it).
+                    ev.config.existing = res.external
+                    continue
                 if current and current != native:
                     raise ValueError(
                         f"function {fn_name!r}: set either `{attr}` or `resource` on the {ev.type} event, not both"

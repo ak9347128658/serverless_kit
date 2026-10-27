@@ -118,6 +118,10 @@ functions:
 
 Other S3-compatible stores: `driver: s3` with `endpoint` (and `path_style: true` if needed).
 
+Watch another bucket on the same MinIO (same endpoint and keys) without a second resource:
+`events: [{storage: {resource: uploads, bucket: invoices}}]`. In the studio, pick the resource under *Storage service*
+and type the bucket. See [resources.md](../../resources.md#storage-drivers).
+
 ## A bucket in a cloud
 
 | Bucket | Driver | Required | Where to find the values |
@@ -126,7 +130,7 @@ Other S3-compatible stores: `driver: s3` with `endpoint` (and `path_style: true`
 | Cloudflare R2 | `r2` | `account_id`, `access_key_env`, `secret_key_env` | [cloudflare/storage.md](../cloudflare/storage.md#2-collect-the-values) (*Manage R2 API Tokens*) |
 | Azure Blob | `azure_blob` | `connection_string_env` (or `account` + key / SAS), `container` | [azure/storage.md](../azure/storage.md#2-collect-the-values) |
 | Google Cloud Storage | `gcs` | `token_command` or `access_token_env` | bucket name from the Cloud Storage console |
-| Alibaba OSS, Tencent COS, Huawei OBS, Oracle, IBM COS, DigitalOcean Spaces | `oss`, `cos`, `obs`, `oci`, `ibm_cos`, `spaces` | `region` (+ `namespace` for `oci`), HMAC / S3 keys | each console's bucket overview and access-key page; presets in [resources.md](../../resources.md#storage-drivers) |
+| Alibaba OSS, Tencent COS, Huawei OBS, Oracle, IBM COS, DigitalOcean Spaces, Wasabi, Backblaze B2, Akamai (Linode), Scaleway | `oss`, `cos`, `obs`, `oci`, `ibm_cos`, `spaces`, `wasabi`, `b2`, `linode`, `scaleway` | `region` (+ `namespace` for `oci`), HMAC / S3 keys | each console's bucket overview and access-key page; presets in [resources.md](../../resources.md#storage-drivers) |
 
 ```yaml
 resources:
