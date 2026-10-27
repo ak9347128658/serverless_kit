@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-10-27
+
+### Fixed
+- Placement: a function's code was on every server. Functions whose handlers share a code file
+  (`app/handlers.py`) each got the whole file on every group's server. Each group's copy now holds only its own
+  functions' handlers (the others, and the imports only they used, are removed from that group's bundle; the
+  source is not changed). `pskit_host.json` lists what was removed (`stripped`).
+- Placement: every server answered every route by passing other groups' routes on, so
+  `http://<any server>/items/1` worked. Each server now answers only the routes of the functions it runs, and a
+  route of another group gets a `404` naming that group and its URL.
+
+### Added
+- `provider.options.placement.gateway: true`: the default group answers every route and passes other groups'
+  routes on (one URL for the project). On by default with `options.balancer`, whose route now points at the
+  default group only.
+- The studio's "Where functions run": every function can be unticked (unticking in the default group moves it to a
+  group you pick), All here / None buttons, and the default group is explained.
+
+### Changed
+- Requirements with placement are documented as global plus per function: each server installs the project's
+  `requirements.txt` and those of its own functions' folders only.
+
 ## [2.3.1] - 2026-10-27
 
 ### Fixed

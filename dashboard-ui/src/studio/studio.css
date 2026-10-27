@@ -625,6 +625,7 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .placement-fn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12.5px; }
 .placement-fn.on { border-color: var(--accent); background: var(--accent-soft); }
 .placement-fn input:disabled { cursor: default; }
+.placement-fn-actions { margin-bottom: 6px; }
 .deploy-groups { flex-basis: 100%; display: grid; gap: 8px; }
 
 /* firewall panel (GET /api/onprem-firewall) */

@@ -48,11 +48,24 @@ the nearest folder above its handler with a `requirements.txt` (Python) or `pack
   fail the deploy with a clear message: place them on different servers.
 * Node.js sub-projects get their own `node_modules` in their folder, so each function resolves its own versions.
 
+### Requirements: global plus per function
+
+Each server installs:
+
+* the project's `requirements.txt` (global: what every function needs), and
+* the `requirements.txt` of each of **its** functions' folders (`functions/<name>/requirements.txt`), never those of
+  functions placed elsewhere.
+
 ### Functions that share a code file
 
+Each server's copy of a shared code file holds only the handlers of its own functions: pskit removes the others
+(and the imports only they used) from that group's bundle; your source is not changed. Module-level helpers stay.
+`pskit_host.json` on the server lists what was removed (`stripped`). Moving them to their own folders is still
+cleaner, and gives each its own requirements:
+
 Functions whose handlers sit side by side in one file (`app/handlers.py` with `hello`, `get_item`,
-`create_item`, as `pskit init` makes them) are shared code: every server that runs any of them gets the whole
-file and the project's `requirements.txt`. Validation warns when they are in different groups. Split them:
+`create_item`, as `pskit init` makes them) are shared code. Validation warns when they are in different groups.
+Split them:
 
 ```bash
 pskit function split get-item create-item     # or: pskit function split --all --dry-run
@@ -81,7 +94,7 @@ with a shared secret (`.pskit/onprem-<stage>/peer-token`, out of git):
 | You do | What happens |
 |---|---|
 | `invoke("resize", data)` in a function on `api` | runs on `gpu`, the result (or the error, with its type) comes back |
-| an HTTP request to `api` for a route of `resize` | passed to `gpu` as it is, the answer passed back |
+| an HTTP request to `api` for a route of `resize` | `404` with the URL on `gpu` (each server answers only its own routes); with `placement.gateway: true` the default group passes it to `gpu` |
 | a **workflow** step that is a function on another server | runs there; `Retry` / `Catch` match its error type by name |
 | start a workflow on any group | it runs (and is recorded) on the default group; executions stay in one place |
 | send to a built-in queue whose consumer runs on `gpu` | the message is stored on `gpu` and its consumer runs there |
@@ -105,9 +118,18 @@ rules](onprem-network.md#4-functions-on-several-servers-provideroptionsplacement
 resource as before, so adding placement to a deployed stage moves nothing — and `terraform_data.host_<group>` for
 the others; unit `pskit-<service>-<stage>-<group>`, folder `onprem_app_<group>`, data (queues, buckets, logs) in
 `<data_dir>/groups/<group>`). `pskit info` and
-`deployment.json` list each group's endpoint and functions. Any group answers every route (it passes routes of
-other groups on), so with a [load balancer](load-balancers.md) (`options.balancer: edge`) the project gets one URL
-spread over the groups' hosts.
+`deployment.json` list each group's endpoint and functions.
+
+Each server answers only the HTTP routes of the functions it runs; a route of another group gets a `404` that
+names the group and its URL. For one URL for the whole project, make the default group the entry point:
+
+```yaml
+    placement:
+      gateway: true        # the default group answers every route, passing other groups' routes on
+```
+
+With a [load balancer](load-balancers.md) (`options.balancer: edge`) `gateway` is on unless you set it to `false`,
+and the load balancer sends the project's path to the default group.
 
 `--server NAME` / `--cluster NAME` move the default group only; the other groups always run where `pskit.yml`
 puts them.

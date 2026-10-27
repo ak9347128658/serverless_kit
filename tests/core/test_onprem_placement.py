@@ -276,7 +276,10 @@ def test_groups_call_each_other(make_project, render, tmp_path):
                     pass
                 assert time.time() < deadline, f"host on {port} did not start"
                 time.sleep(0.2)
-        assert _http(f"http://127.0.0.1:{api_port}/resize") == (200, {"resize": "gpu", "data": None})
+        # Each server answers only the routes of its own functions (no placement.gateway): it says where to go.
+        status, body = _http(f"http://127.0.0.1:{api_port}/resize")
+        assert status == 404 and f"127.0.0.1:{gpu_port}/resize" in body and "runs on group gpu" in body
+        assert _http(f"http://127.0.0.1:{gpu_port}/resize") == (200, {"resize": "gpu", "data": None})
         status, body = _http(f"http://127.0.0.1:{api_port}/hello")
         assert status == 200 and body["resize"] == {"resize": "gpu", "data": {"size": 2}}
         status, body = _http(f"http://127.0.0.1:{api_port}/workflows/pipeline?wait=true", b'{"x": 1}')
@@ -305,3 +308,60 @@ def test_a_saved_servers_home_data_dir_keeps_groups_inside_it(tmp_path):
     pl.resolve(options, tmp_path, "dev")
     assert options["placement"]["_groups"]["test-03"]["data_dir"] == "/home/azureuser/groups/test-03"
     assert pl.group_data_dir("C:\\data\\pskit", "gpu") == "C:\\data\\pskit\\groups\\gpu"
+
+
+SHARED = {
+    "app/__init__.py": "",
+    "app/handlers.py": """
+        import json
+        from py_serverless_kit import NotFound
+
+        _ITEMS = {"1": {"id": "1"}}
+
+
+        def hello(event, context):
+            return {"hello": "api"}
+
+
+        def get_item(event, context):
+            if "1" not in _ITEMS:
+                raise NotFound("none")
+            return json.loads(json.dumps(_ITEMS["1"]))
+    """,
+}
+
+
+def test_each_group_gets_only_its_own_handlers_of_a_shared_file(make_project, render):
+    text = _config(9180, 9181).replace("functions: [resize, worker]", "functions: [get-item]").replace(
+        """          resize:
+            handler: functions.resize.handler.main
+            events: [{http: {method: GET, path: /resize}}]
+          worker:
+            handler: functions.worker.handler.main
+            events: [{queue: {name: jobs}}]
+""", """          get-item:
+            handler: app.handlers.get_item
+            events: [{http: {method: GET, path: /items}}]
+""").replace("handler: functions.hello.handler.main", "handler: app.handlers.hello").replace(
+        "Second: {type: task, function: resize, end: true}", "Second: {type: task, function: get-item, end: true}")
+    project = make_project(text, files=SHARED)
+    render(project)
+    work = project.work_dir
+    api_code = (work / "onprem_app" / "staging" / "app" / "handlers.py").read_text("utf-8")
+    gpu_code = (work / "onprem_app_gpu" / "staging" / "app" / "handlers.py").read_text("utf-8")
+    assert "def hello" in api_code and "def get_item" not in api_code and "NotFound" not in api_code
+    assert "def get_item" in gpu_code and "def hello" not in gpu_code and "_ITEMS" in gpu_code
+    assert (project.root / "app" / "handlers.py").read_text("utf-8").count("def ") == 2  # the source is untouched
+    api = json.loads((work / "onprem_app" / "pskit_host.json").read_text("utf-8"))
+    gpu = json.loads((work / "onprem_app_gpu" / "pskit_host.json").read_text("utf-8"))
+    assert api["stripped"] == {"app/handlers.py": ["get_item"]} and gpu["stripped"] == {"app/handlers.py": ["hello"]}
+    assert api["gateway"] is False and gpu["gateway"] is False  # each server answers only its own routes
+
+
+def test_gateway_is_the_default_groups_and_on_with_a_load_balancer():
+    parsed = pl.parse({"groups": {"api": {}, "gpu": {"local": True, "functions": ["r"]}}}, ["r"])
+    assert pl.gateway(parsed, {}) is False and pl.gateway(parsed, {"balancer": "edge"}) is True
+    explicit = pl.parse({"gateway": True, "groups": {"api": {}}}, [])
+    assert pl.gateway(explicit, {}) is True
+    with pytest.raises(pl.PlacementError, match="gateway is true or false"):
+        pl.parse({"gateway": "yes", "groups": {"api": {}}}, [])

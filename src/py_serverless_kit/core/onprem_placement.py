@@ -63,9 +63,11 @@ def parse(raw: Any, functions: List[str], workflows: Optional[List[str]] = None)
         return {}
     if not isinstance(raw, dict):
         raise PlacementError("options.placement must be a mapping with `groups` (and optionally `default`)")
-    unknown = sorted(set(raw) - {"default", "groups", "_groups"})  # _groups: resolved targets (resolve())
+    unknown = sorted(set(raw) - {"default", "groups", "gateway", "_groups"})  # _groups: resolved (resolve())
     if unknown:
-        raise PlacementError(f"unknown options.placement keys {unknown}; expected default, groups")
+        raise PlacementError(f"unknown options.placement keys {unknown}; expected default, groups, gateway")
+    if raw.get("gateway") not in (None, True, False):
+        raise PlacementError("options.placement.gateway is true or false")
     groups_raw = raw.get("groups")
     if not isinstance(groups_raw, dict) or not groups_raw:
         raise PlacementError("options.placement.groups must name at least one group: {api: {server: app1}}")
@@ -130,7 +132,17 @@ def parse(raw: Any, functions: List[str], workflows: Optional[List[str]] = None)
         function_group.setdefault(fn, default)
     for name, group in groups.items():
         group["functions"] = sorted(f for f, g in function_group.items() if g == name)
-    return {"default": default, "groups": groups, "function_group": function_group}
+    return {"default": default, "groups": groups, "function_group": function_group,
+            **({"gateway": raw["gateway"]} if raw.get("gateway") is not None else {})}
+
+
+def gateway(parsed: Dict[str, Any], options: Dict[str, Any]) -> bool:
+    """Whether the default group answers every route, passing other groups' routes on (one URL for the project).
+    ``placement.gateway``; unset: on with a load balancer (it needs one entry point), else off, so each server
+    answers only the routes of the functions it runs."""
+    if "gateway" in parsed:
+        return bool(parsed["gateway"])
+    return options.get("balancer") not in (None, "", False)
 
 
 def group_stage(stage: str, group: str, default: str) -> str:

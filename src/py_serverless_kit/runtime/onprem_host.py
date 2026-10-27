@@ -1163,6 +1163,22 @@ class Host:
             return self.peers.forward_http(group, event.http, self.peers.timeout(function))
         return self.peers.invoke(function, event, group)
 
+    @property
+    def group(self) -> str:
+        return str(self.spec.get("group") or "")
+
+    def served_elsewhere(self, function: str) -> Optional[Tuple[str, str]]:
+        """``(group, url)`` when an HTTP request for ``function`` reached a host that does not run it and does not
+        pass routes on (only the default group with ``placement.gateway`` does)."""
+        fns = self.spec.get("functions") or {}
+        if self.peers is None or function in fns or self.spec.get("gateway"):
+            return None
+        group = self.peers.remote(function)
+        if not group:
+            return None
+        url = str(((self.spec.get("groups") or {}).get(group) or {}).get("url") or "")
+        return group, url
+
     def _route_remote(self, function: str, event: Event) -> Any:
         """``invoke()`` and workflow steps: functions of other groups go to their host."""
         fns = self.spec.get("functions") or {}
@@ -2244,6 +2260,15 @@ class Host:
                         source_ip=self.client_address[0],
                         route=pattern,
                     )
+                    elsewhere = None if self._from_peer else host.served_elsewhere(function)
+                    if elsewhere is not None:
+                        # Its code is not on this server: say where it runs instead of passing it on.
+                        group, base = elsewhere
+                        return self._json(404, {
+                            "error": "Not Found",
+                            "message": f"{function} runs on group {group}, not on this server ({host.group})",
+                            "url": base.rstrip("/") + self.path,
+                        })
                     workflow = host.orchestrated(function)
                     if workflow is not None and self.command == "POST":
                         # Through the executor directly: tracked, async by default, no env lock held.

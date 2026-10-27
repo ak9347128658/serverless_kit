@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { useStudio } from "../store";
 import type { JsonObject, OnPremCluster, OnPremDeployed, OnPremServer } from "../types";
-import { asArray, isObject, setIn, str } from "../util";
+import { asArray, asObject, getIn, isObject, setIn, str } from "../util";
 import {
   clusterName,
   GROUP_HINT,
@@ -116,6 +116,26 @@ export function PlacementEditor() {
             (their steps run where their functions are), and logs and invocation counts of every group show up on the default group. Functions not listed in
             any group run on the default group.
           </p>
+          {(() => {
+            const raw = asObject(getIn(draft, path));
+            const balancer = !!getIn(draft, ["provider", "options", "balancer"]);
+            const on = typeof raw.gateway === "boolean" ? raw.gateway : balancer;
+            return (
+              <label className="check small" title="provider.options.placement.gateway">
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={(e) => replace(setIn(draft, [...path, "gateway"], e.target.checked === balancer ? undefined : e.target.checked) as JsonObject)}
+                />{" "}
+                One URL: the default group answers every route and passes other groups&apos; routes on
+                <span className="muted">
+                  {" "}
+                  ({on ? "on" : "off"}: {on ? "the other servers still answer only their own routes" : "each server answers only the routes of its own functions"}
+                  {balancer ? "; on by default with a load balancer" : ""})
+                </span>
+              </label>
+            );
+          })()}
           {errors.length > 0 && (
             <div className="hint-box warn">
               {errors.map((e, i) => (
@@ -147,11 +167,12 @@ export function PlacementEditor() {
                   }
                   update(placement.default === g.name ? groups[0].name : placement.default, groups);
                 }}
-                onToggleFunction={(fn, on) => {
-                  // A function lives in one group: checking it here takes it out of the others.
+                onMoveFunctions={(fns, to) => {
+                  // A function lives in one group: moving it lists it in `to` only (the default group needs no
+                  // listing: every function not listed elsewhere runs there).
                   const groups = groupsNow().map((x) => {
-                    const listed = asArray(x.body.functions).map((f) => str(f)).filter((f) => f !== fn);
-                    if (on && x.name === g.name) listed.push(fn);
+                    const listed = asArray(x.body.functions).map((f) => str(f)).filter((f) => !fns.includes(f));
+                    if (x.name === to && to !== placement.default) listed.push(...fns);
                     return { name: x.name, body: { ...x.body, functions: listed } };
                   });
                   update(placement.default, groups);
@@ -191,7 +212,7 @@ function GroupCard({
   onBody,
   onDefault,
   onRemove,
-  onToggleFunction,
+  onMoveFunctions,
 }: {
   group: PlacementGroup;
   placement: Placement;
@@ -203,7 +224,7 @@ function GroupCard({
   onBody: (body: JsonObject) => void;
   onDefault: () => void;
   onRemove: () => void;
-  onToggleFunction: (fn: string, on: boolean) => void;
+  onMoveFunctions: (fns: string[], to: string) => void;
 }) {
   const isDefault = placement.default === group.name;
   const [name, setName] = useState(group.name);
@@ -229,22 +250,46 @@ function GroupCard({
   };
   const serverKnown = !body.server || servers.some((s) => s.name === str(body.server));
   const clusterKnown = !body.cluster || clusters.some((c) => c.name === clusterName(body.cluster));
-  const implicit = isDefault ? functions.filter((f) => !(f in placement.listedIn)) : [];
+  const others = placement.groups.map((g) => g.name).filter((n) => n !== group.name);
+  const groupOfFn = (fn: string) => placement.listedIn[fn] || placement.default;
+  const mine = functions.filter((fn) => groupOfFn(fn) === group.name);
+  // Unticking a function of the default group needs somewhere else to run: ask where (one other group: there).
+  const [leaving, setLeaving] = useState<string[]>([]);
+  const [leaveTo, setLeaveTo] = useState("");
+  const untick = (fns: string[]) => {
+    if (!fns.length) return;
+    if (!isDefault) onMoveFunctions(fns, placement.default);
+    else if (others.length === 1) onMoveFunctions(fns, others[0]);
+    else {
+      setLeaving(fns);
+      setLeaveTo(others[0] || "");
+    }
+  };
   return (
     <div className={`placement-group card card-pad${isDefault ? " is-default" : ""}`}>
       <div className="row-gap wrap">
-        <label className="row-gap placement-default" title="Functions not listed in any group, and every workflow, run on the default group">
-          <input type="radio" name="placement-default" checked={isDefault} onChange={onDefault} />
-          <span className="small">default</span>
-        </label>
-        <TextInput mono value={name} invalid={!!nameError} onChange={setName} onBlur={commitName} />
-        {isDefault && <span className="badge badge-accent">default group</span>}
+        <TextInput mono value={name} invalid={!!nameError} onChange={setName} onBlur={commitName} aria-label="Group name" />
+        {isDefault ? (
+          <span className="badge badge-accent" title="Functions not ticked in another group, and every workflow, run here">
+            default group
+          </span>
+        ) : (
+          <button type="button" className="btn btn-sm" onClick={onDefault} title="Functions not ticked in another group, and every workflow, will run here">
+            Make default
+          </button>
+        )}
         <span className="grow" />
         <button type="button" className="btn btn-sm btn-danger" onClick={onRemove} title="Its functions move to the default group">
           Remove group
         </button>
       </div>
       {nameError && <div className="form-error">{nameError}</div>}
+      {isDefault && (
+        <div className="form-help">
+          The default group runs every function you don&apos;t tick in another group, and all workflows (logs of every group are collected here).
+          Untick a function to move it to another group.
+        </div>
+      )}
       <div className="form">
         <div className="form-grid">
           <FormRow
@@ -284,27 +329,79 @@ function GroupCard({
             <TextInput mono value={str(body.advertise)} placeholder="http://10.0.0.9:8080" onChange={(v) => onBody(withKey(body, "advertise", v || undefined))} />
           </FormRow>
         </div>
-        <FormRow label="Functions" help={isDefault ? "Plus every function not listed in another group." : "Checking a function moves it here from its group."}>
+        <FormRow
+          label={`Functions (${mine.length} of ${functions.length})`}
+          help={
+            isDefault
+              ? "Ticking a function moves it here; unticking moves it to another group."
+              : "Ticking a function moves it here from its group; unticking sends it back to the default group."
+          }
+        >
           {!functions.length ? (
             <span className="muted small">No functions yet.</span>
           ) : (
-            <div className="placement-fns">
-              {functions.map((fn) => {
-                const where = placement.listedIn[fn];
-                const here = where === group.name;
-                const elsewhere = where && !here ? where : "";
-                const viaDefault = isDefault && !where;
-                return (
-                  <label key={fn} className={`placement-fn${here || viaDefault ? " on" : ""}`} title={elsewhere ? `In group ${elsewhere}` : viaDefault ? "Not listed: runs on the default group" : undefined}>
-                    <input type="checkbox" checked={here || viaDefault} disabled={viaDefault} onChange={(e) => onToggleFunction(fn, e.target.checked)} />
-                    <span className="mono">{fn}</span>
-                    {elsewhere && <span className="muted small">· {elsewhere}</span>}
-                  </label>
-                );
-              })}
-            </div>
+            <>
+              <div className="row-gap placement-fn-actions">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={mine.length === functions.length}
+                  onClick={() => onMoveFunctions(functions.filter((f) => !mine.includes(f)), group.name)}
+                >
+                  All here
+                </button>
+                <button type="button" className="btn btn-sm" disabled={!mine.length || (isDefault && !others.length)} onClick={() => untick(mine)}>
+                  None
+                </button>
+              </div>
+              <div className="placement-fns">
+                {functions.map((fn) => {
+                  const where = groupOfFn(fn);
+                  const here = where === group.name;
+                  return (
+                    <label key={fn} className={`placement-fn${here ? " on" : ""}`} title={here ? `Runs in ${group.name}` : `Runs in ${where}; tick to move it here`}>
+                      <input
+                        type="checkbox"
+                        checked={here}
+                        disabled={here && isDefault && !others.length}
+                        onChange={(e) => (e.target.checked ? onMoveFunctions([fn], group.name) : untick([fn]))}
+                      />
+                      <span className="mono">{fn}</span>
+                      {!here && <span className="muted small">· {where}</span>}
+                    </label>
+                  );
+                })}
+              </div>
+              {isDefault && !others.length && <div className="form-help">Add another group to move functions out of the default group.</div>}
+              {leaving.length > 0 && (
+                <div className="hint-box row-gap wrap" role="group" aria-label="Move functions to another group">
+                  <span className="small">
+                    Move <span className="mono">{leaving.join(", ")}</span> to
+                  </span>
+                  <select className="select" value={leaveTo} onChange={(e) => setLeaveTo(e.target.value)} aria-label="Group to move to">
+                    {others.map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    onClick={() => {
+                      onMoveFunctions(leaving, leaveTo);
+                      setLeaving([]);
+                    }}
+                  >
+                    Move
+                  </button>
+                  <button type="button" className="btn btn-sm" onClick={() => setLeaving([])}>
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </>
           )}
-          {isDefault && implicit.length > 0 && <div className="form-help">Not listed anywhere (run here): {implicit.join(", ")}</div>}
         </FormRow>
         {issues.map((e, i) => (
           <div key={i} className="form-error">

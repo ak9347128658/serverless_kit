@@ -327,6 +327,25 @@ def _matching_requirements(root: Path, modules: List[str]) -> Tuple[List[str], L
     return found, unknown
 
 
+def strip_functions(text: str, names: List[str]) -> Tuple[str, List[str]]:
+    """``text`` (a Python module) without the functions ``names`` and the imports only they used: what a
+    placement group's copy of a shared code file keeps. A function that code left in the file still calls stays.
+    Returns the new text and the names removed."""
+    removed: List[str] = []
+    for name in names:
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return text, removed
+        target = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                       and n.name == name), None)
+        if target is None or _used_elsewhere(tree, target):
+            continue
+        text = _without(text.splitlines(), tree, target)
+        removed.append(name)
+    return text, removed
+
+
 def _used_elsewhere(tree: ast.Module, target: ast.stmt) -> bool:
     name = getattr(target, "name", "")
     return any(name in _uses(node) for node in tree.body if node is not target)

@@ -297,7 +297,7 @@ class Deployer:
 
     def _backends(self, data: Optional[Dict[str, Any]], groups: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Where the load balancer sends this deployment's HTTP: a cluster's servers, or each host serving HTTP
-        (with placement, every group's host: any of them passes a route on to the group that has it)."""
+        (with placement, the default group's host: it passes a route on to the group that has it)."""
         from urllib.parse import urlsplit
 
         from .onprem_balancers import cluster_backends
@@ -308,7 +308,8 @@ class Deployer:
         port = int(spec.get("port") or 8080)
         if cluster:
             return cluster_backends(get_cluster(self.project.root, str(cluster)), port)
-        endpoints = [g.get("endpoint") for g in (groups or {}).values()] if groups else [spec.get("endpoint")]
+        # With placement only the default group passes routes on (placement.gateway): it is the entry point.
+        endpoints = [spec.get("endpoint")]
         out = []
         for endpoint in endpoints:
             url = urlsplit(str(endpoint or ""))

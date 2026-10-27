@@ -544,9 +544,10 @@ class OnPremProvider(Provider):
             where = ", ".join(f"{n} ({groups.get(n)})" for n in names)
             issues.append(Issue(
                 "warning",
-                f"{where} share {module.replace('.', '/')}.py, so every one of their servers gets all of it and the"
-                f" project's requirements.txt. Give each its own folder and requirements: pskit function split"
-                f" {' '.join(names)} (studio: Functions -> Own folder)",
+                f"{where} share {module.replace('.', '/')}.py: each server gets a copy without the other groups'"
+                f" handlers, but with all of its helpers, and none has requirements of its own. Give each its own"
+                f" folder and requirements.txt: pskit function split {' '.join(names)} (studio: Functions -> Own"
+                f" folder)",
                 "provider.options.placement"))
         return issues
 
@@ -819,9 +820,11 @@ class OnPremProvider(Provider):
         }
 
     def write_project(self, ctx: RenderContext, spec: Dict[str, Any], app_dir: str = APP_DIR,
-                      exclude: Tuple[str, ...] = (), requirements: Tuple[str, ...] = ()) -> str:
+                      exclude: Tuple[str, ...] = (), requirements: Tuple[str, ...] = (),
+                      strip: Optional[Dict[str, List[str]]] = None) -> str:
         """Write one host under ``<work_dir>/<app_dir>``. A placement group leaves out the sub-project folders of
-        functions placed elsewhere (``exclude``) and installs its functions' ``requirements`` into its bundle."""
+        functions placed elsewhere (``exclude``), removes their handlers from the code files it shares with them
+        (``strip``: ``{module: [function names]}``) and installs its functions' ``requirements`` into its bundle."""
         root = ctx.work_dir / app_dir
         staging = root / "staging"
         if staging.exists():
@@ -837,6 +840,9 @@ class OnPremProvider(Provider):
                 shutil.copytree(build, staging, ignore=ignore)
         else:  # pragma: no cover - the packager always sets build_dir
             staging.mkdir(parents=True)
+        stripped = _strip_shared(staging, strip or {})
+        if stripped:
+            spec["stripped"] = stripped
         if requirements and ctx.artifact.build_dir is not None and not ctx.artifact.skip_deps:
             from ..packaging.builder import _pip_install
 
@@ -890,6 +896,8 @@ class OnPremProvider(Provider):
             desc = f"pskit {spec['service']} ({spec['stage']})"
             _write(root / "pskit.service", systemd_unit_text(desc, remote, user))
         extra = "\n".join(("exclude",) + exclude + ("requirements",) + requirements) if (exclude or requirements) else ""
+        if strip:
+            extra += "\nstrip " + json.dumps(strip, sort_keys=True)
         return hashlib.sha256((text + extra).encode("utf-8")).hexdigest()
 
     def render_resources(self, doc: TerraformDoc, ctx: RenderContext) -> None:
@@ -1009,7 +1017,7 @@ class OnPremProvider(Provider):
 
     def _render_groups(self, doc: TerraformDoc, ctx: RenderContext) -> None:
         """One host (Terraform ``terraform_data``) per placement group; core/onprem_placement.py."""
-        from ..core.onprem_placement import app_dir, group_stage, owners, peer_token, resource_name
+        from ..core.onprem_placement import app_dir, gateway, group_stage, owners, peer_token, resource_name
         from ..packaging.subprojects import excluded_dirs, function_requirements
 
         cfg = ctx.config
@@ -1047,16 +1055,18 @@ class OnPremProvider(Provider):
         outputs: Dict[str, Any] = {}
         fn_out: Dict[str, Any] = {}
         for name, spec in specs.items():
+            spec["gateway"] = name == default and gateway(parsed, cfg.provider.options)
             spec.update({"group": name, "default_group": default, "groups": groups, "function_groups": function_groups,
                          "owners": found, "peer_token": token})
             if name != default:
                 spec["deploy_stage"] = group_stage(cfg.provider.stage, name, default)
             members = parsed["groups"][name]["functions"]
             exclude = tuple(excluded_dirs(source, cfg.functions, members, cfg.language)) if many else ()
+            strip = _shared_handlers(source, cfg, members) if many and cfg.language != "node" else {}
             reqs = tuple(function_requirements(source, cfg.functions, members)) \
                 if many and cfg.language != "node" and self.vendor_dependencies else ()
             folder = app_dir(name, default)
-            digest = self.write_project(group_ctx[name], spec, folder, exclude, reqs)
+            digest = self.write_project(group_ctx[name], spec, folder, exclude, reqs, strip)
             self._host_resource(doc, ctx, resource_name(name, default), folder, digest, spec)
             for f in members:
                 if f not in cfg.functions:
@@ -1109,6 +1119,43 @@ class OnPremProvider(Provider):
         doc = self.init_doc(ctx)
         self.render_resources(doc, ctx)
         return doc
+
+
+def _shared_handlers(source: Path, cfg: ServiceConfig, members: List[str]) -> Dict[str, List[str]]:
+    """``{module: [handler functions]}`` of the functions placed in other groups whose handlers sit in a shared
+    code file (not in their own sub-project folder): a group's copy of that file leaves them out."""
+    from ..packaging.subprojects import function_dir
+
+    keep = set(members)
+    out: Dict[str, List[str]] = {}
+    for name, fn in sorted(cfg.functions.items()):
+        if name in keep or not fn.enabled or is_generated_handler(fn.handler):
+            continue
+        if function_dir(source, fn.handler) is not None:
+            continue  # its own folder: left out whole (excluded_dirs)
+        module, _, func = str(fn.handler).replace(":", ".").rpartition(".")
+        if module and func:
+            out.setdefault(module, []).append(func)
+    return out
+
+
+def _strip_shared(staging: Path, strip: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """Remove other groups' handlers from this group's copies of shared code files. ``{file: [removed]}``."""
+    from ..core.function_split import strip_functions
+
+    done: Dict[str, List[str]] = {}
+    for module, names in sorted(strip.items()):
+        parts = module.split(".")
+        path = staging.joinpath(*parts, "__init__.py")
+        if not path.is_file():
+            path = staging.joinpath(*parts[:-1], parts[-1] + ".py")
+        if not path.is_file():
+            continue
+        text, removed = strip_functions(path.read_text("utf-8"), sorted(names))
+        if removed:
+            path.write_bytes(text.encode("utf-8"))
+            done[path.relative_to(staging).as_posix()] = removed
+    return done
 
 
 def _placement_of(options: Dict[str, Any]) -> Optional[Dict[str, Any]]:
