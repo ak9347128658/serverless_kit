@@ -72,7 +72,7 @@ def test_resolve_uses_saved_servers_and_refuses_a_shared_port(tmp_path):
         "api": {"server": "app1"}, "gpu": {"server": "gpu1", "functions": ["resize"]}}}}
     pl.resolve(options, tmp_path, "dev")
     groups = options["placement"]["_groups"]
-    assert groups["gpu"]["deploy"]["host"] == "10.0.0.7" and groups["gpu"]["data_dir"] == "/data/pskit-gpu"
+    assert groups["gpu"]["deploy"]["host"] == "10.0.0.7" and groups["gpu"]["data_dir"] == "/data/pskit/groups/gpu"
     assert options["deploy"]["host"] == "10.0.0.5" and options["data_dir"] == "/data/pskit"  # the default group's
     shared = {"placement": {"groups": {"api": {"server": "app1"}, "gpu": {"server": "app1", "functions": ["x"]}}}}
     with pytest.raises(pl.PlacementError, match="both run on app1 port 8080"):
@@ -294,3 +294,14 @@ def test_groups_call_each_other(make_project, render, tmp_path):
             proc.terminate()
         for proc in procs:
             proc.wait(timeout=10)
+
+
+def test_a_saved_servers_home_data_dir_keeps_groups_inside_it(tmp_path):
+    # A saved server's data_dir is often the home folder: a sibling (/home/azureuser-test-02) is not writable.
+    srv.save_server(tmp_path, "vm1", {"host": "10.0.0.5", "user": "azureuser", "auth": "agent",
+                                      "data_dir": "/home/azureuser"})
+    options = {"placement": {"default": "test-01", "groups": {
+        "test-01": {"server": "vm1", "port": 3000}, "test-03": {"server": "vm1", "functions": ["x"]}}}}
+    pl.resolve(options, tmp_path, "dev")
+    assert options["placement"]["_groups"]["test-03"]["data_dir"] == "/home/azureuser/groups/test-03"
+    assert pl.group_data_dir("C:\\data\\pskit", "gpu") == "C:\\data\\pskit\\groups\\gpu"

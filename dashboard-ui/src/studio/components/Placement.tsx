@@ -1,166 +1,54 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { useStudio } from "../store";
-import type { Json, JsonObject, OnPremCluster, OnPremDeployed, OnPremServer } from "../types";
-import { asArray, asObject, getIn, isObject, setIn, str, type Path } from "../util";
+import type { JsonObject, OnPremCluster, OnPremDeployed, OnPremServer } from "../types";
+import { asArray, isObject, setIn, str } from "../util";
+import {
+  clusterName,
+  GROUP_HINT,
+  GROUP_RE,
+  groupOf,
+  nextGroupName,
+  placeableFunctions,
+  placementPath,
+  prune,
+  readPlacement,
+  NEW_GROUP,
+  effectivePort,
+  TARGET_KEYS,
+  targetLabel,
+  targetValue,
+  withKey,
+  writePlacement,
+  type Placement,
+  type PlacementGroup,
+  type RunsOnChoice,
+  type RunsOnErrors,
+} from "../placement";
+import { ServerForm } from "./OnPremMachines";
+import { ServerSelect } from "./ServerPicker";
 import { FormRow, NumberInput, Segmented, TextInput } from "./Forms";
 
-/**
- * provider.options.placement (on premises): groups of functions on different servers, one project.
- *
- *   placement:
- *     default: api                 # functions not listed (and every workflow) run here
- *     groups:
- *       api: {server: app1}        # or {cluster: prod} or {local: true}; only the default group may omit it
- *       gpu: {server: gpu1, functions: [resize, ocr], port: 8081, advertise: http://10.0.0.9:8081}
- */
+// The draft edits live in ../placement (pure, unit tested); re-exported for the views.
+export {
+  assignFunction,
+  GROUP_RE,
+  groupOf,
+  moveFunction,
+  placeableFunctions,
+  placementPath,
+  readPlacement,
+  renameInPlacement,
+  targetLabel,
+  type Placement,
+  type PlacementGroup,
+} from "../placement";
 
-export const GROUP_RE = /^[a-z][a-z0-9-]{0,20}$/;
-const TARGET_KEYS = ["server", "cluster", "local"] as const;
-
-/** Where placement is written: a `providers.onprem.options` override when one already holds it, else provider.options. */
-export function placementPath(draft: JsonObject): Path {
-  const override = ["providers", "onprem", "options", "placement"];
-  return getIn(draft, override) !== undefined ? override : ["provider", "options", "placement"];
-}
-
-export interface PlacementGroup {
-  name: string;
-  body: JsonObject;
-  /** Functions listed under the group. */
-  listed: string[];
-}
-
-export interface Placement {
-  path: Path;
-  raw: JsonObject;
-  default: string;
-  groups: PlacementGroup[];
-  /** Every listed function -> its group (unlisted functions run on `default`). */
-  listedIn: Record<string, string>;
-}
-
-/** The project's placement, or null when every function runs on one target (no `groups`). */
-export function readPlacement(draft: JsonObject): Placement | null {
-  const path = placementPath(draft);
-  const raw = asObject(getIn(draft, path));
-  const groupsRaw = asObject(raw.groups);
-  const names = Object.keys(groupsRaw);
-  if (!names.length) return null;
-  const listedIn: Record<string, string> = {};
-  const groups = names.map((name) => {
-    const body = asObject(groupsRaw[name]);
-    const listed = (typeof body.functions === "string" ? [body.functions] : asArray(body.functions)).map((f) => str(f)).filter(Boolean);
-    for (const fn of listed) if (!(fn in listedIn)) listedIn[fn] = name;
-    return { name, body, listed };
-  });
-  const def = str(raw.default);
-  return { path, raw, default: def && names.includes(def) ? def : names[0], groups, listedIn };
-}
-
-/** The group a function runs in (its listed group, else the default group); "" without placement. */
-export function groupOf(placement: Placement | null, fn: string): string {
-  if (!placement) return "";
-  return placement.listedIn[fn] || placement.default;
-}
-
-/** User functions placement can list: generated `<workflow>-orchestrator` functions always run on the default group. */
-export function placeableFunctions(draft: JsonObject): string[] {
-  return Object.keys(asObject(draft.functions)).filter((f) => !f.endsWith("-orchestrator"));
-}
-
-/** `{server: app1}` -> "app1", `{cluster: prod}` -> "cluster prod", `{local: true}` -> "this machine", `{}` -> "". */
-export function targetLabel(body: JsonObject): string {
-  if (body.server) return str(body.server);
-  if (body.cluster) return `cluster ${clusterName(body.cluster)}`;
-  if (body.local) return "this machine";
-  return "";
-}
-
-function clusterName(v: Json | undefined): string {
-  return typeof v === "string" ? v : str(asObject(v).name);
-}
-
-function targetValue(body: JsonObject): string {
-  if (body.server) return `server:${str(body.server)}`;
-  if (body.cluster) return `cluster:${clusterName(body.cluster)}`;
-  if (body.local) return "local";
-  return "";
-}
-
-/** Clean group body: drop empty values (and an empty functions list). */
-function clean(body: JsonObject): JsonObject {
-  const out: JsonObject = {};
-  for (const [k, v] of Object.entries(body)) {
-    if (v === undefined || v === null || v === "" || v === false) continue;
-    if (Array.isArray(v) && !v.length) continue;
-    out[k] = v;
-  }
-  return out;
-}
-
-function withKey(body: JsonObject, key: string, value: Json | undefined): JsonObject {
-  const next = { ...body };
-  if (value === undefined) delete next[key];
-  else next[key] = value;
-  return next;
-}
-
-/** Write `groups` (ordered) and `default` back to the draft. */
-function writePlacement(draft: JsonObject, path: Path, def: string, groups: { name: string; body: JsonObject }[]): JsonObject {
-  const raw = asObject(getIn(draft, path));
-  const out: JsonObject = {};
-  for (const [k, v] of Object.entries(raw)) if (k !== "default" && k !== "groups") out[k] = v;
-  out.default = def;
-  out.groups = Object.fromEntries(groups.map((g) => [g.name, clean(g.body)]));
-  return setIn(draft, path, out) as JsonObject;
-}
-
-/** Move `fn` into `group` (the default group: unlisted). Returns the new draft. */
-export function moveFunction(draft: JsonObject, fn: string, group: string): JsonObject {
-  const p = readPlacement(draft);
-  if (!p) return draft;
-  const groups = p.groups.map((g) => {
-    let listed = g.listed.filter((f) => f !== fn);
-    if (g.name === group && group !== p.default) listed = [...listed, fn];
-    return { name: g.name, body: { ...g.body, functions: listed } };
-  });
-  return writePlacement(draft, p.path, p.default, groups);
-}
-
-/** Keep placement in step with a function rename / delete (`to` null). */
-export function renameInPlacement(draft: JsonObject, from: string, to: string | null): JsonObject {
-  const p = readPlacement(draft);
-  if (!p || !(from in p.listedIn)) return draft;
-  const groups = p.groups.map((g) => ({
-    name: g.name,
-    body: { ...g.body, functions: g.listed.flatMap((f) => (f !== from ? [f] : to ? [to] : [])) },
-  }));
-  return writePlacement(draft, p.path, p.default, groups);
-}
-
-/** Drop `providers.onprem.options` / `providers.onprem` / `providers` when left empty. */
-function prune(draft: JsonObject): JsonObject {
-  let out: Json = draft;
-  for (const path of [["providers", "onprem", "options"], ["providers", "onprem"], ["providers"], ["provider", "options"]]) {
-    const v = getIn(out, path);
-    if (isObject(v) && !Object.keys(v).length) out = setIn(out, path, undefined);
-  }
-  return out as JsonObject;
-}
-
-function nextGroupName(taken: string[]): string {
-  for (const base of ["workers", "gpu", "batch"]) if (!taken.includes(base)) return base;
-  let i = 2;
-  while (taken.includes(`group-${i}`)) i++;
-  return `group-${i}`;
-}
-
-/** Saved servers and clusters for the target pickers. */
-export function usePlacementTargets(enabled: boolean): { servers: OnPremServer[]; clusters: OnPremCluster[] } {
+/** Saved servers and clusters for the target pickers (`reload` after saving a new server). */
+export function usePlacementTargets(enabled: boolean): { servers: OnPremServer[]; clusters: OnPremCluster[]; reload: () => void } {
   const [servers, setServers] = useState<OnPremServer[]>([]);
   const [clusters, setClusters] = useState<OnPremCluster[]>([]);
-  useEffect(() => {
+  const reload = useCallback(() => {
     if (!enabled) return;
     api.onpremServers().then(
       (r) => setServers(r.servers),
@@ -171,7 +59,8 @@ export function usePlacementTargets(enabled: boolean): { servers: OnPremServer[]
       () => setClusters([]),
     );
   }, [enabled]);
-  return { servers, clusters };
+  useEffect(reload, [reload]);
+  return { servers, clusters, reload };
 }
 
 /** "Where functions run": one target for everything, or groups of functions on different servers / clusters. */
@@ -320,7 +209,7 @@ function GroupCard({
   const [name, setName] = useState(group.name);
   useEffect(() => setName(group.name), [group.name]);
   const taken = placement.groups.some((g) => g.name === name && g.name !== group.name);
-  const nameError = !GROUP_RE.test(name) ? "a lowercase letter, then letters, digits or - (max 21)" : taken ? "another group has this name" : null;
+  const nameError = !GROUP_RE.test(name) ? GROUP_HINT : taken ? "another group has this name" : null;
   const commitName = () => {
     if (name !== group.name && !nameError) onRename(name);
   };
@@ -441,21 +330,153 @@ export function GroupBadge({ placement, fn }: { placement: Placement | null; fn:
   );
 }
 
-/** "Runs on" select: the placement group a function runs in. */
-export function RunsOnSelect({ placement, value, onChange, id }: { placement: Placement; value: string; onChange: (group: string) => void; id?: string }) {
+/**
+ * The function editor's "Runs on" field (on premises): an existing placement group, or "+ New group…" with its
+ * name, where it runs (a saved server, a cluster or this machine) and an optional port. Without placement the
+ * only group is the current deploy target; creating a group there creates the placement.
+ */
+export function RunsOnField({
+  placement,
+  value,
+  onChange,
+  errors,
+  servers,
+  clusters,
+  onServerAdded,
+  id = "frunson",
+}: {
+  placement: Placement | null;
+  value: RunsOnChoice;
+  onChange: (next: RunsOnChoice) => void;
+  errors: RunsOnErrors;
+  servers: OnPremServer[];
+  clusters: OnPremCluster[];
+  onServerAdded: () => void;
+  id?: string;
+}) {
+  const { draft } = useStudio();
+  const [adding, setAdding] = useState(false);
+  const set = (patch: Partial<RunsOnChoice>) => onChange({ ...value, ...patch });
+  const isNew = value.group === NEW_GROUP;
+  const kind = value.target.startsWith("cluster:") ? "cluster" : value.target === "local" ? "local" : "server";
+  const serverValue = value.target.startsWith("server:") ? value.target.slice(7) : "";
+  const clusterValue = value.target.startsWith("cluster:") ? value.target.slice(8) : "";
+  const portPlaceholder = String(effectivePort(draft, {}));
+  const pick = (group: string) => {
+    if (group !== NEW_GROUP) {
+      set({ group });
+      return;
+    }
+    const taken = placement ? placement.groups.map((g) => g.name) : [value.defaultName];
+    set({ group, name: value.name || nextGroupName(taken), target: value.target || (servers.length ? `server:${servers[0].name}` : "local") });
+  };
   return (
-    <select id={id} className="select" value={value} onChange={(e) => onChange(e.target.value)} aria-label="Runs on">
-      {placement.groups.map((g) => {
-        const where = targetLabel(g.body);
-        return (
-          <option key={g.name} value={g.name}>
-            {g.name}
-            {where ? ` (${where})` : ""}
-            {g.name === placement.default ? " · default" : ""}
-          </option>
-        );
-      })}
-    </select>
+    <div className="runs-on">
+      <select id={id} className="select" value={value.group} onChange={(e) => pick(e.target.value)} aria-label="Runs on">
+        {placement ? (
+          placement.groups.map((g) => {
+            const where = targetLabel(g.body);
+            const isDefault = g.name === placement.default;
+            return (
+              <option key={g.name} value={g.name}>
+                {g.name}
+                {isDefault ? " (default)" : ""} — {where || (isDefault ? "the deploy target" : "no target yet")}
+                {typeof g.body.port === "number" ? `:${g.body.port}` : ""}
+              </option>
+            );
+          })
+        ) : (
+          <option value="">Where the project deploys (the deploy target)</option>
+        )}
+        <option value={NEW_GROUP}>+ New group…</option>
+      </select>
+      {isNew && (
+        <div className="runs-on-new card card-pad" role="group" aria-label="New placement group">
+          {!placement && (
+            <FormRow
+              label="Other functions"
+              htmlFor={`${id}-default`}
+              error={errors.defaultName}
+              help="This creates provider.options.placement: the other functions (and workflows) stay on the deploy target, as the default group with this name."
+            >
+              <TextInput id={`${id}-default`} mono value={value.defaultName} invalid={!!errors.defaultName} onChange={(v) => set({ defaultName: v })} />
+            </FormRow>
+          )}
+          <FormRow label="Group name" required htmlFor={`${id}-name`} error={errors.name}>
+            <TextInput id={`${id}-name`} mono value={value.name} invalid={!!errors.name} placeholder="gpu" onChange={(v) => set({ name: v })} />
+          </FormRow>
+          <FormRow label="Runs on" error={errors.target}>
+            <div className="runs-on-target">
+              <Segmented
+                label="Where the group runs"
+                value={kind}
+                onChange={(k) =>
+                  set({ target: k === "local" ? "local" : k === "cluster" ? (clusters[0] ? `cluster:${clusters[0].name}` : "") : servers[0] ? `server:${servers[0].name}` : "" })
+                }
+                options={[
+                  { value: "server", label: "Saved server" },
+                  { value: "cluster", label: "Cluster", disabled: !clusters.length },
+                  { value: "local", label: "This machine" },
+                ]}
+              />
+              {kind === "server" && (
+                <div className="row-gap wrap">
+                  <ServerSelect
+                    value={serverValue}
+                    onChange={(v) => set({ target: v === "local" ? "local" : v ? `server:${v}` : "" })}
+                    servers={servers}
+                    deployed={null}
+                    label="Saved server"
+                    emptyLabel={servers.length ? "Pick a server…" : "No saved servers yet"}
+                  />
+                  <button type="button" className="btn btn-sm" onClick={() => setAdding(true)}>
+                    + Add server
+                  </button>
+                </div>
+              )}
+              {kind === "cluster" && (
+                <select className="select" value={clusterValue} onChange={(e) => set({ target: e.target.value ? `cluster:${e.target.value}` : "" })} aria-label="Cluster">
+                  {!clusterValue && <option value="">Pick a cluster…</option>}
+                  {clusters.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name} ({c.nodes.length} server{c.nodes.length === 1 ? "" : "s"})
+                    </option>
+                  ))}
+                </select>
+              )}
+              {kind === "local" && <span className="muted small">The machine running pskit (and this studio).</span>}
+            </div>
+          </FormRow>
+          <FormRow
+            label="Port"
+            htmlFor={`${id}-port`}
+            error={errors.port}
+            help={`Optional (default ${portPlaceholder}). Two groups on one server need different ports.`}
+          >
+            <div className="row-gap wrap">
+              <NumberInput id={`${id}-port`} integer min={1} max={65535} value={value.port} placeholder={portPlaceholder} onChange={(v) => set({ port: v })} />
+              {errors.suggestPort !== undefined && (
+                <button type="button" className="btn btn-sm" onClick={() => set({ port: errors.suggestPort })}>
+                  Use {errors.suggestPort}
+                </button>
+              )}
+            </div>
+          </FormRow>
+        </div>
+      )}
+      {adding && (
+        <ServerForm
+          initial={null}
+          taken={servers.map((s) => s.name)}
+          onClose={() => setAdding(false)}
+          onSaved={(name) => {
+            setAdding(false);
+            onServerAdded();
+            set({ target: `server:${name}` });
+          }}
+        />
+      )}
+    </div>
   );
 }
 

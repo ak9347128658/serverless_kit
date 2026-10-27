@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-10-27
+
+### Fixed
+- Placement: a group other than the default one kept its data beside the server's `data_dir`
+  (`/home/azureuser-test-02`), which the SSH user cannot create when `data_dir` is the home folder, so its host
+  crashed at start-up ("on-prem host did not become healthy"). Groups now keep their data inside it
+  (`<data_dir>/groups/<group>`).
+
+### Added
+- `pskit function split NAME... | --all [--dry-run]` (and the studio's **Own folder** action) moves a function
+  out of a code file it shares with others into `functions/<name>/handler.py` with its own `requirements.txt`: the
+  helpers and imports it uses are copied, relative imports made absolute, the project requirements its imports name
+  copied, and its handler in `pskit.yml` updated (comments kept). Validation warns when functions of different
+  placement groups share a code file.
+- The studio's function editor picks the group a function runs on, or creates one (server, cluster or this
+  machine, and port). On-prem deploys show their output as steps with one card per group host (its own lines, the
+  error and the host's log), then the load balancer, firewall rules and endpoints. The raw log stays one tab away.
+- dashboard-ui unit tests (`npm test`: deploy log parser, placement edits), run in CI.
+
+### Changed
+- A host that fails at start-up fails the deploy as soon as it exits (not after 30 s), and the deploy output shows
+  the end of its `host.log`.
+
 ## [2.3.0] - 2026-10-27
 
 ### Added

@@ -2646,9 +2646,11 @@ def health_url(spec: Dict[str, Any]) -> str:
     return f"http://{host}:{port}/__pskit/health"
 
 
-def _wait_healthy(url: str, timeout: float) -> bool:
+def _wait_healthy(url: str, timeout: float, proc: Optional[subprocess.Popen[bytes]] = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False  # the host exited (a crash at start-up): no point waiting
         try:
             with urlopen(url, timeout=1) as resp:  # noqa: S310 - local host URL from our own spec
                 if resp.status == 200:
@@ -2665,6 +2667,7 @@ def start(root: Path) -> int:
     activate_layout(root)
     log_path = root / "host.log"
     log = open(log_path, "ab")  # noqa: SIM115 - inherited by the child process
+    offset = log.tell()
     cmd = [sys.executable, str(root / "onprem_ctl.py"), "foreground"]
     kwargs: Dict[str, Any] = {
         "cwd": str(root),
@@ -2677,12 +2680,25 @@ def start(root: Path) -> int:
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen(cmd, **kwargs)  # noqa: S603 - fixed argv, this interpreter
+    proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 - fixed argv, this interpreter
     spec = json.loads((root / "pskit_host.json").read_text("utf-8"))
-    if _wait_healthy(health_url(spec), 30):
+    if _wait_healthy(health_url(spec), 30, proc):
         return 0
     sys.stderr.write(f"on-prem host did not become healthy; see {log_path}\n")
+    sys.stderr.write(_log_tail(log_path, offset))
     return 1
+
+
+def _log_tail(path: Path, offset: int, lines: int = 25) -> str:
+    """The end of what this start wrote to host.log, so a failed deploy shows why without logging in."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            text = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    tail = [line for line in text.splitlines() if line.strip()][-lines:]
+    return "".join(f"  | {line}\n" for line in tail)
 
 
 def foreground(root: Path) -> int:

@@ -20,6 +20,7 @@ import type {
   FileContent,
   FileEntry,
   FsListing,
+  FunctionSplitResult,
   Job,
   JsonObject,
   Meta,
@@ -171,6 +172,11 @@ export const api = {
   /** `subproject`: the handler's folder (functions/<name>/) gets its own requirements.txt / package.json. */
   ensureHandler: (handler: string, events: string[], subproject = false) =>
     request<{ path: string; created: boolean; line?: number }>("POST", "/api/handlers/ensure", { handler, events, ...(subproject ? { subproject: true } : {}) }),
+  /** Code files holding the handlers of more than one function (pskit.yml on disk): `{module: [functions]}`. */
+  functionsShared: () => request<{ shared: Record<string, string[]> }>("GET", "/api/functions/shared"),
+  /** Move a function into functions/<name>/ (pskit function split). `dryRun`: only the plan; nothing is written. */
+  splitFunction: (name: string, dryRun = false) =>
+    request<FunctionSplitResult>("POST", `/api/functions/${encodeURIComponent(name)}/split`, dryRun ? { dry_run: true } : {}),
   discover: (provider: string, kind: string, region?: string) =>
     request<DiscoverResult>("GET", "/api/discover", undefined, { query: { provider, kind, region } }),
   startJob: (command: string, provider?: string, stage?: string, args?: Record<string, unknown>) =>

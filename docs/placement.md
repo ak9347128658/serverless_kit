@@ -48,6 +48,31 @@ the nearest folder above its handler with a `requirements.txt` (Python) or `pack
   fail the deploy with a clear message: place them on different servers.
 * Node.js sub-projects get their own `node_modules` in their folder, so each function resolves its own versions.
 
+### Functions that share a code file
+
+Functions whose handlers sit side by side in one file (`app/handlers.py` with `hello`, `get_item`,
+`create_item`, as `pskit init` makes them) are shared code: every server that runs any of them gets the whole
+file and the project's `requirements.txt`. Validation warns when they are in different groups. Split them:
+
+```bash
+pskit function split get-item create-item     # or: pskit function split --all --dry-run
+```
+
+```
+get-item: app/handlers.py -> functions/get_item/handler.py (handler functions.get_item.handler.get_item)
+  copied helpers: _ITEMS (still in app/handlers.py for the others)
+```
+
+The function, the module-level helpers and imports it uses (relative imports made absolute) move to
+`functions/<name>/handler.py`. Its `requirements.txt` gets the lines of the project's `requirements.txt` that its
+imports name, and its handler in `pskit.yml` is updated. Helpers are copied, not moved, so a module-level value
+such as a dict is no longer shared between the split functions; it never was across servers. The function stays
+in the shared file too if code there still calls it. In the studio: **Functions → Own folder**. Python only: move
+a Node.js handler by hand.
+
+When you create a function in the studio, its **Runs on** field picks the group, or creates one: a saved server, a
+cluster or this machine, and a port when two groups share a server.
+
 ## How the groups work together
 
 Every group is an independent host. Each one knows where every function lives and calls the others over HTTP
@@ -78,7 +103,8 @@ rules](onprem-network.md#4-functions-on-several-servers-provideroptionsplacement
 
 `pskit deploy` deploys every group in one Terraform apply (`terraform_data.host` for the default group — the same
 resource as before, so adding placement to a deployed stage moves nothing — and `terraform_data.host_<group>` for
-the others; unit `pskit-<service>-<stage>-<group>`, folder `onprem_app_<group>`). `pskit info` and
+the others; unit `pskit-<service>-<stage>-<group>`, folder `onprem_app_<group>`, data (queues, buckets, logs) in
+`<data_dir>/groups/<group>`). `pskit info` and
 `deployment.json` list each group's endpoint and functions. Any group answers every route (it passes routes of
 other groups on), so with a [load balancer](load-balancers.md) (`options.balancer: edge`) the project gets one URL
 spread over the groups' hosts.

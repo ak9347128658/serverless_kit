@@ -96,6 +96,28 @@ export interface ProjectState {
   notices?: string[];
 }
 
+/** `POST /api/functions/<name>/split`: the plan (`dry_run`) or what was done; `project` is the project after it. */
+export interface FunctionSplitResult {
+  function: string;
+  /** Code file the handler was in, e.g. app/handlers.py. */
+  from: string;
+  /** Its new file, e.g. functions/get_item/handler.py. */
+  to: string;
+  /** The new handler, e.g. functions.get_item.handler.get_item. */
+  handler: string;
+  /** Lines of the project's requirements.txt the function's imports name (its own requirements.txt). */
+  requirements: string[];
+  /** Imports not matched to a requirement (maybe the standard library). */
+  unknown_imports: string[];
+  /** Module-level helpers copied along. */
+  helpers: string[];
+  /** The function stays in the source file too: code there still calls it. */
+  kept_in_source: boolean;
+  /** Human-readable summary. */
+  lines: string[];
+  project: ProjectState;
+}
+
 export interface ValidateResult {
   ok: boolean;
   issues: Issue[];

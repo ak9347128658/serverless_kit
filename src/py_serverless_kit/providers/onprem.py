@@ -513,16 +513,42 @@ class OnPremProvider(Provider):
         return issues
 
     def validate_files(self, config: ServiceConfig, root: Path) -> List[Issue]:
+        issues = self._shared_code_issues(config, root)
         env_file = config.provider.options.get("env_file")
         if isinstance(env_file, str) and env_file.strip() and not self._env_file_path(config, root).is_file():
-            return [
+            issues.append(
                 Issue(
                     "warning",
                     f"options.env_file {env_file} does not exist yet; the host starts without it",
                     "provider.options.env_file",
                 )
-            ]
-        return []
+            )
+        return issues
+
+    def _shared_code_issues(self, config: ServiceConfig, root: Path) -> List[Issue]:
+        """With placement, functions of different groups whose handlers share one code file: every server gets
+        all of that code (and the project's requirements). Splitting them gives each server only its own."""
+        if config.provider.options.get("placement") is None:
+            return []
+        from ..core.function_split import shared_functions
+
+        try:
+            groups = self._parsed_placement(config)["function_group"]
+        except ValueError:
+            return []
+        source = (root / config.package.source).resolve()
+        issues: List[Issue] = []
+        for module, names in sorted(shared_functions(root, config.functions, source).items()):
+            if len({groups.get(n) for n in names}) < 2:
+                continue
+            where = ", ".join(f"{n} ({groups.get(n)})" for n in names)
+            issues.append(Issue(
+                "warning",
+                f"{where} share {module.replace('.', '/')}.py, so every one of their servers gets all of it and the"
+                f" project's requirements.txt. Give each its own folder and requirements: pskit function split"
+                f" {' '.join(names)} (studio: Functions -> Own folder)",
+                "provider.options.placement"))
+        return issues
 
     def _env_file_path(self, config: ServiceConfig, root: Path) -> Path:
         path = Path(str(config.provider.options.get("env_file") or ""))

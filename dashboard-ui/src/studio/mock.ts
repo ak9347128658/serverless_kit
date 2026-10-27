@@ -274,6 +274,33 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
     files[file] = `${current}\n\ndef ${fn}(event, ctx):\n    return {"ok": True}\n`;
     return r({ path: file, created: true, line: files[file].split("\n").length - 2 });
   }
+  if (path === "/api/functions/shared") {
+    const byModule: Record<string, string[]> = {};
+    for (const [name, fn] of Object.entries(asObject(project?.functions))) {
+      const handler = str(asObject(fn).handler);
+      if (!handler || handler.startsWith("functions.")) continue;
+      const module = handler.replace(":", ".").split(".").slice(0, -1).join(".");
+      (byModule[module] = byModule[module] || []).push(name);
+    }
+    return r({ shared: Object.fromEntries(Object.entries(byModule).filter(([, names]) => names.length > 1).map(([m, names]) => [m, names.sort()])) });
+  }
+  const sm = /^\/api\/functions\/([^/]+)\/split$/.exec(path);
+  if (sm && method === "POST") {
+    const name = decodeURIComponent(sm[1]);
+    const fn = asObject(asObject(project?.functions)[name]);
+    if (!project || !fn.handler) throw new ApiError(400, `no function '${name}' in pskit.yml`);
+    const parts = str(fn.handler).replace(":", ".").split(".");
+    const func = parts.pop() || "main";
+    const folder = name.replace(/-/g, "_");
+    const result = { function: name, from: `${parts.join("/")}.py`, to: `functions/${folder}/handler.py`, handler: `functions.${folder}.handler.${func}`, requirements: [], unknown_imports: [], helpers: [], kept_in_source: false };
+    if (!b.dry_run) {
+      project = { ...project, functions: { ...asObject(project.functions), [name]: { ...fn, handler: result.handler } } };
+      files[result.to] = `from py_serverless_kit import Context, Event\n\n\ndef ${func}(event: Event, ctx: Context):\n    return {"ok": True}\n`;
+      files[`functions/${folder}/requirements.txt`] = "";
+      mtime++;
+    }
+    return r({ ...result, lines: [`${name}: ${result.from} -> ${result.to} (handler ${result.handler})`], project: state() });
+  }
   if (path === "/api/discover") {
     const provider = str(q.provider);
     if (!["aws", "gcp", "azure", "onprem"].includes(provider)) return r({ supported: false, reason: `Listing isn't available for ${provider}; type the name.`, items: [] });

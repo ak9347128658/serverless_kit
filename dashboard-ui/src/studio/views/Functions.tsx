@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Chip } from "../../components/Badge";
 import { DataTable, type Column } from "../../components/DataTable";
 import { SearchInput } from "../../components/Inputs";
@@ -8,12 +8,26 @@ import { ComboInput, EnumSelect, FieldForm, FormRow, KeyValueEditor, NumberInput
 import { DiffView, InlineIssues, PageHeader } from "../components/Misc";
 import { isEnabled } from "../compat";
 import { EnableControl } from "../components/EnableControl";
-import { GroupBadge, groupOf, moveFunction, readPlacement, renameInPlacement, RunsOnSelect } from "../components/Placement";
+import { GroupBadge, readPlacement, renameInPlacement, RunsOnField, usePlacementTargets } from "../components/Placement";
+import { useOnPremServers } from "../components/ServerPicker";
+import {
+  applyRunsOn,
+  deployTargetWhere,
+  groupOf,
+  hasRunsOnErrors,
+  initialRunsOn,
+  NEW_GROUP,
+  placementPath,
+  runsOnErrors,
+  targetBody,
+  targetLabel,
+  type RunsOnChoice,
+} from "../placement";
 import { DeployedLogs } from "./Logs";
 import { href, navigate } from "../route";
 import { providersSupporting, useStudio } from "../store";
-import { forgetHandlerStub, queueHandlerStub } from "../stubs";
-import { EVENT_TYPES, type EventType, type Json, type JsonObject, type ProviderMeta } from "../types";
+import { flushHandlerStubs, forgetHandlerStub, queueHandlerStub } from "../stubs";
+import { EVENT_TYPES, type EventType, type FunctionSplitResult, type Json, type JsonObject, type ProviderMeta } from "../types";
 import {
   asArray,
   asObject,
@@ -63,13 +77,132 @@ export function FunctionsView({ rest }: { rest: string[] }) {
   return <FunctionList />;
 }
 
+/** The module of a handler: `app.handlers.hello` -> `app.handlers` ("" when it is not a valid handler). */
+export function handlerModule(handler: string): string {
+  if (!HANDLER_RE.test(handler)) return "";
+  return handler.replace(":", ".").split(".").slice(0, -1).join(".");
+}
+
+/** A function whose handler sits in a code file with other functions' handlers (GET /api/functions/shared). */
+export interface SharedFile {
+  file: string;
+  others: string[];
+}
+
+export function sharedFileOf(shared: Record<string, string[]>, name: string, handler: string): SharedFile | null {
+  const module = handlerModule(handler);
+  const names = module ? shared[module] : undefined;
+  if (!names || !names.includes(name)) return null;
+  return { file: `${module.replace(/\./g, "/")}.py`, others: names.filter((n) => n !== name) };
+}
+
+/** The plan of `pskit function split` (its `lines`), for the confirm dialogs. */
+function SplitPlan({ plans }: { plans: FunctionSplitResult[] }) {
+  const unknown = Array.from(new Set(plans.flatMap((p) => p.unknown_imports || [])));
+  return (
+    <div className="stack-xs">
+      <pre className="split-plan mono">{plans.flatMap((p) => p.lines).join("\n")}</pre>
+      <p className="small muted">
+        The handler and the module-level helpers and imports it uses move to its folder with its own requirements.txt; helpers are copied, so the
+        other functions keep theirs. pskit.yml on disk gets the new handler.
+      </p>
+      {unknown.length > 0 && <p className="small warn-text">Check the new requirements.txt for: {unknown.join(", ")}.</p>}
+    </div>
+  );
+}
+
 function FunctionList() {
-  const { draft, state, edit, replace, issuesAt, provider, providerName } = useStudio();
+  const { draft, state, edit, replace, issuesAt, provider, providerName, dirty, save, setProject, reload } = useStudio();
   const confirm = useConfirm();
   const toast = useToast();
   const [q, setQ] = useState("");
   const generated = new Set((state.validation?.functions || []).filter((f) => f.generated).map((f) => f.name));
   const placement = providerName === "onprem" ? readPlacement(draft) : null;
+  // Functions sharing a code file (pskit.yml on disk; Python only: `pskit function split` moves Python handlers).
+  const python = languageOf(str(asObject(draft.provider).runtime, provider?.default_runtime || "python3.12")) === "python";
+  const [shared, setShared] = useState<Record<string, string[]>>({});
+  const [splitting, setSplitting] = useState<string | null>(null);
+  const loadShared = useCallback(() => {
+    if (!python) {
+      setShared({});
+      return;
+    }
+    api.functionsShared().then(
+      (r) => setShared(r.shared || {}),
+      () => setShared({}),
+    );
+  }, [python]);
+  useEffect(loadShared, [loadShared, state.mtime]);
+  const sharedOf = (r: Row) => sharedFileOf(shared, r.name, str(r.fn.handler));
+  const sharedNames = Object.keys(asObject(draft.functions)).filter((n) => sharedFileOf(shared, n, str(asObject(asObject(draft.functions)[n]).handler)));
+  const splitWarnings = issuesAt(["provider", "options", "placement"]).filter((i) => i.message.includes("pskit function split"));
+
+  /** The split edits pskit.yml on disk: save the draft first. */
+  const savedFirst = async (): Promise<boolean> => {
+    if (!dirty) return true;
+    const answer = await confirm({
+      title: "Save first?",
+      body: "Moving a function to its own folder rewrites pskit.yml on disk, which doesn't have your latest changes. Save them first.",
+      confirmLabel: "Save and continue",
+    });
+    if (answer !== "confirm") return false;
+    try {
+      if (!(await save())) return false;
+      await flushHandlerStubs();
+      return true;
+    } catch (exc) {
+      toast(`Save failed: ${errorMessage(exc)}`, "err");
+      return false;
+    }
+  };
+
+  const splitOne = async (name: string) => {
+    if (!(await savedFirst())) return;
+    setSplitting(name);
+    try {
+      const plan = await api.splitFunction(name, true);
+      const answer = await confirm({ title: `Move ${name} to its own folder?`, body: <SplitPlan plans={[plan]} />, confirmLabel: "Move it" });
+      if (answer !== "confirm") return;
+      const done = await api.splitFunction(name);
+      setProject(done.project);
+      toast(`${name} now lives in ${done.to}`, "ok");
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+    } finally {
+      setSplitting(null);
+      loadShared();
+    }
+  };
+
+  const splitAll = async () => {
+    const names = sharedNames;
+    if (!names.length || !(await savedFirst())) return;
+    setSplitting("*");
+    let moved = 0;
+    try {
+      const plans: FunctionSplitResult[] = [];
+      for (const name of names) plans.push(await api.splitFunction(name, true));
+      const answer = await confirm({
+        title: `Give ${names.length} functions their own folder?`,
+        body: <SplitPlan plans={plans} />,
+        confirmLabel: `Move ${names.length} functions`,
+      });
+      if (answer !== "confirm") return;
+      let last: FunctionSplitResult | null = null;
+      for (const name of names) {
+        last = await api.splitFunction(name);
+        moved++;
+      }
+      if (last) setProject(last.project);
+      toast(`Moved ${moved} functions to their own folders`, "ok");
+    } catch (exc) {
+      toast(moved ? `Moved ${moved} of ${names.length}, then: ${errorMessage(exc)}` : errorMessage(exc), "err");
+      if (moved) await reload().catch(() => undefined);
+    } finally {
+      setSplitting(null);
+      loadShared();
+    }
+  };
   const rows: Row[] = Object.entries(asObject(draft.functions)).map(([name, fn]) => ({ name, fn: asObject(fn) }));
   const needle = q.trim().toLowerCase();
   const visible = rows.filter(
@@ -117,6 +250,18 @@ function FunctionList() {
           {r.fn.description ? <span className="muted small">{str(r.fn.description)}</span> : null}
           {issuesAt(["functions", r.name]).some((i) => i.level === "error") && <span className="badge badge-err">error</span>}
           <GroupBadge placement={placement} fn={r.name} />
+          {(() => {
+            const sf = sharedOf(r);
+            if (!sf) return null;
+            const tip = placement
+              ? `${sf.file} also holds ${sf.others.join(", ")}: every server running any of them gets all of it`
+              : `${sf.file} also holds ${sf.others.join(", ")}: they share its code and the project's requirements.txt`;
+            return (
+              <span className="badge badge-warn" title={tip} aria-label={`shared file: ${tip}`} tabIndex={0}>
+                shared file
+              </span>
+            );
+          })()}
         </div>
       ),
     },
@@ -181,6 +326,17 @@ function FunctionList() {
           <a className="btn btn-sm" href={href("code", handlerFile(str(r.fn.handler)))} title="Open handler code">
             Code
           </a>
+          {sharedOf(r) && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={splitting !== null}
+              title={`Move ${r.name} out of ${sharedOf(r)?.file} into functions/${r.name.replace(/-/g, "_")}/ with its own requirements.txt`}
+              onClick={() => void splitOne(r.name)}
+            >
+              {splitting === r.name ? "Moving…" : "Own folder"}
+            </button>
+          )}
           <button type="button" className="btn btn-sm" onClick={() => duplicate(r)}>
             Duplicate
           </button>
@@ -210,6 +366,24 @@ function FunctionList() {
           </a>
         }
       />
+      {placement && sharedNames.length > 0 && (
+        <div className="hint-box warn split-bar">
+          <div className="grow">
+            <b>
+              {sharedNames.length} function{sharedNames.length === 1 ? " shares" : "s share"} a code file
+            </b>{" "}
+            ({sharedNames.join(", ")}): every server running one of them gets the whole file and the project&apos;s requirements.txt.
+            {splitWarnings.map((w, i) => (
+              <div key={i} className="small">
+                {w.message}
+              </div>
+            ))}
+          </div>
+          <button type="button" className="btn btn-sm btn-primary" disabled={splitting !== null} onClick={() => void splitAll()}>
+            {splitting === "*" ? "Moving…" : "Give each function its own folder"}
+          </button>
+        </div>
+      )}
       <div className="toolbar">
         <SearchInput value={q} onChange={setQ} placeholder="Search name, handler, trigger…" />
       </div>
@@ -302,8 +476,17 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     return new Set(base.map((e, i) => (over.some((o) => deepEqual(o, e)) ? -1 : i)).filter((i) => i >= 0));
   });
   const [showLogs, setShowLogs] = useState(false);
-  const placement = providerName === "onprem" ? readPlacement(draft) : null;
-  const [runsOn, setRunsOn] = useState(() => groupOf(placement, existing || ""));
+  const onprem = providerName === "onprem";
+  const placement = onprem ? readPlacement(draft) : null;
+  const [runsOn, setRunsOn] = useState<RunsOnChoice>(() => initialRunsOn(placement, existing || ""));
+  const targets = usePlacementTargets(onprem);
+  const { deployed } = useOnPremServers(onprem, state.target?.stage || str(asObject(draft.provider).stage, "dev"));
+  // The default group's machine when it has no target of its own: pskit.yml's deploy, else where the stage was deployed.
+  const defaultWhere = deployTargetWhere(
+    draft,
+    deployed?.server ? `server:${deployed.server}` : deployed && !deployed.cluster && deployed.method === "local" ? "local" : "",
+  );
+  const runsOnErrs = onprem ? runsOnErrors(draft, runsOn, defaultWhere) : {};
   const [busy, setBusy] = useState(false);
 
   if (existing && !original) {
@@ -342,7 +525,22 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     if (ev.type === "smtp" && !ev.config.resource) return "pick the SMTP server (an smtp resource) that receives the mail";
     return null;
   });
-  const blocking = !!nameError || !!handlerError || eventErrors.some(Boolean);
+  const runsOnBad = hasRunsOnErrors(runsOnErrs);
+  const blocking = !!nameError || !!handlerError || eventErrors.some(Boolean) || runsOnBad;
+  /** Placement after the "Runs on" choice (the function renamed first), for the review diff and the save. */
+  const withRunsOn = (raw: JsonObject): JsonObject => {
+    if (!onprem) return raw;
+    const current = groupOf(readPlacement(raw), name);
+    if (runsOn.group !== NEW_GROUP && (!runsOn.group || runsOn.group === current)) return raw;
+    return applyRunsOn(raw, name, runsOn);
+  };
+  // Where the function will run (for the requirements note): the chosen group's target.
+  const runsOnLabel =
+    runsOn.group === NEW_GROUP
+      ? targetLabel(targetBody(runsOn.target))
+      : placement
+        ? targetLabel(placement.groups.find((g) => g.name === runsOn.group)?.body || {}) || "the deploy target"
+        : "";
 
   const built = (): JsonObject => {
     const out: JsonObject = {};
@@ -387,7 +585,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     else raw = setIn(raw, ["functions"], { ...asObject((raw as JsonObject).functions), [name]: body });
     raw = syncProviderOverrides(raw as JsonObject, meta.providers, existing, name, asArray(original?.events), events.map(eventToRaw), providerName, skipped);
     if (existing && existing !== name) raw = renameInPlacement(raw as JsonObject, existing, name);
-    if (placement && runsOn && runsOn !== groupOf(readPlacement(raw as JsonObject), name)) raw = moveFunction(raw as JsonObject, name, runsOn);
+    raw = withRunsOn(raw as JsonObject);
     replace(raw as JsonObject);
     const sub = !existing && subproject && !!subprojectFolder(str(body.handler));
     const types = events.map((e) => e.type);
@@ -411,8 +609,17 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     navigate("functions");
   };
 
-  const before = toYaml({ functions: existing && original ? { [existing]: original } : {} });
-  const after = toYaml({ functions: { [name]: built() } });
+  // The review diff also shows placement when "Runs on" changes it.
+  const placementBefore = onprem ? getIn(draft, placementPath(draft)) : undefined;
+  const placementAfter = onprem
+    ? getIn(withRunsOn(existing && existing !== name ? renameInPlacement(draft, existing, name) : draft), placementPath(draft))
+    : undefined;
+  const placementChanged = JSON.stringify(placementBefore ?? null) !== JSON.stringify(placementAfter ?? null);
+  const before = toYaml({
+    functions: existing && original ? { [existing]: original } : {},
+    ...(placementChanged && placementBefore !== undefined ? { placement: placementBefore } : {}),
+  });
+  const after = toYaml({ functions: { [name]: built() }, ...(placementChanged && placementAfter !== undefined ? { placement: placementAfter } : {}) });
   const stepIndex = STEPS.findIndex((s) => s.id === step);
   const fieldIssues = (key: string) => (existing ? issuesAt(["functions", existing, key]).map((i) => i.message) : []);
 
@@ -443,7 +650,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
             <button type="button" onClick={() => setStep(s.id)}>
               <span className="step-num">{i + 1}</span>
               {s.label}
-              {s.id === "basics" && (nameError || handlerError) && <span className="dot-err" aria-label="has errors" />}
+              {s.id === "basics" && (nameError || handlerError || runsOnBad) && <span className="dot-err" aria-label="has errors" />}
               {s.id === "triggers" && eventErrors.some(Boolean) && <span className="dot-err" aria-label="has errors" />}
             </button>
           </li>
@@ -488,11 +695,20 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
               <FormRow
                 label="Dependencies"
                 help={
-                  !subproject
-                    ? "Uses the project's dependencies."
-                    : subprojectFolder(handler)
-                      ? `Creates ${subprojectFolder(handler)}/${depFile}: this function's own dependencies, installed only with it${providerName === "onprem" ? " (on premises with placement, only on the server it runs on)" : ""}.`
-                      : `Needs a handler in a folder, e.g. ${subprojectHandler(name, language)}`
+                  <>
+                    {!subproject
+                      ? "Uses the project's dependencies."
+                      : subprojectFolder(handler)
+                        ? `Creates ${subprojectFolder(handler)}/${depFile}: this function's own dependencies, installed only with it.`
+                        : `Needs a handler in a folder, e.g. ${subprojectHandler(name, language)}`}
+                    {onprem && (placement || runsOn.group === NEW_GROUP) && (
+                      <span className="help-line">
+                        {subproject
+                          ? `With placement, its ${depFile} is installed only on the server it runs on${runsOnLabel ? ` (${runsOnLabel})` : ""}.`
+                          : `With placement, every server running a function from this shared code gets the project's whole ${depFile}.`}
+                      </span>
+                    )}
+                  </>
                 }
               >
                 <Toggle
@@ -505,9 +721,25 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
                 />
               </FormRow>
             )}
-            {placement && (
-              <FormRow label="Runs on" help="The placement group (server) this function runs in (provider.options.placement). Functions not listed in a group run on the default group.">
-                <RunsOnSelect placement={placement} value={runsOn} onChange={setRunsOn} />
+            {onprem && (
+              <FormRow
+                label="Runs on"
+                htmlFor="frunson"
+                help={
+                  placement
+                    ? "The placement group (server) this function runs in (provider.options.placement). Functions not listed in a group run on the default group."
+                    : "Every function runs on the deploy target. A new group puts this function on another server, cluster or this machine (provider.options.placement)."
+                }
+              >
+                <RunsOnField
+                  placement={placement}
+                  value={runsOn}
+                  onChange={setRunsOn}
+                  errors={runsOnErrs}
+                  servers={targets.servers}
+                  clusters={targets.clusters}
+                  onServerAdded={targets.reload}
+                />
               </FormRow>
             )}
             <div className="form-grid">

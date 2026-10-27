@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, errorMessage } from "../api";
 import { JobConsole } from "../components/Console";
+import { DeploySteps } from "../components/DeploySteps";
+import { Tabs } from "../../components/Tabs";
 import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FormRow, JsonInput, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
@@ -32,6 +34,10 @@ export function DeployView() {
   const [history, setHistory] = useState<Job[]>([]);
   const [deleteData, setDeleteData] = useState(true);
   const job = useJob(jobId);
+  // The command started from this page (the job reports its own once polled).
+  const [launched, setLaunched] = useState("");
+  const [outputTab, setOutputTab] = useState<"steps" | "raw">("steps");
+  useEffect(() => setOutputTab("steps"), [jobId]);
   const target = state.target || { provider: "aws", stage: "dev" };
   const targetMeta = meta.providers.find((p) => p.name === target.provider);
   const problems = targetMeta ? compatProblems(draft, targetMeta) : [];
@@ -224,6 +230,7 @@ export function DeployView() {
               ? { ...(args || {}), server: machine }
               : args;
       const r = await api.startJob(command, target.provider, target.stage, withMachine);
+      setLaunched(command);
       setJobId(r.job_id);
     } catch (exc) {
       if (exc instanceof ApiError && exc.status === 409) toast("Another deploy-type job is running. Wait for it or cancel it.", "warn");
@@ -332,7 +339,31 @@ export function DeployView() {
         />
         <span className="muted small">Applies to the Remove action. External resources are never deleted.</span>
       </div>
-      <JobConsole job={job} onCancel={jobId ? () => void api.cancelJob(jobId).catch((exc: unknown) => toast(errorMessage(exc), "err")) : undefined} />
+      {(() => {
+        const cancel = jobId ? () => void api.cancelJob(jobId).catch((exc: unknown) => toast(errorMessage(exc), "err")) : undefined;
+        const command = job.command || launched;
+        // On premises, deploy and remove get the structured steps (hosts in parallel interleave in the raw log).
+        if (!onprem || !jobId || !["deploy", "remove"].includes(command)) return <JobConsole job={job} onCancel={cancel} />;
+        return (
+          <div className="deploy-output">
+            <Tabs
+              tabs={[
+                { id: "steps", label: "Steps" },
+                { id: "raw", label: "Raw log" },
+              ]}
+              active={outputTab}
+              onChange={(t) => setOutputTab(t as "steps" | "raw")}
+            />
+            <div role="tabpanel" aria-label={outputTab === "steps" ? "Steps" : "Raw log"}>
+              {outputTab === "steps" ? (
+                <DeploySteps key={jobId} job={job} command={command} placement={placement} deployed={deployed} onCancel={cancel} />
+              ) : (
+                <JobConsole job={job} onCancel={cancel} />
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {onprem && (
         <Section title="Firewall" hint="the ports each server must allow" defaultOpen={false}>
@@ -361,7 +392,14 @@ export function DeployView() {
           <ul className="job-list">
             {history.map((h) => (
               <li key={h.job_id} className="row-gap">
-                <button type="button" className={`job-item grow${h.job_id === jobId ? " active" : ""}`} onClick={() => setJobId(h.job_id)}>
+                <button
+                  type="button"
+                  className={`job-item grow${h.job_id === jobId ? " active" : ""}`}
+                  onClick={() => {
+                    setLaunched(h.command);
+                    setJobId(h.job_id);
+                  }}
+                >
                   <span className={`badge badge-${h.status === "succeeded" ? "ok" : h.status === "running" ? "info" : h.status === "cancelled" ? "off" : "err"}`}>{h.status}</span>
                   <code className="mono">{JOB_COMMANDS.has(h.command) ? `pskit ${h.command}` : h.label || h.command}</code>
                   <span className="muted small grow">{relative(h.started_at)}</span>

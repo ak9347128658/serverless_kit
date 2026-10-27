@@ -299,6 +299,23 @@ def make_handler(app: Studio) -> type:
                     raise StudioError(400, "events must be a list")
                 return 200, project.ensure_handler(root, str(body.get("handler") or ""), [str(e) for e in events],
                                                    subproject=bool(body.get("subproject")))
+            if parts == ["functions", "shared"] and method == "GET":
+                from ..core import function_split
+
+                try:
+                    return 200, {"shared": function_split.shared_in_project(root)}
+                except function_split.SplitError as exc:
+                    raise StudioError(400, str(exc)) from None
+            if len(parts) == 3 and parts[0] == "functions" and parts[2] == "split" and method == "POST":
+                from ..core import function_split
+
+                body = _obj(self._body())
+                try:
+                    run = function_split.plan if body.get("dry_run") else function_split.split
+                    result = run(root, parts[1])
+                except function_split.SplitError as exc:
+                    raise StudioError(400, str(exc)) from None
+                return 200, {**result, "lines": function_split.describe(result), "project": project.get_project(root)}
             if parts == ["discover"] and method == "GET":
                 provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
                 return 200, discover(

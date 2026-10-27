@@ -499,3 +499,20 @@ def test_log_streams_and_clear(make_project, tmp_path):
         assert not again.logs.query(function="hello")["entries"]
     finally:
         again.logs.close()
+
+
+def test_a_host_that_crashes_at_start_fails_fast_and_shows_its_log(tmp_path):
+    import subprocess
+    import sys
+
+    from py_serverless_kit.runtime import onprem_host
+
+    log = tmp_path / "host.log"
+    log.write_bytes(b"old run\n")
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; print('PermissionError: /home/x'); sys.exit(1)"],
+                            stdout=open(log, "ab"), stderr=subprocess.STDOUT)  # noqa: SIM115
+    started = time.time()
+    assert onprem_host._wait_healthy("http://127.0.0.1:9/__pskit/health", 30, proc) is False
+    assert time.time() - started < 15  # not the full 30 s
+    tail = onprem_host._log_tail(log, len(b"old run\n"))
+    assert "PermissionError: /home/x" in tail and "old run" not in tail and tail.startswith("  | ")

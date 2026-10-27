@@ -150,6 +150,7 @@ Operate
               pskit cluster list
               pskit cluster remove prod --yes
   firewall    Ports each on-prem server must open    pskit firewall --server edge2
+  function    split: a function into its own folder  pskit function split get-item
   lb          algorithms | create | update | list | status | attach | detach | routes | sync | logs | remove | forget
               pskit lb algorithms
               pskit lb create edge --server lb1 --algorithm least_time
@@ -1816,6 +1817,55 @@ def cluster_balancer_logs(name: str, lines: int, config_path: Optional[str]) -> 
     from ..core.onprem_cluster import balancer_logs
 
     click.echo(_cluster_call(balancer_logs, _cluster_root(config_path), name, lines).rstrip("\n"))
+
+
+# ----------------------------------------------------------------------------- functions
+@cli.group("function", short_help="Give a function its own folder, code and requirements.txt.")
+def function_group() -> None:
+    """Functions as sub-projects: functions/<name>/ with their own code and requirements.txt, so a server of
+    provider.options.placement gets only the code and dependencies of the functions it runs.
+
+    \b
+    Examples:
+      pskit function split get-item
+      pskit function split --all --dry-run
+    """
+
+
+@function_group.command("split")
+@click.argument("names", nargs=-1)
+@click.option("--all", "split_all", is_flag=True, help="Every function that shares a code file with another.")
+@click.option("--dry-run", is_flag=True, help="Only show what would move.")
+@_CONFIG_OPTION
+def function_split(names: Tuple[str, ...], split_all: bool, dry_run: bool, config_path: Optional[str]) -> None:
+    """Move functions out of a shared code file into functions/<name>/handler.py with their own requirements.txt.
+
+    \b
+    Examples:
+      pskit function split get-item
+      pskit function split --all --dry-run
+
+    The helpers and imports the function uses are copied; the function is removed from the shared file unless code
+    there still calls it; its handler in pskit.yml is updated; requirements.txt gets the project requirements its
+    imports name.
+    """
+    from ..core import function_split as fsplit
+
+    root = _cluster_root(config_path)
+    if split_all:
+        names = tuple(n for group in fsplit.shared_in_project(root).values() for n in group)
+        if not names:
+            echo("Every function already has its own folder (or its own code file).")
+            return
+    if not names:
+        raise click.UsageError("name a function, or use --all")
+    for name in names:
+        try:
+            result = (fsplit.plan if dry_run else fsplit.split)(root, name)
+        except fsplit.SplitError as exc:
+            raise click.ClickException(str(exc)) from None
+        for line in fsplit.describe(result):
+            echo(("would move " if dry_run and line == fsplit.describe(result)[0] else "") + line)
 
 
 # ----------------------------------------------------------------------------- firewall

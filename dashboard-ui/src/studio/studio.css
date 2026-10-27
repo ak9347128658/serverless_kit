@@ -643,3 +643,46 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .fw-ufw { display: flex; flex-direction: column; gap: 4px; }
 .fw-ufw-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .fw-ufw-code { margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); overflow-x: auto; white-space: pre; font-size: 12px; max-height: 260px; }
+
+/* function editor: "Runs on" (placement group) and moving functions to their own folder */
+.runs-on { display: grid; gap: 8px; min-width: 0; }
+.runs-on-new { display: grid; gap: 4px; border: 1px dashed var(--line-strong); background: var(--panel-2); }
+.runs-on-target { display: grid; gap: 8px; justify-items: start; }
+.help-line { display: block; margin-top: 4px; }
+.split-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.split-plan { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 300px; overflow: auto; }
+
+/* deploy steps (on-prem deploy / remove; components/DeploySteps.tsx) */
+.deploy-output { display: grid; gap: 8px; min-width: 0; }
+.dsteps { list-style: none; margin: 0; padding: 10px; display: grid; gap: 6px; background: var(--bg); }
+.dstep { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); min-width: 0; }
+.dstep-running { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.dstep-failed { border-color: var(--err); }
+.dstep-head { width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 8px 12px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: var(--radius-sm); }
+.dstep-head:hover { background: var(--panel-2); }
+.dstep-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dstep-title { font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.dstep-meta { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+.dstep-state { color: var(--muted); }
+.dstep-failed .dstep-state { color: var(--err); font-weight: 600; }
+.dstep-done .dstep-state { color: var(--ok); }
+.dstep-icon { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: 11px; font-weight: 700; flex: none; box-sizing: border-box; }
+.dstep-spin { flex: none; }
+.dsi-waiting { border: 2px solid var(--line-strong); }
+.dsi-done { background: var(--ok-soft); color: var(--ok); }
+.dsi-failed { background: var(--err-soft); color: var(--err); }
+.dsi-cancelled { background: var(--off-soft); color: var(--off); }
+.dstep-body { padding: 0 12px 12px; display: grid; gap: 8px; min-width: 0; }
+.dstep-log { margin: 0; background: #0d1117; color: #d6deeb; font-family: var(--mono); font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: 6px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dstep-log:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dstep-error { border: 1px solid var(--err); background: var(--err-soft); border-radius: 6px; padding: 8px 10px; display: grid; gap: 6px; min-width: 0; }
+.dstep-error > b { color: var(--err); }
+.dstep-error pre { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+.dstep-tail { padding: 6px 8px; border-radius: 4px; background: var(--panel); border-left: 3px solid var(--err); }
+.dsteps-endpoints { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+.dfw { display: grid; gap: 8px; }
+.dfw-server { border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); }
+.dfw-server > summary { cursor: pointer; padding: 6px 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.dfw-server > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dfw-server[open] > summary { border-bottom: 1px solid var(--line); }
+.dfw-body { padding: 8px 10px; display: grid; gap: 10px; min-width: 0; }

@@ -146,6 +146,12 @@ def resource_name(group: str, default: str) -> str:
     return "host" if group == default else f"host_{group.replace('-', '_')}"
 
 
+def group_data_dir(data_dir: str, group: str) -> str:
+    """``<data_dir>/groups/<group>``: a group's queues, buckets and logs, inside the default group's data dir."""
+    sep = "\\" if "\\" in data_dir and "/" not in data_dir else "/"
+    return data_dir.rstrip("/\\") + f"{sep}groups{sep}{group}"
+
+
 def group_options(options: Dict[str, Any], group: str, body: Dict[str, Any], default: str) -> Dict[str, Any]:
     """The provider options one group deploys with: pskit.yml's, without placement, with the group's target."""
     out = copy.deepcopy({k: v for k, v in options.items() if k != "placement"})
@@ -199,8 +205,10 @@ def resolve(options: Dict[str, Any], root: Path, stage: str, server: Optional[st
         else:
             resolve_deploy(opts, root, group_stage(stage, name, default))
         if name != default and opts.get("data_dir"):
-            # pskit.yml's data_dir (or the saved server's): each group keeps its own state beside it.
-            opts["data_dir"] = str(opts["data_dir"]).rstrip("/\\") + f"-{name}"
+            # pskit.yml's data_dir (or the saved server's): each group keeps its own state in a folder inside it.
+            # Never beside it: a saved server's data_dir is often the home folder, and its parent (/home) is not
+            # writable.
+            opts["data_dir"] = group_data_dir(str(opts["data_dir"]), name)
         resolved[name] = opts
     seen: Dict[Tuple[str, int], str] = {}
     for name, opts in resolved.items():

@@ -8,6 +8,7 @@
     "dev": "vite",
     "dev:studio": "vite --config vite.studio.config.ts",
     "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
     "build:dashboard": "vite build && node scripts/install-template.mjs",
     "build:studio": "vite build --config vite.studio.config.ts && node scripts/install-studio.mjs",
     "build": "tsc --noEmit && npm run build:dashboard && npm run build:studio"
