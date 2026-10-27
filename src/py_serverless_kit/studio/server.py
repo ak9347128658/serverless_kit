@@ -627,8 +627,10 @@ def make_handler(app: Studio) -> type:
                         raise StudioError(400, f"cluster {name!r} already exists")
 
                     def create(job: Any) -> int:
+                        serves = body.get("master_serves")
                         clu.create_cluster(root, name, orch, master, job.emit, advertise=str(body.get("advertise") or ""),
-                                           nomad_version=str(body.get("nomad_version") or ""))
+                                           nomad_version=str(body.get("nomad_version") or ""),
+                                           serve_on_master=serves if isinstance(serves, bool) else None)
                         return 0
 
                     label = f"Create cluster {name} ({clu.ORCHESTRATORS[orch]['label']})"
@@ -658,7 +660,8 @@ def make_handler(app: Studio) -> type:
                     return 200, clu.send_alert(root, rest[0], current, test=True)
                 if len(rest) == 2 and rest[1] == "balancer-logs" and method == "GET":
                     return 200, {"text": clu.balancer_logs(root, rest[0], _int(params, "lines", 100))}
-                actions = ("join", "leave", "scale", "remove", "balancer-set", "balancer-remove", "balancer-sync")
+                actions = ("join", "leave", "scale", "remove", "balancer-set", "balancer-remove", "balancer-sync",
+                           "master-serves")
                 if len(rest) == 2 and rest[1] in actions and method == "POST":
                     name, action = rest
                     body = _obj(self._body())
@@ -684,6 +687,8 @@ def make_handler(app: Studio) -> type:
                             clu.remove_balancer(root, name, job.emit)
                         elif action == "balancer-sync":
                             clu.sync_balancer(root, name, job.emit, strict=True)
+                        elif action == "master-serves":
+                            clu.set_master_serves(root, name, bool(body.get("enabled")), job.emit)
                         else:
                             clu.remove_cluster(root, name, job.emit)
                         return 0
@@ -691,7 +696,8 @@ def make_handler(app: Studio) -> type:
                     label = {"join": f"Join {server} to", "leave": f"Remove {server} from", "scale": "Scale",
                              "remove": "Forget", "balancer-set": f"Load balancer {server} for",
                              "balancer-remove": "Remove the load balancer of",
-                             "balancer-sync": "Update the load balancer of"}[action] + f" cluster {name}"
+                             "balancer-sync": "Update the load balancer of",
+                             "master-serves": "Requests to the master of"}[action] + f" cluster {name}"
                     return 202, {"job_id": app.jobs.run_callable("onprem-cluster", run, label=label).id}
             except (clu.ClusterError, ServiceError, ValueError) as exc:
                 raise StudioError(400, str(exc)) from None

@@ -551,7 +551,7 @@ def attached_to(root: Path, cluster: str) -> List[str]:
 
 
 def cluster_backends(cluster: Dict[str, Any], port: int) -> List[Dict[str, Any]]:
-    """Every server of a cluster that answers a deployment's port (Nomad: the master's main replica as backup)."""
+    """Every server of a cluster that answers a deployment's port (the master as backup when it does not serve)."""
     primary, backup = _cluster()._backends(cluster)
     nodes = cluster.get("nodes") or {}
     return ([{"address": str(nodes[s].get("address")), "port": port, "server": s} for s in primary]

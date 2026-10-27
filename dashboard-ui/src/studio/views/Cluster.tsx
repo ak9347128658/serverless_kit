@@ -279,6 +279,18 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
             </button>
           </span>
         </div>
+        <div className="cluster-binding">
+          <Toggle
+            checked={cluster.master_serves}
+            onChange={(on) => void startJob("master-serves", { enabled: on })}
+            label={
+              <>
+                Send requests to the master <b className="mono">{cluster.master}</b> too
+              </>
+            }
+          />
+          <MasterServesNote orchestrator={cluster.orchestrator} on={cluster.master_serves} joined={cluster.nodes.length > 1} />
+        </div>
         <ProjectBinding cluster={cluster} />
       </div>
 
@@ -457,9 +469,11 @@ function LoadBalancer({
             <p className="muted small">
               Optional: one URL for the whole cluster. pskit runs nginx in Docker on one more saved server <b>outside</b> the cluster and spreads each
               deployment&apos;s HTTP over the servers
-              {cluster.orchestrator === "nomad"
-                ? " (on Nomad the web replicas share the requests; the master's main replica is only a backup)"
-                : " (each server's port already reaches every replica; the load balancer adds one URL and skips a server that is down)"}
+              {!cluster.master_serves
+                ? " (the joined servers share the requests; the master is only a backup while they are down — turn on “Send requests to the master too” above to change that)"
+                : cluster.orchestrator === "nomad"
+                  ? " (the web replicas and the master's main replica share the requests)"
+                  : " (each server's port already reaches every replica; the load balancer adds one URL and skips a server that is down)"}
               . Deploy, remove, join and leave keep it up to date. Same as <code className="mono">pskit cluster balancer set {cluster.name} SERVER</code>.
             </p>
           </div>
@@ -1408,6 +1422,31 @@ export function ServerChoice({
 }
 
 /** Servers already taken: members of a cluster, or a cluster's load balancer. */
+/** What "Send requests to the master too" does, for the create form and the cluster card. */
+function MasterServesNote({ orchestrator, on, joined }: { orchestrator: Orchestrator; on: boolean; joined: boolean }) {
+  const moves = orchestrator !== "nomad";
+  return (
+    <div className="muted small">
+      {on ? (
+        <>
+          <b>On:</b> load balancers spread requests over every server, the master included
+          {orchestrator === "nomad" ? " (its main replica answers them next to the web replicas)" : " (web replicas may also run on it)"}. Uses the
+          master&apos;s spare CPU, but heavy traffic competes with the control plane, schedules, queues and data that also live there.
+        </>
+      ) : (
+        <>
+          <b>Off:</b> the master stays idle for requests while a joined server is up: load balancers list it only as a <b>backup</b> and send it
+          traffic when every other server is down{moves ? ", and web replicas run on the other servers" : ""}. Keeps the master free for the control
+          plane, schedules, queues and data. {!joined && "Until a server joins, the master still serves everything."}
+        </>
+      )}{" "}
+      Turning this on or off updates the load balancers at once
+      {moves ? "; web replicas move on or off the master at the next deploy" : ""}. Same as{" "}
+      <code className="mono">pskit cluster set NAME --{on ? "" : "no-"}master-serves</code>.
+    </div>
+  );
+}
+
 function inCluster(state: OnPremClustersState): Set<string> {
   return new Set(state.clusters.flatMap((c) => [...c.nodes.map((n) => n.server), ...(c.balancer ? [c.balancer.server] : [])]));
 }
@@ -1433,6 +1472,9 @@ function CreateClusterDrawer({
   const [orchestrator, setOrchestrator] = useState<Orchestrator>("swarm");
   const [master, setMaster] = useState("");
   const [advertise, setAdvertise] = useState("");
+  // null: the orchestrator's default (Nomad keeps the master as a backup; Swarm and k3s send it requests).
+  const [masterServesChoice, setMasterServes] = useState<boolean | null>(null);
+  const masterServes = masterServesChoice ?? orchestrator !== "nomad";
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const job = useJob(jobId);
@@ -1447,7 +1489,7 @@ function CreateClusterDrawer({
   const create = async () => {
     setError(null);
     try {
-      const { job_id } = await api.clusterCreate({ name, orchestrator, master, advertise: advertise || undefined });
+      const { job_id } = await api.clusterCreate({ name, orchestrator, master, advertise: advertise || undefined, master_serves: masterServes });
       setJobId(job_id);
     } catch (exc) {
       setError(errorMessage(exc));
@@ -1496,6 +1538,9 @@ function CreateClusterDrawer({
       </FormRow>
       <FormRow label="Cluster address (optional)" help="The master's IP the other servers reach (e.g. its private IP). Default: its SSH host.">
         <TextInput value={advertise} onChange={setAdvertise} placeholder="10.0.0.5" mono />
+      </FormRow>
+      <FormRow label="Master serves requests" help={<MasterServesNote orchestrator={orchestrator} on={masterServes} joined={false} />}>
+        <Toggle checked={masterServes} onChange={setMasterServes} label="Send requests to the master too, not only to the joined servers" />
       </FormRow>
       {error && <div className="form-error">{error}</div>}
       {jobId && <JobConsole job={job} />}

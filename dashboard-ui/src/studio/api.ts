@@ -256,7 +256,7 @@ export const api = {
   onpremTerminalStop: (name: string) => request<{ stopped: string }>("POST", `/api/onprem-terminals/${encodeURIComponent(name)}/stop`, {}),
   firewall: () => request<OnPremFirewall>("GET", "/api/onprem-firewall"),
   clusters: () => request<OnPremClustersState>("GET", "/api/onprem-clusters"),
-  clusterCreate: (body: { name: string; orchestrator: string; master: string; advertise?: string }) =>
+  clusterCreate: (body: { name: string; orchestrator: string; master: string; advertise?: string; master_serves?: boolean }) =>
     request<{ job_id: string }>("POST", "/api/onprem-clusters", body),
   clusterRequests: (name: string, stack: string, since: number) =>
     request<ClusterRequests>(

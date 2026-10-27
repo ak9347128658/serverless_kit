@@ -136,9 +136,10 @@ Operate
   logs        Tail deployed logs              pskit logs -f --function worker
   trigger     Send a real test event          pskit trigger -f worker -e 0 -d '{"id": 1}'
   dashboard   Deployment dashboard            pskit dashboard --serve --open
-  cluster     create | join | leave | status | check | watch | alerts | requests | scale | balancer | list | remove
+  cluster     create | join | leave | set | status | check | watch | alerts | requests | scale | balancer | list | remove
               pskit cluster create prod --orchestrator swarm --master edge1
               pskit cluster join prod edge2
+              pskit cluster set prod --master-serves
               pskit cluster balancer set prod lb1
               pskit cluster leave prod edge2 --yes
               pskit cluster status prod
@@ -1401,6 +1402,7 @@ def cluster() -> None:
     Examples:
       pskit cluster create prod --orchestrator swarm --master edge1
       pskit cluster join prod edge2                # also while functions are running
+      pskit cluster set prod --no-master-serves    # master only as a backup; joined servers take the requests
       pskit cluster status prod                    # CPU / memory / disk of every server, replicas, full?
       pskit cluster alerts prod --function notify-devops --webhook https://hooks.slack.com/...
       pskit cluster watch prod                     # check every minute, alert when every server is full
@@ -1469,7 +1471,8 @@ def cluster_list(as_json: bool, config_path: Optional[str]) -> None:
         info("No clusters. Create one: pskit cluster create NAME --orchestrator swarm --master SERVER")
         return
     for item in items:
-        servers = ", ".join(f"{n['server']}{' (master)' if n.get('role') == 'master' else ''}" for n in item["nodes"])
+        master = " (master)" if item.get("master_serves") else " (master, backup only)"
+        servers = ", ".join(f"{n['server']}{master if n.get('role') == 'master' else ''}" for n in item["nodes"])
         echo(f"  {item['name']:<14} {item['orchestrator_label']:<18} {servers}")
         balancer = item.get("balancer") or {}
         if balancer:
@@ -1485,15 +1488,34 @@ def cluster_list(as_json: bool, config_path: Optional[str]) -> None:
 @click.option("--master", required=True, help="Saved server that runs the control plane and the main replica.")
 @click.option("--advertise", default="", help="The master's address other servers use (default: its host).")
 @click.option("--nomad-version", default="", help="Nomad release to install (default: the tested one).")
+@click.option("--master-serves/--no-master-serves", "master_serves", default=None,
+              help="Send requests to the master too, next to the joined servers. Off: the master is only a backup, "
+                   "used while every other server is down. Default: off on Nomad, on on Swarm and k3s.")
 @_CONFIG_OPTION
 def cluster_create(name: str, orchestrator: str, master: str, advertise: str, nomad_version: str,
-                   config_path: Optional[str]) -> None:
+                   master_serves: Optional[bool], config_path: Optional[str]) -> None:
     """Install the orchestrator on MASTER and save cluster NAME."""
     from ..core.onprem_cluster import create_cluster
 
     _cluster_call(create_cluster, _cluster_root(config_path), name, orchestrator, master, echo, advertise=advertise,
-                  nomad_version=nomad_version)
+                  nomad_version=nomad_version, serve_on_master=master_serves)
     ok(f"Cluster {name} created. In pskit.yml: provider.options.cluster: {name}")
+
+
+@cluster.command("set")
+@click.argument("name")
+@click.option("--master-serves/--no-master-serves", "master_serves", default=None,
+              help="Send requests to the master too (on), or use it only while every other server is down (off).")
+@_CONFIG_OPTION
+def cluster_set(name: str, master_serves: Optional[bool], config_path: Optional[str]) -> None:
+    """Change how cluster NAME spreads requests. The load balancers follow at once; Swarm and k3s move web
+    replicas on or off the master at the next pskit deploy."""
+    from ..core.onprem_cluster import set_master_serves
+
+    if master_serves is None:
+        raise click.UsageError("nothing to change: pass --master-serves or --no-master-serves")
+    _cluster_call(set_master_serves, _cluster_root(config_path), name, master_serves, echo)
+    ok(f"{name}: the master {'serves requests' if master_serves else 'is only a backup'}")
 
 
 @cluster.command("join")

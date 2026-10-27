@@ -86,6 +86,11 @@ they happen. If the port never answers, the output ends with `nomad job status` 
 
    Servers in one private network should use their private IP: `--advertise 10.0.0.5` (and `--advertise` on join).
 
+   **Does the master serve requests too?** The studio's *Master serves requests* switch, or
+   `--master-serves` / `--no-master-serves`, decides whether load balancers send requests to the master next to
+   the joined servers. See [The master and requests](#the-master-and-requests). Default: off on Nomad, on on
+   Swarm and k3s. Change it later with `pskit cluster set prod --master-serves` (or the switch on the cluster page).
+
 3. **Join servers**, now or any time later (also while functions are running):
 
    ```bash
@@ -220,7 +225,23 @@ pskit deploy --cluster prod
 | Orchestrator | Behind the load balancer |
 |---|---|
 | Swarm, k3s | every server (each server's port already reaches every web replica; the load balancer adds one URL and skips a server that is down) |
-| Nomad | the servers with a web replica. The master's main replica is a **backup**: it answers only while every web replica is down, so it stays free for schedules, queues and workflows. With no joined server yet, the master serves alone |
+| Nomad | the servers with a web replica, plus the master's main replica when the master serves requests |
+
+When the master does **not** serve requests, it is listed on every load balancer as a **backup** only (see below).
+
+### The master and requests
+
+| Master serves requests | What happens |
+|---|---|
+| **on** (Swarm / k3s default) | Load balancers spread requests over every server, the master included. Nomad: the master's main replica answers them next to the web replicas. Swarm / k3s: web replicas may also run on the master. Uses the master's spare CPU, but heavy traffic competes with the control plane, schedules, queues and data that live there |
+| **off** (Nomad default) | The master is idle for requests while a joined server is up: load balancers list it as a `backup` and send it traffic only while every other server is down. Swarm / k3s also keep web replicas off the master (a placement constraint / node affinity) while another server can run them. With no joined server yet, the master still serves everything |
+
+Set it when creating the cluster (`--master-serves` / `--no-master-serves`, or the studio switch) and change it any
+time with `pskit cluster set NAME --master-serves|--no-master-serves` or the switch on the cluster page. The load
+balancers (the cluster's own and attached named ones) are updated at once. On Swarm and k3s, web replicas move on
+or off the master at the next `pskit deploy`; so after the first server joins a cluster whose master does not
+serve, deploy again to move them off the master. Clusters created before this setting keep their old behaviour
+(off on Nomad, on on Swarm and k3s). Without a load balancer, users who call the master's own address still reach it.
 
 **pskit keeps it up to date.** You do not edit nginx config:
 
@@ -413,8 +434,9 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 
 | Command | |
 |---|---|
-| `pskit cluster create NAME -o swarm\|kubernetes\|nomad --master SERVER [--advertise IP]` | install on the master and save |
+| `pskit cluster create NAME -o swarm\|kubernetes\|nomad --master SERVER [--advertise IP] [--[no-]master-serves]` | install on the master and save |
 | `pskit cluster join NAME SERVER [--advertise IP]` | add a server (installs, joins, copies images) |
+| `pskit cluster set NAME --master-serves\|--no-master-serves` | send requests to the master too, or keep it as a backup only |
 | `pskit cluster leave NAME SERVER` | drain and remove a server |
 | `pskit cluster status NAME [--json]` | servers, replicas, full or not |
 | `pskit cluster check NAME [--no-alert]` | status once and the alert when full (exit 3 when full) |

@@ -6,7 +6,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.3.5] - 2026-10-27
+
 ### Added
+- On premises, scaling clusters have a **Master serves requests** switch (studio: *New cluster* form and the cluster
+  page; CLI: `pskit cluster create ... --master-serves|--no-master-serves`, `pskit cluster set NAME
+  --master-serves|--no-master-serves`). On, load balancers spread requests over every server, the master included.
+  Off, the master is only a `backup` there, used while every other server is down, and Swarm / k3s keep web
+  replicas off it while another server can run them. Before, a Nomad cluster's master stayed idle until every
+  joined server was down. Defaults keep the old behaviour (off on Nomad, on on Swarm and k3s). Changing it updates
+  the load balancers at once; Swarm / k3s web replicas follow at the next `pskit deploy`.
 - On premises, a storage event can set both `resource` and `bucket`: the resource is the storage service (driver,
   endpoint, keys) and `bucket` is any bucket on it, e.g. `storage: {resource: minio, bucket: invoices}`. The studio's
   storage trigger form picks the *Storage service* and takes the bucket name. Cloud providers reject the combination.

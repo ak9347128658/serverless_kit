@@ -122,6 +122,18 @@ def list_clusters(root: Path) -> List[Dict[str, Any]]:
     return [public(name, item, root) for name, item in sorted(load_clusters(root).items())]
 
 
+def master_serves(item: Dict[str, Any]) -> bool:
+    """Whether the master takes a share of the requests next to the other servers.
+
+    On: the load balancers send it requests like any other server (Nomad: its main replica answers them;
+    Swarm / k3s: web replicas may also run on it). Off: it is only a backup there, used while every other
+    server is down, so it keeps its CPU for the control plane, schedules, queues and data (Swarm / k3s also
+    keep web replicas off it while another server can take them). Clusters saved without the setting keep
+    what they did before: off on Nomad, on on Swarm and k3s."""
+    value = item.get("master_serves")
+    return value if isinstance(value, bool) else str(item.get("orchestrator") or "") != "nomad"
+
+
 def public(name: str, item: Dict[str, Any], root: Optional[Path] = None) -> Dict[str, Any]:
     """What the CLI and studio show (no logins: those stay in the saved servers)."""
     orch = str(item.get("orchestrator") or "")
@@ -130,6 +142,7 @@ def public(name: str, item: Dict[str, Any], root: Optional[Path] = None) -> Dict
         "orchestrator": orch,
         "orchestrator_label": ORCHESTRATORS.get(orch, {}).get("label", orch),
         "master": item.get("master"),
+        "master_serves": master_serves(item),
         "advertise": item.get("advertise"),
         "nodes": [{"server": s, **n} for s, n in sorted((item.get("nodes") or {}).items())],
         "capacity": {**DEFAULT_CAPACITY, **(item.get("capacity") or {})},
@@ -255,9 +268,12 @@ def _values(text: str, key: str) -> List[str]:
 # ----------------------------------------------------------------------------------------------- lifecycle
 def create_cluster(
     root: Path, name: str, orchestrator: str, master: str, emit: Emit, *, advertise: str = "",
-    nomad_version: str = "", run: Optional[RunFn] = None,
+    nomad_version: str = "", serve_on_master: Optional[bool] = None, run: Optional[RunFn] = None,
 ) -> Dict[str, Any]:
-    """Install the orchestrator on saved server ``master`` and save cluster ``name``."""
+    """Install the orchestrator on saved server ``master`` and save cluster ``name``.
+
+    ``serve_on_master``: whether the master also takes requests (see :func:`master_serves`); None keeps the
+    orchestrator's default (Nomad: no, Swarm / k3s: yes)."""
     if not _NAME.match(str(name)):
         raise ClusterError("cluster name: lowercase letter first; lowercase letters, digits and - (max 31)")
     if orchestrator not in ORCHESTRATORS:
@@ -286,6 +302,7 @@ def create_cluster(
         "alert": dict(DEFAULT_ALERT),
         "created_at": _now(),
     }
+    item["master_serves"] = master_serves({**item, "master_serves": serve_on_master})
     if orchestrator == "nomad" and nomad_version:
         item["nomad_version"] = nomad_version
     with _LOCK:
@@ -293,6 +310,7 @@ def create_cluster(
         clusters[name] = item
         _save(root, clusters)
     emit(f"Cluster {name} is ready: master {master} (node {node}). Join more servers: pskit cluster join {name} SERVER")
+    emit(f"  {_serving_note(item)}")
     network.emit_rules(emit, f"cluster {name} ({ORCHESTRATORS[orchestrator]['label']}, master {master})",
                        network.cluster(name, item))
     return public(name, item, root)
@@ -338,6 +356,9 @@ def join_server(root: Path, name: str, server: str, emit: Emit, *, advertise: st
     _update(root, name, lambda c: c.setdefault("nodes", {}).__setitem__(
         server, {"role": "worker", "node": node, "address": addr, "joined_at": _now()}))
     emit(f"{server} joined {name} as node {node}. Replicas spread to it as the orchestrator schedules them.")
+    if not master_serves(cluster) and orch != "nomad" and deployments:
+        emit(f"  The master does not serve requests: run pskit deploy again to move web replicas off"
+             f" {cluster['master']} now that {server} can take them.")
     sync_balancer(root, name, emit, run=run)
     balancers.sync_cluster(root, name, emit, run=run)
     network.emit_rules(emit, f"{server} joined cluster {name}", network.cluster(
@@ -436,6 +457,31 @@ def save_settings(root: Path, name: str, body: Dict[str, Any]) -> Dict[str, Any]
                           "interval_seconds": max(15, int(watch.get("interval_seconds") or 60))}
 
     return public(name, _update(root, name, change), root)
+
+
+def _serving_note(cluster: Dict[str, Any]) -> str:
+    master = cluster.get("master")
+    if master_serves(cluster):
+        return (f"The master {master} serves requests too: load balancers spread them over every server,"
+                f" the master included.")
+    keep = "" if cluster.get("orchestrator") == "nomad" else " and web replicas stay off it while another server can run them"
+    return (f"The master {master} does not serve requests: load balancers use it only while every other server is"
+            f" down{keep}. Until a server joins, the master serves everything.")
+
+
+def set_master_serves(root: Path, name: str, enabled: bool, emit: Emit, *, run: Optional[RunFn] = None
+                      ) -> Dict[str, Any]:
+    """Turn requests to the master on or off (see :func:`master_serves`) and update the load balancers now.
+    Swarm and k3s move web replicas on or off the master at the next ``pskit deploy``."""
+    cluster = _update(root, name, lambda c: c.__setitem__("master_serves", bool(enabled)))
+    emit(_serving_note(cluster))
+    if isinstance(cluster.get("balancer"), dict) and cluster["balancer"].get("server"):
+        sync_balancer(root, name, emit, run=run)
+    balancers.sync_cluster(root, name, emit, run=run)
+    if cluster.get("orchestrator") != "nomad" and cluster.get("deployments"):
+        emit("  Run pskit deploy again for each deployment so its web replicas follow"
+             f" ({', '.join(sorted(cluster['deployments']))}).")
+    return public(name, cluster, root)
 
 
 # ----------------------------------------------------------------------------------------------- images
@@ -623,7 +669,7 @@ def cluster_file(root: Path, settings: Dict[str, Any]) -> Dict[str, Any]:
     cluster = get_cluster(root, settings["name"])
     nodes = {s: {**n, "target": _target(root, s)} for s, n in (cluster.get("nodes") or {}).items()}
     return {**settings, "project_root": str(Path(root).resolve()), "master": cluster["master"],
-            "advertise": cluster["advertise"], "nodes": nodes}
+            "advertise": cluster["advertise"], "master_serves": master_serves(cluster), "nodes": nodes}
 
 
 def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn] = None) -> Dict[str, Any]:
@@ -655,6 +701,12 @@ def deploy(app_dir: Path, spec: Dict[str, Any], emit: Emit, run: Optional[RunFn]
     common: Dict[str, Any] = {"port": port, "replicas": replicas, "master_node": str(master["node"]),
                               "cpu": float(info["cpu"]), "memory_mb": int(info["memory"]),
                               "data_root": data_root or None}
+    # Off: web replicas skip the master, but only while another server can run them (else nothing would answer).
+    avoid_master = info.get("master_serves") is False and len(nodes) > 1
+    if orch in ("swarm", "kubernetes"):
+        common["avoid_master"] = avoid_master
+        if avoid_master:
+            emit(f"  The master {master_server} does not serve requests: web replicas run on the other server(s)")
     if orch == "swarm":
         python = "python3" if spec.get("language") == "node" else "python"
         manifest = scripts.swarm_stack(stack, image, python=python, **common)
@@ -769,7 +821,7 @@ def set_balancer(root: Path, name: str, server: str, emit: Emit, *, port: int = 
     It runs OpenResty in Docker (container ``pskit-lb``, host network). Each deployment answers on ``port`` there
     (``options.cluster.balancer_port`` gives one deployment its own) and is spread over the cluster's servers by
     ``algorithm`` (``core/onprem_lb.py``; default least connections; ``weights`` per server for the weighted
-    ones): every server for Swarm and k3s; for Nomad the web replicas, with the master's main replica as a backup.
+    ones): every server; when the master does not serve requests (Nomad's default) it is only a backup.
     Running it again changes the port, address or algorithm; naming another server moves the load balancer there."""
     cluster = get_cluster(root, name)
     if isinstance(port, bool) or not 1 <= int(port) <= 65535:
@@ -925,14 +977,16 @@ def _balancer_files(cluster: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[int, 
 
 def _backends(cluster: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     """``(primary, backup)`` servers behind the load balancer. Swarm and k3s: every server (each one's port
-    reaches every web replica). Nomad: the servers with a web replica; the master's main replica is the backup."""
+    reaches every web replica). Nomad: the servers with a web replica, plus the master's main replica.
+
+    When the master does not serve requests (:func:`master_serves`), it is only the backup, used while every
+    other server is down; a cluster of one server still sends it everything."""
     nodes = cluster.get("nodes") or {}
     master = str(cluster.get("master") or "")
     servers = sorted(s for s, n in nodes.items() if (n or {}).get("address"))
-    if cluster.get("orchestrator") == "nomad":
-        workers = [s for s in servers if s != master]
-        if workers:
-            return workers, [master] if master in servers else []
+    workers = [s for s in servers if s != master]
+    if workers and master in servers and not master_serves(cluster):
+        return workers, [master]
     return servers, []
 
 

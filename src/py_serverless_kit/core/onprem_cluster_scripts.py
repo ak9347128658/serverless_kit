@@ -320,11 +320,11 @@ def _health_cmd(python: str, port: int) -> List[str]:
 
 
 def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node: str, cpu: float, memory_mb: int,
-                python: str = "python", data_root: Optional[str] = None) -> Dict[str, Any]:
+                python: str = "python", data_root: Optional[str] = None, avoid_master: bool = False) -> Dict[str, Any]:
     """A compose file (JSON) for ``docker stack deploy``: ``main`` on the master, ``web`` behind the routing mesh.
 
     The main replica's data is the stack's ``data`` volume, or ``<data_root>/<stack>`` on the master (the master's
-    data directory)."""
+    data directory). ``avoid_master``: web replicas run only on the other servers."""
     health = {"test": _health_cmd(python, port), "interval": "10s", "timeout": "5s", "retries": 3, "start_period": "30s"}
     reserve = {"cpus": f"{cpu:g}", "memory": f"{memory_mb}M"}
     return {
@@ -357,6 +357,7 @@ def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node
                 "healthcheck": health,
                 "deploy": {
                     "replicas": replicas,
+                    **({"placement": {"constraints": [f"node.hostname != {master_node}"]}} if avoid_master else {}),
                     "update_config": {"parallelism": 1, "order": "start-first", "failure_action": "rollback"},
                     "restart_policy": {"condition": "any"},
                     "resources": {"reservations": reserve},
@@ -369,9 +370,9 @@ def swarm_stack(stack: str, image: str, *, port: int, replicas: int, master_node
 
 
 def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, master_node: str, cpu: float,
-                        memory_mb: int, data_root: Optional[str] = None) -> Dict[str, Any]:
+                        memory_mb: int, data_root: Optional[str] = None, avoid_master: bool = False) -> Dict[str, Any]:
     """Deployments ``<stack>-main`` / ``<stack>-web`` and Services (``<stack>`` is a LoadBalancer: k3s ServiceLB
-    answers on ``port`` of every node)."""
+    answers on ``port`` of every node). ``avoid_master``: web pods run only on the other nodes."""
     probe = {"httpGet": {"path": "/__pskit/health", "port": port}, "periodSeconds": 10, "timeoutSeconds": 5}
     requests = {"cpu": f"{int(round(cpu * 1000))}m", "memory": f"{memory_mb}Mi"}
 
@@ -393,6 +394,10 @@ def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, mas
             pod["volumes"] = [{"name": "data", "hostPath": {"path": f"{data_root or DATA_ROOT}/{stack}",
                                                              "type": "DirectoryOrCreate"}}]
             pod["nodeSelector"] = {"kubernetes.io/hostname": master_node}
+        elif avoid_master:
+            off_master = {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": [master_node]}
+            pod["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [{"matchExpressions": [off_master]}]}}}
         return {
             "apiVersion": "apps/v1",
             "kind": "Deployment",

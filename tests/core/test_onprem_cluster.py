@@ -1050,6 +1050,54 @@ def test_swarm_balancer_spreads_over_every_server(servers):
     assert {row["balancer"] for row in page["balance"]["servers"]} == {"primary"}
 
 
+def test_master_serves_switch(servers):
+    srv.save_server(servers, "lb1", {"host": "10.0.0.9", "user": "root", "auth": "agent"})
+    fake = FakeSSH()
+    run = _lb_run(fake)
+    lines: List[str] = []
+    item = clu.create_cluster(servers, "prod", "nomad", "edge1", lines.append, serve_on_master=True, run=run)
+    assert item["master_serves"] is True and clu.get_cluster(servers, "prod")["master_serves"] is True
+    assert any("serves requests too" in line for line in lines)
+    clu.join_server(servers, "prod", "edge2", lines.append, run=run)
+    clu.set_balancer(servers, "prod", "lb1", lines.append, run=run)
+    _deploy(servers, run, lines)
+    conf = _lb_scripts(fake)[-1]
+    assert "server 10.0.0.5:8080 max_fails=3" in conf and "server 10.0.0.6:8080 max_fails=3" in conf
+    assert "backup;" not in conf
+
+    item = clu.set_master_serves(servers, "prod", False, lines.append, run=run)
+    assert item["master_serves"] is False
+    assert "server 10.0.0.5:8080 backup;" in _lb_scripts(fake)[-1]
+    balance = clu.requests_feed(servers, "prod", control=FakeControl([]))["balance"]
+    assert {r["server"]: r["balancer"] for r in balance["servers"]} == {"edge1": "backup", "edge2": "primary"}
+
+
+def test_master_serves_defaults_and_web_placement(servers):
+    run = FakeSSH()
+    assert clu.create_cluster(servers, "n", "nomad", "edge1", lambda _l: None, run=run)["master_serves"] is False
+    assert clu.create_cluster(servers, "s", "swarm", "edge2", lambda _l: None, run=run)["master_serves"] is True
+    k = clu.create_cluster(servers, "k", "kubernetes", "edge3", lambda _l: None, serve_on_master=False, run=run)
+    assert k["master_serves"] is False
+    # Saved before the setting existed: the old behaviour (Nomad: backup only; Swarm / k3s: serves).
+    assert clu.master_serves({"orchestrator": "nomad"}) is False and clu.master_serves({"orchestrator": "swarm"})
+    one = {"orchestrator": "swarm", "master": "m", "master_serves": False, "nodes": {"m": {"address": "10.0.0.5"}}}
+    assert clu._backends(one) == (["m"], [])  # nobody else to send requests to
+    two = {**one, "nodes": {**one["nodes"], "w": {"address": "10.0.0.6"}}}
+    assert clu._backends(two) == (["w"], ["m"])
+
+    web = scripts.swarm_stack("s", "i", port=8080, replicas=2, master_node="m", cpu=0.25, memory_mb=256,
+                              avoid_master=True)["services"]["web"]
+    assert web["deploy"]["placement"] == {"constraints": ["node.hostname != m"]}
+    assert "placement" not in scripts.swarm_stack("s", "i", port=8080, replicas=2, master_node="m", cpu=0.25,
+                                                  memory_mb=256)["services"]["web"]["deploy"]
+    k8s = scripts.kubernetes_manifest("s", "i", port=8080, replicas=2, master_node="m", cpu=0.25, memory_mb=256,
+                                      avoid_master=True)
+    terms = k8s["items"][3]["spec"]["template"]["spec"]["affinity"]["nodeAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    assert terms == [{"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "NotIn", "values": ["m"]}]}]
+    assert "affinity" not in k8s["items"][1]["spec"]["template"]["spec"]
+
+
 def test_balancer_refuses_members_and_shared_ports(servers):
     srv.save_server(servers, "lb1", {"host": "10.0.0.9", "user": "root", "auth": "agent"})
     fake = FakeSSH()

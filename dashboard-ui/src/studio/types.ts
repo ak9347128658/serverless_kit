@@ -556,7 +556,7 @@ export interface SettingsImportResult extends SettingsPreview {
 export type Orchestrator = "swarm" | "kubernetes" | "nomad";
 
 /** `POST /api/onprem-clusters/<name>/<action>`: each one runs as a job. */
-export type ClusterAction = "join" | "leave" | "scale" | "remove" | "balancer-set" | "balancer-remove" | "balancer-sync";
+export type ClusterAction = "join" | "leave" | "scale" | "remove" | "balancer-set" | "balancer-remove" | "balancer-sync" | "master-serves";
 
 export interface ClusterNode {
   server: string;
@@ -618,6 +618,8 @@ export interface OnPremCluster {
   orchestrator: Orchestrator;
   orchestrator_label: string;
   master: string;
+  /** The master takes requests next to the other servers; false: it is only a backup while they are down. */
+  master_serves: boolean;
   advertise: string;
   nodes: ClusterNode[];
   capacity: { cpu: number; memory: number; disk: number };

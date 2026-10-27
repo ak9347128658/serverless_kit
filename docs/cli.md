@@ -194,8 +194,9 @@ Scale on-prem functions over a master plus joined servers (Docker Swarm, Kuberne
 
 | Command | |
 |---|---|
-| `cluster create NAME -o swarm\|kubernetes\|nomad --master SERVER [--advertise IP] [--nomad-version V]` | install the orchestrator on a saved server and save the cluster |
+| `cluster create NAME -o swarm\|kubernetes\|nomad --master SERVER [--advertise IP] [--nomad-version V] [--[no-]master-serves]` | install the orchestrator on a saved server and save the cluster |
 | `cluster join NAME SERVER [--advertise IP]` | install the agent on a saved server, join it, copy the deployed images |
+| `cluster set NAME --master-serves\|--no-master-serves` | send requests to the master too, or use it only while every other server is down |
 | `cluster leave NAME SERVER [--yes]` | drain the server (replicas move) and remove it |
 | `cluster status NAME [--json]` | CPU / memory / disk per server, replicas, pending replicas, full or not |
 | `cluster check NAME [--no-alert]` | status once; when full, the alert (cooldown applies). Exit 3 when full |
