@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-10-27
+
+### Fixed
+- Workflows failed at a step whose function was created in the studio as an HTTP function: its stub read
+  `event.http.query`, and a workflow step (or `invoke()`) has no HTTP request (`AttributeError: 'NoneType' object
+  has no attribute 'query'`). New HTTP stubs also work as a workflow step or `invoke()` (`event.data` is the input).
+- The studio's **Test** and `pskit trigger` sent the HTTP test of a function placed on another group to the
+  default group's server, which answers only its own routes (404). It now goes to the server of the function's
+  group.
+- `pskit trigger --direct` and the studio's direct invoke on premises gave the function
+  `{"__pskit": "invoke", "data": ...}` instead of the data.
+- A function that raised during `pskit trigger --direct` was reported as `HostUnavailable ... answered HTTP 500`;
+  it now says the function raised `<ErrorType>: <message>` and that the host is up.
+
 ## [2.3.2] - 2026-10-27
 
 ### Fixed

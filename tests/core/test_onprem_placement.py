@@ -280,6 +280,9 @@ def test_groups_call_each_other(make_project, render, tmp_path):
         status, body = _http(f"http://127.0.0.1:{api_port}/resize")
         assert status == 404 and f"127.0.0.1:{gpu_port}/resize" in body and "runs on group gpu" in body
         assert _http(f"http://127.0.0.1:{gpu_port}/resize") == (200, {"resize": "gpu", "data": None})
+        # pskit trigger --direct / the studio's Test: the envelope is unwrapped, and the call reaches gpu.
+        status, body = _http(f"http://127.0.0.1:{api_port}/__pskit/invoke/resize", b'{"__pskit": "invoke", "data": {"n": 1}}')
+        assert (status, body) == (200, {"result": {"resize": "gpu", "data": {"n": 1}}})
         status, body = _http(f"http://127.0.0.1:{api_port}/hello")
         assert status == 200 and body["resize"] == {"resize": "gpu", "data": {"size": 2}}
         status, body = _http(f"http://127.0.0.1:{api_port}/workflows/pipeline?wait=true", b'{"x": 1}')
@@ -365,3 +368,39 @@ def test_gateway_is_the_default_groups_and_on_with_a_load_balancer():
     assert pl.gateway(explicit, {}) is True
     with pytest.raises(pl.PlacementError, match="gateway is true or false"):
         pl.parse({"gateway": "yes", "groups": {"api": {}}}, [])
+
+
+def test_tests_of_http_functions_go_to_their_groups_host(make_project, render):
+    from py_serverless_kit.core.onprem_control import control_for_group
+
+    project = make_project(_config(9180, 9181), files=HANDLERS)
+    render(project)
+    record = {"provider": "onprem", "stage": "dev", "key": "onprem-dev"}
+    gpu = control_for_group(record, project.root, "gpu")
+    assert gpu is not None and gpu.base_url == "http://127.0.0.1:9181"
+    assert control_for_group(record, project.root, "api") is None  # the default group: control_for
+    assert control_for_group(record, project.root, "") is None
+
+
+def test_a_function_error_is_not_reported_as_an_unreachable_host(monkeypatch):
+    from py_serverless_kit.core.onprem_control import FunctionFailed, HostControl
+
+    control = HostControl("http://127.0.0.1:9")
+    body = b'{"errorType": "AttributeError", "cause": "\'NoneType\' object has no attribute \'query\'"}'
+    monkeypatch.setattr(control, "fetch", lambda *a, **k: (500, {}, body))
+    with pytest.raises(FunctionFailed) as info:
+        control.request("POST", "/__pskit/invoke/step01", {"x": 1})
+    assert info.value.error_type == "AttributeError" and "raised AttributeError" in str(info.value)
+
+
+def test_the_studios_http_handler_stub_also_runs_as_a_workflow_step(tmp_path):
+    from py_serverless_kit.runtime.context import Context
+    from py_serverless_kit.runtime.event import Event, EventType
+    from py_serverless_kit.studio.project import ensure_handler
+
+    (tmp_path / "pskit.yml").write_text("service: s\nprovider: {name: onprem}\nfunctions: {}\n", "utf-8")
+    ensure_handler(tmp_path, "functions.step01.handler.main", ["http"], subproject=True)
+    scope: dict = {}
+    exec((tmp_path / "functions" / "step01" / "handler.py").read_text("utf-8"), scope)  # noqa: S102 - our stub
+    out = scope["main"](Event(type=EventType.INVOKE, data={"hello": "world"}), Context(function="step01"))
+    assert out == {"message": "Hello, world!", "input": {"hello": "world"}}

@@ -2202,8 +2202,12 @@ class Host:
                     data = json.loads(raw.decode("utf-8")) if raw else None
                 except ValueError:
                     data = raw.decode("utf-8", "replace")
+                kind = EventType.INVOKE
+                if isinstance(data, dict) and data.get("__pskit") in (EventType.INVOKE, EventType.SCHEDULE):
+                    # pskit trigger / the studio's Test send {"__pskit": kind, "data": ...}: the function gets data.
+                    kind, data = data["__pskit"], data.get("data")
                 try:
-                    result = host.invoke(function, Event(type=EventType.INVOKE, data=data, source="onprem.invoke"))
+                    result = host.invoke(function, Event(type=kind, data=data, source="onprem.invoke"))
                 except KeyError as exc:
                     return self._json(404, {"error": str(exc)})
                 except Exception as exc:  # noqa: BLE001

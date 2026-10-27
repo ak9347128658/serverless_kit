@@ -618,14 +618,19 @@ def send(
         body = (payload if isinstance(payload, str) else _dumps(payload)).encode() if has_body else None
         headers = {"content-type": "application/json"} if body else {}
         if provider == "onprem":
-            from .onprem_control import control_for
+            from .onprem_control import control_for, control_for_group
 
             # The host of the last deploy (or --server), not the URL in the record: package / plan may have
-            # re-rendered it for another machine, and a closed port is reached over SSH.
-            control = control_for(record or {}, project.root)
+            # re-rendered it for another machine, and a closed port is reached over SSH. With placement, the
+            # host of the function's group: a server answers only the routes of its own functions.
+            group_control = control_for_group(record or {}, project.root, str(fn_rec.get("group") or ""))
+            control = group_control or control_for(record or {}, project.root)
             if control is not None:
                 endpoint = str((record or {}).get("endpoint") or "").rstrip("/")
-                route = url[len(endpoint):] if endpoint and url.startswith(endpoint) else (path or trig["path"])
+                if group_control is not None:
+                    route = path or trig["path"]
+                else:
+                    route = url[len(endpoint):] if endpoint and url.startswith(endpoint) else (path or trig["path"])
                 route = route if route.startswith("/") else "/" + route
                 return {"kind": "http", "url": control.base_url + route,
                         **_host_http(control, trig["method"], route, body, headers)}
@@ -646,6 +651,11 @@ def send(
     except TriggerError:
         raise
     except Exception as exc:  # noqa: BLE001 - credentials, permissions, missing resources: report them
+        from .onprem_control import FunctionFailed
+
+        if isinstance(exc, FunctionFailed):
+            raise TriggerError(f"{function} raised {exc.error_type}: {exc.cause} (the host is up; the error is in the"
+                               f" function's code, see pskit logs -f {function})") from None
         raise TriggerError(f"{type(exc).__name__}: {exc}") from None
     return {"kind": trig["type"], "summary": trig["summary"], **out}
 

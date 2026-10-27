@@ -22,7 +22,7 @@ from .onprem_servers import DEPLOYED_FILE, LOCAL, deployed_server
 from .project import WORK_DIR
 
 __all__ = [
-    "DEPLOYED_FILE", "LOCAL", "HostControl", "HostUnavailable", "control_for", "control_url", "deployed_host",
+    "DEPLOYED_FILE", "LOCAL", "FunctionFailed", "HostControl", "HostUnavailable", "control_for", "control_url", "deployed_host",
     "deployed_on", "deployed_server", "host_spec", "record_key", "remember_deploy", "rendered_spec",
 ]
 _ROUTE_TTL = 120.0  # seconds a direct / SSH route decision is reused
@@ -48,6 +48,16 @@ _SSH_FETCH = (
 
 class HostUnavailable(OSError):
     """The host did not answer (not running, wrong address, firewall...)."""
+
+
+class FunctionFailed(HostUnavailable):
+    """The host answered, but the function raised: ``error_type`` and ``cause`` are its exception's. (A
+    HostUnavailable so callers that report host errors report this too.)"""
+
+    def __init__(self, error_type: str, cause: str) -> None:
+        self.error_type = error_type
+        self.cause = cause
+        super().__init__(f"the function raised {error_type}: {cause}")
 
 
 class HostControl:
@@ -207,6 +217,9 @@ class HostControl:
                 raise ValueError(message)
             if status == 401:
                 raise PermissionError(f"{message} (check provider.options.admin_token)")
+            failed = _function_error(raw)
+            if failed is not None:
+                raise failed
             raise HostUnavailable(f"{self.base_url} answered HTTP {status}: {message}")
         if not raw:
             return None
@@ -271,6 +284,17 @@ class HostControl:
 
     def cancel(self, execution_id: str) -> Dict[str, Any]:
         return dict(self.request("POST", "/__pskit/executions/" + quote(execution_id, safe="") + "/cancel") or {})
+
+
+def _function_error(raw: bytes) -> Optional[FunctionFailed]:
+    """The host's answer when the function itself raised: ``{"errorType": ..., "cause": ...}``."""
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(payload, dict) and payload.get("errorType"):
+        return FunctionFailed(str(payload["errorType"]), str(payload.get("cause") or ""))
+    return None
 
 
 def _error_body(raw: bytes, status: int) -> str:
@@ -370,6 +394,29 @@ def _spec_ssh(spec: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
     if str(deploy.get("method") or "local") == "local" or not ssh.get("host") or not ssh.get("user"):
         return None, ""
     return dict(ssh), str(ssh.get("path") or "")
+
+
+def control_for_group(record: Dict[str, Any], root: Path, group: str) -> Optional[HostControl]:
+    """A client for the host of placement group ``group`` (``provider.options.placement``): each server answers
+    only the routes of its own functions. None when the group is the default one (use ``control_for``) or its
+    spec is not here."""
+    from .onprem_placement import app_dir
+
+    main = host_spec(record, root) or {}
+    default = str(main.get("default_group") or "")
+    if not group or not default or group == default:
+        return None
+    try:
+        spec = json.loads((Path(root) / WORK_DIR / record_key(record) / app_dir(group, default) / "pskit_host.json")
+                          .read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(spec, dict) or not spec.get("endpoint"):
+        return None
+    ssh, remote_path = _spec_ssh(spec)
+    port = int(spec.get("port") or 8080)
+    return HostControl(str(spec["endpoint"]), token=str(spec.get("admin_token") or ""), ssh=ssh, remote_port=port,
+                       remote_path=remote_path)
 
 
 def control_for(record: Dict[str, Any], root: Path, server: Optional[str] = None) -> Optional[HostControl]:
