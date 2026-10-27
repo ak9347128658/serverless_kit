@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { parseWhere } from "./util";
 
-export type View = "overview" | "setup" | "functions" | "workflows" | "resources" | "cluster" | "code" | "test" | "deploy" | "logs" | "yaml";
-export const VIEWS: View[] = ["overview", "setup", "functions", "workflows", "resources", "cluster", "code", "test", "deploy", "logs", "yaml"];
+export type View = "overview" | "setup" | "functions" | "workflows" | "resources" | "cluster" | "balancers" | "code" | "test" | "deploy" | "logs" | "yaml";
+export const VIEWS: View[] = ["overview", "setup", "functions", "workflows", "resources", "cluster", "balancers", "code", "test", "deploy", "logs", "yaml"];
 
 export interface Route {
   view: View;

@@ -31,6 +31,7 @@ from ..providers.base import Artifact
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..core.project import Project
+from .subprojects import function_dirs, function_requirements, merge_requirements
 
 DEFAULT_EXCLUDES = (
     ".git/**",
@@ -214,7 +215,7 @@ def build_artifact(project: Project, *, skip_deps: bool = False, log=print) -> A
     build_dir.mkdir(parents=True)
     if cfg.language == "node":
         _build_node(project, build_dir, skip_deps, log)
-        return _finish(work, build_dir, log)
+        return _finish(work, build_dir, log, skip_deps)
 
     source = (project.root / cfg.package.source).resolve()
     files = collect_sources(source, cfg.package.include, cfg.package.exclude)
@@ -235,6 +236,12 @@ def build_artifact(project: Project, *, skip_deps: bool = False, log=print) -> A
 
     req_path = (project.root / cfg.package.requirements) if cfg.package.requirements else None
     user_reqs = read_requirements(req_path)
+    if provider.bundle_function_requirements(cfg):
+        # functions/<name>/requirements.txt: each function's own dependencies (packaging/subprojects.py)
+        own = function_requirements(source, cfg.functions)
+        if own:
+            log(f"  {len(own)} requirement(s) from function sub-projects")
+        user_reqs = merge_requirements(user_reqs, own)
     vendor = provider.vendor_dependencies if cfg.package.vendor is None else cfg.package.vendor
     final_reqs = provider.bundle_requirements(user_reqs)
     if vendor:
@@ -247,16 +254,17 @@ def build_artifact(project: Project, *, skip_deps: bool = False, log=print) -> A
     else:
         (build_dir / "requirements.txt").write_text("\n".join(final_reqs) + ("\n" if final_reqs else ""), "utf-8")
 
-    return _finish(work, build_dir, log)
+    return _finish(work, build_dir, log, skip_deps)
 
 
-def _finish(work: Path, build_dir: Path, log) -> Artifact:  # noqa: ANN001
+def _finish(work: Path, build_dir: Path, log, skip_deps: bool = False) -> Artifact:  # noqa: ANN001
     zip_path = work / "artifact.zip"
     count = _write_zip(build_dir, zip_path)
     sha_hex, sha_b64 = digest(zip_path)
     size = zip_path.stat().st_size
     log(f"  artifact {zip_path.name}: {count} files, {size / 1024:.1f} KiB, sha256 {sha_hex[:12]}")
-    return Artifact(path=zip_path, sha256=sha_hex, sha256_b64=sha_b64, size=size, file_count=count, build_dir=build_dir)
+    return Artifact(path=zip_path, sha256=sha_hex, sha256_b64=sha_b64, size=size, file_count=count, build_dir=build_dir,
+                    skip_deps=skip_deps)
 
 
 # --------------------------------------------------------------------- Node.js / TypeScript
@@ -313,6 +321,8 @@ def _build_node(project: Project, build_dir: Path, skip_deps: bool, log) -> None
             if deps and not skip_deps:
                 node.npm_install(build_dir, list(cfg.package.node.npm_args), log)
             node.copy_runtime(build_dir / "node_modules" / "pskit")
+            if not skip_deps:
+                _install_node_subprojects(project, build_dir, log)
         else:
             deps["pskit"] = "file:./" + node.RUNTIME_DIR
             package["dependencies"] = deps
@@ -331,6 +341,30 @@ def _build_node(project: Project, build_dir: Path, skip_deps: bool, log) -> None
                 node.esbuild_bundle(project.root, build_dir, entry, out, options, log)
     except node.NodeBuildError as exc:
         raise BuildError(str(exc)) from None
+
+
+def _install_node_subprojects(project: Project, build_dir: Path, log) -> None:  # noqa: ANN001
+    """``functions/<name>/package.json``: that function's own ``node_modules`` next to it in the bundle, so Node.js
+    resolves its versions first (``packaging/subprojects.py``)."""
+    from . import node
+
+    cfg = project.config
+    source = (project.root / cfg.package.source).resolve()
+    for name, folder in sorted(function_dirs(source, cfg.functions, "node").items()):
+        rel = folder.relative_to(source)
+        target = build_dir / rel  # the bundle keeps the source layout (compiled TypeScript too)
+        target.mkdir(parents=True, exist_ok=True)
+        package = json.loads((folder / "package.json").read_text("utf-8"))
+        deps = dict(package.get("dependencies") or {})
+        deps.pop("pskit", None)
+        if not deps:
+            continue
+        package["dependencies"] = deps
+        node.write_json(target / "package.json", package)
+        if (folder / "package-lock.json").is_file():
+            shutil.copy2(folder / "package-lock.json", target / "package-lock.json")
+        log(f"  {name}: its own dependencies ({rel.as_posix()}/package.json)")
+        node.npm_install(target, list(cfg.package.node.npm_args), log)
 
 
 def _merge_json(base: dict, overlay: dict) -> dict:

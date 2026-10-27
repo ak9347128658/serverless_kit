@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Drawer } from "../../components/Drawer";
 import { api, errorMessage } from "../api";
+import { AlgorithmPicker, KindBadge, WeightsEditor, algorithmLabel, weightsFor, weightsValid } from "../components/AlgorithmPicker";
 import { JobConsole } from "../components/Console";
 import { useConfirm, useToast } from "../components/Feedback";
 import { FormRow, NumberInput, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { ServerForm } from "../components/OnPremMachines";
+import { FirewallPanel } from "../components/FirewallPanel";
 import { useJob } from "../jobs";
 import { href, navigate } from "../route";
 import { useStudio } from "../store";
 import type {
+  BalancerAction,
   ClusterAction,
   ClusterBalance,
   ClusterBalancerStatus,
@@ -17,8 +20,10 @@ import type {
   ClusterRequest,
   ClusterStatus,
   JsonObject,
+  OnPremBalancersState,
   OnPremCluster,
   OnPremClustersState,
+  OnPremServer,
   Orchestrator,
 } from "../types";
 import { asObject } from "../util";
@@ -125,9 +130,21 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
   const [jobId, setJobId] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
   const [balancing, setBalancing] = useState(false);
+  const [lbState, setLbState] = useState<OnPremBalancersState | null>(null);
   const job = useJob(jobId);
   const confirm = useConfirm();
   const toast = useToast();
+  // The firewall card: the cluster's nodes plus the server(s) of its load balancers.
+  const firewallServers = useMemo(() => {
+    const out = new Set<string>();
+    for (const n of cluster.nodes) {
+      out.add(n.server);
+      if (n.address) out.add(n.address);
+    }
+    if (cluster.balancer?.server) out.add(cluster.balancer.server);
+    for (const b of cluster.balancers || []) if (b.server) out.add(b.server);
+    return [...out];
+  }, [cluster]);
 
   const refresh = useCallback(
     (check = false) => {
@@ -158,12 +175,22 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  // Named load balancers and the algorithm catalog (labels, pros and cons for the load balancer form).
+  const loadBalancers = useCallback(() => {
+    api
+      .balancers()
+      .then(setLbState)
+      .catch(() => setLbState(null));
+  }, []);
+  useEffect(loadBalancers, [loadBalancers]);
+
   useEffect(() => {
     if (job.status === "succeeded" || job.status === "failed") {
       reload();
       refresh();
+      loadBalancers();
     }
-  }, [job.status, reload, refresh]);
+  }, [job.status, reload, refresh, loadBalancers]);
 
   const startJob = async (action: ClusterAction, body: JsonObject = {}) => {
     try {
@@ -172,6 +199,25 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
     } catch (exc) {
       toast(errorMessage(exc), "err");
     }
+  };
+
+  const startBalancerJob = async (name: string, action: BalancerAction, body: JsonObject) => {
+    try {
+      const { job_id } = await api.balancerAction(name, action, body);
+      setJobId(job_id);
+    } catch (exc) {
+      toast(errorMessage(exc), "err");
+    }
+  };
+
+  const detachNamed = async (name: string) => {
+    const ok = await confirm({
+      title: `Detach ${cluster.name} from load balancer ${name}?`,
+      body: `The routes of ${cluster.name}'s deployments are removed from ${name}. The deployments keep running on the cluster.`,
+      confirmLabel: "Detach",
+      danger: true,
+    });
+    if (ok === "confirm") void startBalancerJob(name, "detach", { cluster: cluster.name });
   };
 
   const leave = async (server: string) => {
@@ -314,10 +360,18 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
       <LoadBalancer
         cluster={cluster}
         status={status?.balancer ?? null}
+        lbState={lbState}
         busy={job.status === "running"}
         onSetUp={() => setBalancing(true)}
         onSync={() => void startJob("balancer-sync")}
         onRemove={() => void removeBalancer()}
+      />
+      <NamedBalancers
+        cluster={cluster}
+        lbState={lbState}
+        busy={job.status === "running"}
+        onAttach={(name) => void startBalancerJob(name, "attach", { cluster: cluster.name })}
+        onDetach={(name) => void detachNamed(name)}
       />
 
       <Workloads cluster={cluster} status={status} onScale={(stack, replicas) => void startJob("scale", { stack, replicas })} />
@@ -326,6 +380,11 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
       <ClusterResources status={status} />
       {jobId && <JobConsole job={job} />}
       <AlertSettings cluster={cluster} onSaved={reload} />
+      <FirewallPanel
+        title={`Firewall: ${cluster.name}`}
+        servers={firewallServers}
+        refreshKey={job.status !== "running" && job.status !== "idle" ? jobId : null}
+      />
       {joining && (
         <JoinDrawer
           cluster={cluster}
@@ -342,6 +401,7 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
         <BalancerDrawer
           cluster={cluster}
           state={state}
+          lbState={lbState}
           onClose={() => setBalancing(false)}
           onSet={(body) => {
             setBalancing(false);
@@ -358,6 +418,7 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
 function LoadBalancer({
   cluster,
   status,
+  lbState,
   busy,
   onSetUp,
   onSync,
@@ -365,6 +426,7 @@ function LoadBalancer({
 }: {
   cluster: OnPremCluster;
   status: ClusterBalancerStatus | null;
+  lbState: OnPremBalancersState | null;
   busy: boolean;
   onSetUp: () => void;
   onSync: () => void;
@@ -409,6 +471,8 @@ function LoadBalancer({
     );
 
   const urls = Object.entries(status?.urls || balancer.urls || {});
+  const algorithm = balancer.algorithm || lbState?.default_algorithm || "";
+  const info = lbState?.algorithms.find((a) => a.name === algorithm);
   return (
     <div className="card card-pad">
       <div className="row-between wrap">
@@ -416,6 +480,11 @@ function LoadBalancer({
           <h3>Load balancer</h3>
           <div className="muted small">
             <b className="mono">{balancer.server}</b> ({balancer.address}) · nginx on port {balancer.port} ·{" "}
+            {algorithm && (
+              <>
+                {algorithmLabel(lbState?.algorithms, algorithm)} {info && <KindBadge kind={info.kind} />} ·{" "}
+              </>
+            )}
             {!status ? (
               "…"
             ) : !status.reachable ? (
@@ -500,15 +569,149 @@ function LoadBalancer({
   );
 }
 
+/** Named load balancers (Load balancers page) attached to this cluster: every deployment gets /<service>/ there. */
+function NamedBalancers({
+  cluster,
+  lbState,
+  busy,
+  onAttach,
+  onDetach,
+}: {
+  cluster: OnPremCluster;
+  lbState: OnPremBalancersState | null;
+  busy: boolean;
+  onAttach: (name: string) => void;
+  onDetach: (name: string) => void;
+}) {
+  const [attaching, setAttaching] = useState(false);
+  const [pick, setPick] = useState("");
+  const attached = cluster.balancers || [];
+  const members = new Set(cluster.nodes.map((n) => n.server));
+  const free = (lbState?.balancers || []).filter((b) => !b.clusters.includes(cluster.name) && !members.has(b.server));
+  const chosen = free.some((b) => b.name === pick) ? pick : free[0]?.name || "";
+  return (
+    <div className="card card-pad">
+      <div className="row-between wrap">
+        <div>
+          <h3>Shared load balancers</h3>
+          <p className="muted small">
+            Named load balancers that also serve other projects and clusters, each by path. Attached here, every deployment on {cluster.name} gets{" "}
+            <code className="mono">http://LB/&lt;service&gt;/</code>. Manage them under <a href={href("balancers")}>Load balancers</a>.
+          </p>
+        </div>
+        <button type="button" className="btn btn-primary" disabled={busy || !lbState} onClick={() => setAttaching(true)}>
+          + Attach a load balancer
+        </button>
+      </div>
+      {!attached.length ? (
+        <p className="muted small">None attached.</p>
+      ) : (
+        attached.map((b) => {
+          const urls = Object.entries(b.urls || {});
+          return (
+            <div key={b.name} className="cluster-binding">
+              <div className="row-between wrap">
+                <span className="lb-chips">
+                  <a href={href("balancers", b.name)}>
+                    <b className="mono">{b.name}</b>
+                  </a>
+                  <a className="mono small" href={b.url} target="_blank" rel="noreferrer">
+                    {b.url}
+                  </a>
+                  <span className="muted small">on {b.server} ·</span>
+                  <span className="small">{b.algorithm_label}</span>
+                  <KindBadge kind={b.kind} />
+                </span>
+                <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={() => onDetach(b.name)}>
+                  Detach
+                </button>
+              </div>
+              {!urls.length ? (
+                <p className="muted small">Nothing deployed on {cluster.name} yet: each deployment gets its URL here when you deploy.</p>
+              ) : (
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Deployment</th>
+                      <th>URL on {b.name}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {urls.map(([stack, url]) => (
+                      <tr key={stack}>
+                        <td className="mono">{stack}</td>
+                        <td className="mono small">
+                          <a href={url} target="_blank" rel="noreferrer">
+                            {url}
+                          </a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
+        })
+      )}
+      {attaching && lbState && (
+        <Drawer
+          open
+          title={`Attach a load balancer to ${cluster.name}`}
+          onClose={() => setAttaching(false)}
+          actions={
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!chosen}
+              onClick={() => {
+                setAttaching(false);
+                onAttach(chosen);
+              }}
+            >
+              Attach
+            </button>
+          }
+        >
+          {!free.length ? (
+            <p className="muted small">
+              {lbState.balancers.length ? "Every load balancer is attached already, or runs on a server of this cluster." : "No load balancer yet."} Create one
+              under <a href={href("balancers")}>Load balancers</a>.
+            </p>
+          ) : (
+            <>
+              <p className="muted small">
+                Each deployment on {cluster.name} gets <code className="mono">http://LB/&lt;service&gt;/</code>, spread over the cluster&apos;s servers with the
+                load balancer&apos;s algorithm. Same as <code className="mono">pskit lb attach NAME --cluster {cluster.name}</code>.
+              </p>
+              <FormRow label="Load balancer" required>
+                <select className="input" value={chosen} onChange={(e) => setPick(e.target.value)}>
+                  {free.map((b) => (
+                    <option key={b.name} value={b.name}>
+                      {b.name} · {b.url} · {b.algorithm_label} ({b.kind})
+                    </option>
+                  ))}
+                </select>
+              </FormRow>
+            </>
+          )}
+        </Drawer>
+      )}
+    </div>
+  );
+}
+
 function BalancerDrawer({
   cluster,
   state,
+  lbState,
   onClose,
   onSet,
   onServersChanged,
 }: {
   cluster: OnPremCluster;
   state: OnPremClustersState;
+  lbState: OnPremBalancersState | null;
   onClose: () => void;
   onSet: (body: JsonObject) => void;
   onServersChanged: () => void;
@@ -517,7 +720,13 @@ function BalancerDrawer({
   const [server, setServer] = useState(current?.server || "");
   const [port, setPort] = useState<number | undefined>(current?.port ?? 80);
   const [address, setAddress] = useState(current?.address || "");
+  const [algorithm, setAlgorithm] = useState(current?.algorithm || "");
+  const [weights, setWeights] = useState<Record<string, number>>(current?.weights || {});
+  const chosen = algorithm || lbState?.default_algorithm || "";
+  const nodes = cluster.nodes.map((n) => n.server);
+  const w = chosen ? weightsFor(chosen, weights, nodes) : undefined;
   const exclude = inCluster(state);
+  for (const b of lbState?.balancers || []) exclude.add(b.server);
   if (current) exclude.delete(current.server);
   const moving = !!current && !!server && server !== current.server;
   return (
@@ -529,8 +738,10 @@ function BalancerDrawer({
         <button
           type="button"
           className="btn btn-primary"
-          disabled={!server || !port}
-          onClick={() => onSet({ server, port: port ?? 80, ...(address ? { address } : {}) })}
+          disabled={!server || !port || !weightsValid(weights)}
+          onClick={() =>
+            onSet({ server, port: port ?? 80, ...(address ? { address } : {}), ...(chosen ? { algorithm: chosen } : {}), ...(w ? { weights: w } : {}) })
+          }
         >
           {current ? "Apply" : "Set up"}
         </button>
@@ -558,12 +769,22 @@ function BalancerDrawer({
       <FormRow label="Address in the URL (optional)" help="The IP or name users reach it at. Default: its SSH host.">
         <TextInput value={address} onChange={setAddress} placeholder="10.0.0.9" mono />
       </FormRow>
+      {lbState?.algorithms.length ? (
+        <>
+          <FormRow label="How it spreads requests" help={`Over the servers of ${cluster.name}. Change it any time here.`}>
+            <AlgorithmPicker algorithms={lbState.algorithms} value={chosen} onChange={setAlgorithm} defaultAlgorithm={lbState.default_algorithm} />
+          </FormRow>
+          {chosen && <WeightsEditor algorithm={chosen} servers={nodes} value={weights} onChange={setWeights} />}
+        </>
+      ) : (
+        <p className="muted small">The load balancing algorithms did not load: the current one (or the default) is kept.</p>
+      )}
       {moving && <div className="hint-box">The load balancer moves to {server}; nginx on {current?.server} is removed once the new one runs.</div>}
     </Drawer>
   );
 }
 
-function Meter({ value, limit, suffix = "" }: { value?: number | null; limit: number; suffix?: string }) {
+export function Meter({ value, limit, suffix = "" }: { value?: number | null; limit: number; suffix?: string }) {
   if (value === undefined || value === null) return <span className="muted">–</span>;
   const tone = value >= limit ? "meter-err" : value >= limit * 0.8 ? "meter-warn" : "meter-ok";
   return (
@@ -1139,14 +1360,15 @@ function AlertSettings({ cluster, onSaved }: { cluster: OnPremCluster; onSaved: 
   );
 }
 
-function ServerChoice({
+/** A saved server (minus `exclude`), with "+ Add a server" to save one on the spot. */
+export function ServerChoice({
   state,
   value,
   onChange,
   exclude,
   onServersChanged,
 }: {
-  state: OnPremClustersState;
+  state: { servers: OnPremServer[] };
   value: string;
   onChange: (v: string) => void;
   exclude: Set<string>;

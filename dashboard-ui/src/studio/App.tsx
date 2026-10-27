@@ -12,6 +12,7 @@ import { asObject, str } from "./util";
 import { ClusterView } from "./views/Cluster";
 import { CodeView } from "./views/Code";
 import { DeployView } from "./views/Deploy";
+import { LoadBalancersView } from "./views/LoadBalancers";
 import { LogsView } from "./views/Logs";
 import { FunctionsView } from "./views/Functions";
 import { NewProject } from "./views/NewProject";
@@ -135,6 +136,7 @@ const NAV: { view: View; label: string; icon: string }[] = [
   { view: "workflows", label: "Workflows", icon: "⇉" },
   { view: "resources", label: "Resources", icon: "▤" },
   { view: "cluster", label: "Scaling cluster", icon: "⧉" },
+  { view: "balancers", label: "Load balancers", icon: "⇆" },
   { view: "code", label: "Code", icon: "{}" },
   { view: "test", label: "Test", icon: "▶" },
   { view: "deploy", label: "Deploy", icon: "▲" },
@@ -218,6 +220,9 @@ function Shell() {
       break;
     case "cluster":
       page = <ClusterView rest={route.rest} />;
+      break;
+    case "balancers":
+      page = <LoadBalancersView rest={route.rest} />;
       break;
     case "code":
       page = <CodeView rest={route.rest} />;

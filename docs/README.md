@@ -8,6 +8,9 @@ Write a Python function once, describe its triggers in `pskit.yml`, and deploy i
 | [Getting started](getting-started.md) | Install, scaffold a project, run it locally, set up cloud credentials, deploy, inspect, remove |
 | [Configuration reference](configuration.md) | Every `pskit.yml` key, `extends:`, `providers:`/`stages:` overrides, variables, escape hatches |
 | [Events (triggers)](events.md) | `http`, `schedule`, `queue`, `storage`, `topic`, `smtp`, with shorthand forms and per-provider support |
+| [Functions on several servers (on premises)](placement.md) | Each function in its own folder with its own requirements; groups of functions on different servers (or clusters) that call each other, share queues and run workflows across machines |
+| [Network and firewall rules (on premises)](onprem-network.md) | Which server must allow which inbound / outbound port for one server, function groups, clusters (Swarm, k3s, Nomad), joining servers, load balancers, resources and SMTP |
+| [Load balancers (on premises)](load-balancers.md) | Six algorithms (round robin, sticky, weighted, IP hash, least connections, least time); one load balancer shared by projects and clusters by path |
 | [Scaling cluster (on premises)](cluster.md) | Run on-prem functions on a master plus joined servers with Docker Swarm, Kubernetes (k3s) or Nomad: join servers on the go, monitor CPU / memory / disk, scale replicas, alert DevOps (a function or webhook) when every server is full |
 | [E-mail triggers (SMTP)](smtp/README.md) | On premises: an SMTP server (Node.js) that receives mail for your domain and runs functions with from, to, subject, body and attachments (also in the Amazon SES event shape); DNS (A / MX) records, port 25, testing |
 | [Node.js and TypeScript](nodejs.md) | Handlers in JavaScript or TypeScript: runtimes per provider, `tsc`, npm dependencies, local runs |

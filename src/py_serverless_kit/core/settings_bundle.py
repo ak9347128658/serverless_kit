@@ -3,7 +3,7 @@
 ``.pskit`` stays out of git, so a fresh clone has no saved servers, clusters, on-prem services or SSH logins. An
 export packs them into one ``.pskit-settings`` file; an import on the other machine writes them back:
 
-* ``.pskit/onprem-servers.json``, ``onprem-clusters.json`` (with load balancers), ``onprem-services.json``
+* ``.pskit/onprem-servers.json``, ``onprem-clusters.json``, ``onprem-balancers.json``, ``onprem-services.json``
   (including service passwords and tokens);
 * ``.pskit/ssh/`` (SSH passwords typed in the studio);
 * SSH private keys the saved servers and services point to, also outside the project (``~/.ssh/edge.pem``):
@@ -43,7 +43,7 @@ KEYS_DIR = Path(".pskit") / "ssh" / "keys"
 BACKUP_DIR = Path(".pskit") / "backups"
 MIN_PASSPHRASE = 8
 # Stores merged entry by entry on import (top-level maps of name -> entry); other files are replaced whole.
-STORES = ("onprem-servers.json", "onprem-clusters.json", "onprem-services.json")
+STORES = ("onprem-servers.json", "onprem-clusters.json", "onprem-balancers.json", "onprem-services.json")
 # Keys whose value is an SSH key / known_hosts file: its content travels in the export.
 _KEY_FIELDS = re.compile(r"^(identity_file|identity|pem|key_file|private_key|known_hosts|password_file)$")
 _SCRYPT = {"n": 2**15, "r": 8, "p": 1}

@@ -1,13 +1,15 @@
 import { api } from "./api";
 
 /** Handler stubs queued by "create on save"; written after pskit.yml is saved. */
-const pending = new Map<string, Set<string>>();
+const pending = new Map<string, { events: Set<string>; subproject: boolean }>();
 
-export function queueHandlerStub(handler: string, events: string[]): void {
-  const set = pending.get(handler) || new Set<string>();
-  events.forEach((e) => set.add(e));
-  if (!events.length) set.add("invoke");
-  pending.set(handler, set);
+/** `subproject`: also give the handler's folder its own requirements.txt / package.json. */
+export function queueHandlerStub(handler: string, events: string[], subproject = false): void {
+  const entry = pending.get(handler) || { events: new Set<string>(), subproject: false };
+  events.forEach((e) => entry.events.add(e));
+  if (!events.length) entry.events.add("invoke");
+  entry.subproject = entry.subproject || subproject;
+  pending.set(handler, entry);
 }
 
 export function forgetHandlerStub(handler: string): void {
@@ -17,9 +19,9 @@ export function forgetHandlerStub(handler: string): void {
 /** Write every queued stub. Returns how many files were changed. Never throws. */
 export async function flushHandlerStubs(): Promise<number> {
   let created = 0;
-  for (const [handler, events] of Array.from(pending.entries())) {
+  for (const [handler, entry] of Array.from(pending.entries())) {
     try {
-      const res = await api.ensureHandler(handler, Array.from(events));
+      const res = await api.ensureHandler(handler, Array.from(entry.events), entry.subproject);
       if (res.created) created++;
       pending.delete(handler);
     } catch {

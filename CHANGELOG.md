@@ -6,6 +6,42 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-27
+
+### Added
+- **Six load balancing algorithms** on premises: round robin, sticky round robin (cookie), weighted round robin,
+  IP hash (static) and least connections, least time (dynamic). Load balancers now run OpenResty, which provides
+  sticky sessions (a hashed first-request cookie) and least time (`balancer_by_lua` with a moving average of each
+  server's response time) that open-source nginx lacks. `pskit lb algorithms` and the studio explain each one, with
+  pros, cons and an animation. Upstreams share state across worker processes (`zone`), so round robin and least
+  connections are exact.
+- **Named load balancers shared by projects and clusters**: `pskit lb create edge --server lb1`, then
+  `provider.options.balancer: edge` in any project (`http://lb1/<service>/`, or `{name, path, algorithm, weights}`)
+  or `pskit lb attach edge --cluster prod`. Routes are kept on the load balancer server, so projects in other
+  folders or on other machines share it without overwriting each other (`flock`, `nginx -t` before every reload).
+  New studio page **Load balancers**. See `docs/load-balancers.md`.
+- **Placement**: `provider.options.placement` runs groups of functions on different servers, clusters or this
+  machine. Each group is its own host with only its functions; `invoke()`, HTTP routes, workflow steps, built-in
+  queues, buckets, topics and SMTP triggers reach the group that owns them, workflows run on the default group and
+  every group's logs reach it. See `docs/placement.md`.
+- **Function sub-projects**: a function in its own folder with its own `requirements.txt` / `package.json`
+  (`functions/<name>/`). Its requirements go into the bundle on every cloud; with placement each server installs
+  only those of its functions. Node.js sub-projects get their own `node_modules`. The studio creates new functions
+  this way.
+- `pskit cluster balancer set` takes `--algorithm` and `--weight SERVER=N`.
+- **Firewall rules, live**: every on-prem step (cluster create / join, deploy, `pskit lb create` / `attach`, a
+  project's load balancer route, `pskit resources onprem create`) prints the inbound / outbound ports it needs on
+  each server, by name and address, with `ufw` commands. `pskit firewall` (and the studio's Firewall panel) lists
+  them for the whole project. Every role and port: `docs/onprem-network.md`.
+
+### Changed
+- A cluster's own load balancer runs `openresty/openresty:1.27.1.2-alpine` instead of `nginx:1.27-alpine`; it is
+  replaced on its next update (deploy, join, leave or `pskit cluster balancer sync`).
+
+### Fixed
+- The generated `onprem_ctl.py` swaps `staging` into `app` with extended paths on Windows, so a redeploy no longer
+  fails on deep vendored paths (260-character limit).
+
 ## [2.2.1] - 2026-10-26
 
 ### Fixed

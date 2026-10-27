@@ -8,6 +8,7 @@ import { ComboInput, EnumSelect, FieldForm, FormRow, KeyValueEditor, NumberInput
 import { DiffView, InlineIssues, PageHeader } from "../components/Misc";
 import { isEnabled } from "../compat";
 import { EnableControl } from "../components/EnableControl";
+import { GroupBadge, groupOf, moveFunction, readPlacement, renameInPlacement, RunsOnSelect } from "../components/Placement";
 import { DeployedLogs } from "./Logs";
 import { href, navigate } from "../route";
 import { providersSupporting, useStudio } from "../store";
@@ -68,6 +69,7 @@ function FunctionList() {
   const toast = useToast();
   const [q, setQ] = useState("");
   const generated = new Set((state.validation?.functions || []).filter((f) => f.generated).map((f) => f.name));
+  const placement = providerName === "onprem" ? readPlacement(draft) : null;
   const rows: Row[] = Object.entries(asObject(draft.functions)).map(([name, fn]) => ({ name, fn: asObject(fn) }));
   const needle = q.trim().toLowerCase();
   const visible = rows.filter(
@@ -92,7 +94,7 @@ function FunctionList() {
       danger: true,
     });
     if (answer !== "confirm") return;
-    let raw: Json = setIn(draft, ["functions", name], undefined);
+    let raw: Json = renameInPlacement(setIn(draft, ["functions", name], undefined) as JsonObject, name, null);
     for (const [key, res] of Object.entries(asObject(draft.resources))) {
       const list = asArray(asObject(res).functions);
       if (list.includes(name)) raw = setIn(raw, ["resources", key, "functions"], list.filter((f) => f !== name));
@@ -114,6 +116,7 @@ function FunctionList() {
           </a>
           {r.fn.description ? <span className="muted small">{str(r.fn.description)}</span> : null}
           {issuesAt(["functions", r.name]).some((i) => i.level === "error") && <span className="badge badge-err">error</span>}
+          <GroupBadge placement={placement} fn={r.name} />
         </div>
       ),
     },
@@ -236,6 +239,23 @@ function FunctionList() {
   );
 }
 
+/** Default name of a new function. */
+function name0(functions: JsonObject): string {
+  return uniqueName("my-function", Object.keys(functions));
+}
+
+/** `my-func` -> `functions.my_func.handler.main` (Python) / `functions.my_func.index.main` (Node.js). */
+export function subprojectHandler(name: string, language: "python" | "node"): string {
+  const folder = name.replace(/-/g, "_") || "my_function";
+  return `functions.${folder}.${language === "node" ? "index" : "handler"}.main`;
+}
+
+/** The folder of a sub-project handler (`functions.resize.handler.main` -> `functions/resize`), "" for none. */
+function subprojectFolder(handler: string): string {
+  if (!HANDLER_RE.test(handler)) return "";
+  return handler.replace(":", ".").split(".").slice(0, -2).join("/");
+}
+
 export function handlerFile(handler: string): string {
   if (!HANDLER_RE.test(handler)) return "";
   const module = handler.replace(":", ".").split(".").slice(0, -1).join("/");
@@ -259,9 +279,12 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
   const confirm = useConfirm();
   const functions = asObject(draft.functions);
   const original = existing ? asObject(functions[existing]) : null;
-  const [name, setName] = useState(existing || uniqueName("my-function", Object.keys(functions)));
+  const [name, setName] = useState(existing || name0(functions));
   const language = languageOf(str(asObject(draft.provider).runtime, provider?.default_runtime || "python3.12"));
-  const [fn, setFn] = useState<JsonObject>(() => (original ? { ...original } : { handler: defaultHandler("my-function", language) }));
+  // New functions default to their own folder (functions/<name>/) with their own requirements.txt / package.json.
+  const [subproject, setSubproject] = useState(!existing);
+  const suggestHandler = (n: string, sub: boolean) => (sub ? subprojectHandler(n, language) : defaultHandler(n, language));
+  const [fn, setFn] = useState<JsonObject>(() => (original ? { ...original } : { handler: suggestHandler(name0(functions), true) }));
   const [handlerTouched, setHandlerTouched] = useState(!!existing);
   const [events, setEvents] = useState<NormalEvent[]>(() =>
     asArray(original?.events)
@@ -279,6 +302,8 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     return new Set(base.map((e, i) => (over.some((o) => deepEqual(o, e)) ? -1 : i)).filter((i) => i >= 0));
   });
   const [showLogs, setShowLogs] = useState(false);
+  const placement = providerName === "onprem" ? readPlacement(draft) : null;
+  const [runsOn, setRunsOn] = useState(() => groupOf(placement, existing || ""));
   const [busy, setBusy] = useState(false);
 
   if (existing && !original) {
@@ -292,6 +317,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     );
   }
 
+  const depFile = language === "node" ? "package.json" : "requirements.txt";
   const nameTaken = name !== existing && name in functions;
   const nameError = !NAME_RE.test(name) ? "start with a letter; letters, digits, - and _ (max 63)" : nameTaken ? "a function with this name exists" : null;
   const handler = str(fn.handler);
@@ -327,7 +353,7 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
 
   const updateName = (n: string) => {
     setName(n);
-    if (!handlerTouched) setFn((f) => ({ ...f, handler: defaultHandler(n, language) }));
+    if (!handlerTouched) setFn((f) => ({ ...f, handler: suggestHandler(n, subproject) }));
   };
 
   const setField = (key: string, value: Json | undefined) =>
@@ -360,22 +386,25 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
     if (existing === name) raw = setIn(raw, ["functions", name], body);
     else raw = setIn(raw, ["functions"], { ...asObject((raw as JsonObject).functions), [name]: body });
     raw = syncProviderOverrides(raw as JsonObject, meta.providers, existing, name, asArray(original?.events), events.map(eventToRaw), providerName, skipped);
+    if (existing && existing !== name) raw = renameInPlacement(raw as JsonObject, existing, name);
+    if (placement && runsOn && runsOn !== groupOf(readPlacement(raw as JsonObject), name)) raw = moveFunction(raw as JsonObject, name, runsOn);
     replace(raw as JsonObject);
+    const sub = !existing && subproject && !!subprojectFolder(str(body.handler));
     const types = events.map((e) => e.type);
     if (!existing || original?.handler !== body.handler) {
       if (stubNow) {
         setBusy(true);
         try {
-          const res = await api.ensureHandler(str(body.handler), types);
+          const res = await api.ensureHandler(str(body.handler), types, sub);
           toast(res.created ? `Created handler stub in ${res.path}` : `Handler already exists in ${res.path}`, "ok");
         } catch (exc) {
-          queueHandlerStub(str(body.handler), types);
+          queueHandlerStub(str(body.handler), types, sub);
           toast(`Couldn't write the handler stub now (${errorMessage(exc)}); it will be created on save`, "warn");
         } finally {
           setBusy(false);
         }
       } else {
-        queueHandlerStub(str(body.handler), types);
+        queueHandlerStub(str(body.handler), types, sub);
       }
     }
     toast(existing ? `Updated ${name} (not saved yet)` : `Created ${name} (not saved yet)`, "ok");
@@ -455,6 +484,32 @@ function FunctionWizard({ name: existing }: { name: string | null }) {
                 }}
               />
             </FormRow>
+            {!existing && (
+              <FormRow
+                label="Dependencies"
+                help={
+                  !subproject
+                    ? "Uses the project's dependencies."
+                    : subprojectFolder(handler)
+                      ? `Creates ${subprojectFolder(handler)}/${depFile}: this function's own dependencies, installed only with it${providerName === "onprem" ? " (on premises with placement, only on the server it runs on)" : ""}.`
+                      : `Needs a handler in a folder, e.g. ${subprojectHandler(name, language)}`
+                }
+              >
+                <Toggle
+                  checked={subproject}
+                  label={`Own folder with its own ${depFile}`}
+                  onChange={(on) => {
+                    setSubproject(on);
+                    if (!handlerTouched) setField("handler", suggestHandler(name, on));
+                  }}
+                />
+              </FormRow>
+            )}
+            {placement && (
+              <FormRow label="Runs on" help="The placement group (server) this function runs in (provider.options.placement). Functions not listed in a group run on the default group.">
+                <RunsOnSelect placement={placement} value={runsOn} onChange={setRunsOn} />
+              </FormRow>
+            )}
             <div className="form-grid">
               <FormRow label="Runtime" htmlFor="frt">
                 <EnumSelect

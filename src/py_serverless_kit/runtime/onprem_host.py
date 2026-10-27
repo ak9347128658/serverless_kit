@@ -76,7 +76,9 @@ from .cron import CronError, next_cron, rate_seconds, resolve_zone
 from .dispatch import execute
 from .event import Event, EventType, Headers, HttpRequest, Record
 from .executions import Executor, FileExecutionStore, valid_id
+from .invoke import NOT_ROUTED, install_router
 from .manifest import load_manifest, set_manifest
+from .peers import HOP_HEADER, Peers, run_peer_call
 from .response import Response, dumps
 from .routing import match_path, method_matches
 from .workflow import install_executor, wants_wait
@@ -91,7 +93,7 @@ ENV_FILE = "host.env"
 ROLES = ("all", "main", "web")
 # /__pskit/... calls a web replica answers itself; every other one goes to the main replica.
 # GET /__pskit/logs/local is also local (see _route): it is this replica's own buffer.
-_WEB_LOCAL = ("health", "invoke")
+_WEB_LOCAL = ("health", "invoke", "peer")
 
 
 def parse_env_text(text: str) -> Dict[str, str]:
@@ -801,6 +803,71 @@ class ForwardingBroker(Broker):
         return bool((self._call("DELETE", self._object_path(bucket, key)) or {}).get("deleted"))
 
 
+class PeerBroker(Broker):
+    """The broker of a host whose project runs on several servers (``provider.options.placement``).
+
+    A built-in queue or bucket belongs to the group of the function it triggers: here it is used directly,
+    elsewhere through that group's host. A topic is published to every group with a subscriber. A resource with a
+    driver (redis, sqs, s3, ...) is used directly, as on any host. ``local=True`` (a call from another group) never
+    forwards again."""
+
+    def __init__(self, spec: Dict[str, Any], peers: Peers) -> None:
+        super().__init__(spec)
+        self.peers = peers
+
+    def submit_queue(self, name: str, message: Any, attributes: Optional[Dict[str, Any]] = None,
+                     local: bool = False) -> str:
+        group = None if local or self.queue_driver(name) is not None else self.peers.owner("queue", name)
+        if group is None:
+            return super().submit_queue(name, message, attributes)
+        reply = self.peers.call(group, "POST", f"/__pskit/queues/{quote(name, safe='')}",
+                                {"messages": [{"message": message, "attributes": dict(attributes or {})}]})
+        return str((reply or {}).get("queued", [""])[0])
+
+    def submit_topic(self, name: str, message: Any, attributes: Optional[Dict[str, Any]] = None,
+                     local: bool = False) -> str:
+        groups = [self.peers.group] if local else self.peers.subscribers("topic", name)
+        ident = ""
+        for group in groups:
+            if group == self.peers.group:
+                ident = super().submit_topic(name, message, attributes) or ident
+            else:
+                reply = self.peers.call(group, "POST", f"/__pskit/topics/{quote(name, safe='')}",
+                                        {"messages": [{"message": message, "attributes": dict(attributes or {})}]})
+                ident = ident or str((reply or {}).get("published", [""])[0])
+        return ident
+
+    def _object_path(self, bucket: str, key: str) -> str:
+        return f"/__pskit/storage/{quote(bucket, safe='')}/" + "/".join(quote(p, safe="") for p in _key_parts(key))
+
+    def _bucket_owner(self, bucket: str, local: bool) -> Optional[str]:
+        return None if local or self.storage_driver(bucket) is not None else self.peers.owner("storage", bucket)
+
+    def put_object(self, bucket: str, key: str, data: bytes, local: bool = False) -> Optional[Path]:
+        group = self._bucket_owner(bucket, local)
+        if group is None:
+            return super().put_object(bucket, key, data)
+        self.peers.call(group, "PUT", self._object_path(bucket, key), raw=bytes(data))
+        return None
+
+    def get_object(self, bucket: str, key: str, local: bool = False) -> bytes:
+        group = self._bucket_owner(bucket, local)
+        if group is None:
+            return super().get_object(bucket, key)
+        status, _headers, data = self.peers.request(group, "GET", self._object_path(bucket, key))
+        if status == 404:
+            raise FileNotFoundError(f"no object {key!r} in {bucket}")
+        if status >= 300:
+            raise RuntimeError(f"group {group} answered {status} reading {bucket}/{key}")
+        return data
+
+    def delete_object(self, bucket: str, key: str, local: bool = False) -> bool:
+        group = self._bucket_owner(bucket, local)
+        if group is None:
+            return super().delete_object(bucket, key)
+        return bool((self.peers.call(group, "DELETE", self._object_path(bucket, key)) or {}).get("deleted"))
+
+
 class RemoteExecutor:
     """Workflow starts on a ``web`` replica: the run happens (and is recorded) on the main replica."""
 
@@ -887,7 +954,18 @@ class Host:
         # The cluster server (orchestrator node) this replica runs on: shown with each request.
         self.node = str(os.environ.get("PSKIT_NODE") or "")
         token = str(self.spec.get("admin_token") or "")
-        self.broker = ForwardingBroker(self.spec, self.main_url, token) if self.role == "web" else Broker(self.spec)
+        # Functions of this project in other groups (provider.options.placement), or None.
+        self.peers = Peers.from_spec(self.spec)
+        if self.role == "web":
+            self.broker: Broker = ForwardingBroker(self.spec, self.main_url, token)
+        elif self.peers is not None:
+            self.broker = PeerBroker(self.spec, self.peers)
+        else:
+            self.broker = Broker(self.spec)
+        # A group other than the default one sends its logs and counts there, so one place shows every group.
+        self.log_url = ""
+        if self.peers is not None and self.role != "web" and self.peers.group != self.peers.default:
+            self.log_url = self.peers.urls.get(self.peers.default, "")
         # web: invocations and log entries not yet sent to the main replica.
         self._shipped = 0
         self._unshipped: List[Dict[str, Any]] = []
@@ -922,6 +1000,7 @@ class Host:
         set_manifest(None)
         self.manifest = load_manifest(reload=True)
         install_broker(self.broker)
+        install_router(self._route_remote if self.peers is not None else None)
         for note in self.broker.ensure(self.spec.get("functions") or {}):
             self._note(note)
         if self.role == "web":
@@ -930,7 +1009,12 @@ class Host:
             install_executor(self.executor)
             self._booted = True
             return
-        self._start_executor()
+        if self.log_url and self.peers is not None:
+            # Workflows run (and are recorded) on the default group; their steps come back here when they are ours.
+            self.executor = RemoteExecutor(self.log_url, self.peers.token, sorted(self.manifest.workflows or {}))
+            install_executor(self.executor)
+        else:
+            self._start_executor()
         self._baseline_storage()
         if not self._sched.get("origin"):
             self._sched["origin"] = time.time()
@@ -1030,8 +1114,13 @@ class Host:
         self._save_sched()
 
     # ---------------------------------------------------------------- invoke
-    def invoke(self, function: str, event: Event) -> Any:
+    def invoke(self, function: str, event: Event, from_peer: bool = False) -> Any:
         fns = self.spec.get("functions") or {}
+        group = self.peers.remote(function) if self.peers is not None and function not in fns else None
+        if group:
+            if from_peer:  # never a second hop, even when two hosts disagree about where it runs
+                raise KeyError(f"function {function!r} runs in group {group}, not here")
+            return self._invoke_remote(function, group, event)
         if function not in fns and function not in getattr(self, "manifest", load_manifest()).functions:
             known = ", ".join(sorted(fns)) or "<none>"
             raise KeyError(f"unknown function {function!r}; known: {known}")
@@ -1065,6 +1154,23 @@ class Host:
                 self._record_invocation(function, event, t0, result, error)
         return result
 
+    def _invoke_remote(self, function: str, group: str, event: Event) -> Any:
+        """Run ``function`` on the host of ``group``: HTTP requests pass through as they are."""
+        assert self.peers is not None
+        event.function = function
+        event.provider = "onprem"
+        if event.http is not None:
+            return self.peers.forward_http(group, event.http, self.peers.timeout(function))
+        return self.peers.invoke(function, event, group)
+
+    def _route_remote(self, function: str, event: Event) -> Any:
+        """``invoke()`` and workflow steps: functions of other groups go to their host."""
+        fns = self.spec.get("functions") or {}
+        group = self.peers.remote(function) if self.peers is not None and function not in fns else None
+        if not group:
+            return NOT_ROUTED
+        return self._invoke_remote(function, group, event)
+
     def _record_invocation(
         self, function: str, event: Event, t0: float, result: Any, error: Optional[BaseException]
     ) -> None:
@@ -1092,7 +1198,7 @@ class Host:
             message += f" {fields['error']}"
         self.logs.append("ERROR" if failed else "INFO", "invocation", message, fields=fields)
         error_text = (fields.get("error") or f"HTTP {fields.get('status')}") if failed else ""
-        self._count(function, duration, failed, error_text, ship=self.role == "web")
+        self._count(function, duration, failed, error_text, ship=self.role == "web" or bool(self.log_url))
 
     def _count(self, function: str, duration: float, failed: bool, error: str, *, ship: bool) -> None:
         with self._stats_lock:
@@ -1516,9 +1622,13 @@ class Host:
         # A web replica has no schedules or built-in queues to poll: the main replica runs those triggers.
         loop = self._ship_loop if self.role == "web" else self._poll_loop
         threading.Thread(target=loop, name="pskit-onprem", daemon=True).start()
+        if self.log_url:
+            threading.Thread(target=self._ship_loop, name="pskit-onprem-ship", daemon=True).start()
         server = self.make_server()
         bound = server.server_address
         role = "" if self.role == "all" else f" as the {self.role} replica ({self.replica})"
+        if self.peers is not None:
+            role += f" (group {self.peers.group})"
         self.logs.append("INFO", "host", f"listening on {bound[0]!s}:{bound[1]}{role}")
         try:
             server.serve_forever()
@@ -1543,18 +1653,22 @@ class Host:
             self.ship_logs()
 
     def ship_logs(self) -> bool:
-        """web: send new log entries and invocation counts to the main replica, so logs and stats stay in one place."""
+        """web replica (to the main replica) or a group other than the default one (to the default group's host):
+        send new log entries and invocation counts, so logs and stats stay in one place."""
         page = self.logs.query(since=self._shipped, limit=500)
         entries = page.get("entries") or []
         with self._stats_lock:
             invocations, self._unshipped = self._unshipped, []
         if not entries and not invocations:
             return True
-        body = dumps({"replica": self.replica, "entries": entries, "invocations": invocations}).encode("utf-8")
+        group = self.peers.group if self.peers is not None else ""
+        body = dumps({"replica": self.replica, "group": group, "entries": entries,
+                      "invocations": invocations}).encode("utf-8")
+        target = self.main_url or self.log_url
+        token = str(self.spec.get("admin_token") or "") if self.main_url else str(self.spec.get("peer_token") or "")
         try:
             status, _headers, _raw = main_request(
-                self.main_url, str(self.spec.get("admin_token") or ""), "POST", "/__pskit/logs/ingest", body,
-                {"content-type": "application/json"},
+                target, token, "POST", "/__pskit/logs/ingest", body, {"content-type": "application/json"},
             )
         except OSError:
             status = 0
@@ -1587,12 +1701,15 @@ class Host:
         if not isinstance(payload, dict):
             raise ValueError("send {replica, entries, invocations}")
         replica = str(payload.get("replica") or "web")[:120]
+        group = str(payload.get("group") or "")[:40]
         added = 0
         for entry in payload.get("entries") or []:
             if not isinstance(entry, dict):
                 continue
             fields = dict(entry.get("fields") or {})
-            fields["replica"] = replica
+            fields.setdefault("replica", replica)
+            if group:
+                fields.setdefault("group", group)
             self.logs.append(
                 str(entry.get("level") or "INFO"), str(entry.get("source") or "host"), str(entry.get("message") or ""),
                 function=entry.get("function") or None, request_id=entry.get("request_id") or None, fields=fields,
@@ -1601,7 +1718,7 @@ class Host:
         for item in payload.get("invocations") or []:
             if isinstance(item, dict) and item.get("function"):
                 self._count(str(item["function"]), float(item.get("duration_ms") or 0), bool(item.get("failed")),
-                            str(item.get("error") or ""), ship=False)
+                            str(item.get("error") or ""), ship=bool(self.log_url))
         return {"entries": added}
 
     def _handler(self):
@@ -1638,7 +1755,14 @@ class Host:
                 token = str(host.spec.get("admin_token") or "")
                 if not token:
                     return True
-                return self.headers.get("x-pskit-token") == token
+                sent = self.headers.get("x-pskit-token")
+                peer = str(host.spec.get("peer_token") or "")
+                return sent == token or bool(peer and sent == peer)
+
+            @property
+            def _from_peer(self) -> bool:
+                """A call from another group of this project (it is never forwarded again)."""
+                return host.peers is not None and bool(self.headers.get(HOP_HEADER))
 
             def do_GET(self) -> None:  # noqa: N802
                 self._route()
@@ -1736,7 +1860,7 @@ class Host:
                         mail = json.loads(raw.decode("utf-8"))
                     except ValueError:
                         return self._json(400, {"error": "the mail must be JSON"})
-                    return self._json(*host.deliver_mail(parts[1], mail))
+                    return self._json(*host.deliver_mail(parts[1], mail, from_peer=self._from_peer))
                 if parts and parts[0] == "executions":
                     return self._executions(parts[1:], query)
                 if parts == ["resources"]:
@@ -1765,6 +1889,10 @@ class Host:
                     return self._storage(parts[1], "/".join(parts[2:]), raw)
                 if parts and parts[0] == "invoke" and len(parts) == 2:
                     return self._invoke(parts[1], raw)
+                if parts and parts[0] == "peer" and len(parts) == 2:
+                    if self.command != "POST":
+                        return self._json(405, {"error": "POST an event"})
+                    return self._json(200, run_peer_call(host, parts[1], raw))
                 if parts and parts[0] == "workflows" and len(parts) == 2:
                     return self._workflow(parts[1], raw, query)
                 self._json(404, {"error": "unknown on-prem endpoint"})
@@ -1844,7 +1972,8 @@ class Host:
                 if self.command != "POST":
                     return self._json(405, {"error": "POST a JSON message"})
                 payload = json.loads(raw.decode("utf-8") or "null")
-                ids = [host.broker.submit_queue(name, message, attrs) for message, attrs in _messages_of(payload)]
+                local = {"local": True} if self._from_peer else {}
+                ids = [host.broker.submit_queue(name, message, attrs, **local) for message, attrs in _messages_of(payload)]
                 return self._json(202, {"queued": ids})
 
             # ------------------------------------------------------------ AWS-compatible APIs
@@ -2029,22 +2158,24 @@ class Host:
                 if self.command != "POST":
                     return self._json(405, {"error": "POST a JSON message"})
                 payload = json.loads(raw.decode("utf-8") or "null")
-                ids = [host.broker.submit_topic(name, message, attrs) for message, attrs in _messages_of(payload)]
+                local = {"local": True} if self._from_peer else {}
+                ids = [host.broker.submit_topic(name, message, attrs, **local) for message, attrs in _messages_of(payload)]
                 host.pump_topics(time.time())
                 return self._json(202, {"published": ids})
 
             def _storage(self, bucket: str, key: str, raw: bytes) -> None:
+                local = {"local": True} if self._from_peer else {}
                 if self.command == "PUT":
-                    host.broker.put_object(bucket, key, raw)
+                    host.broker.put_object(bucket, key, raw, **local)
                     host.pump_storage(time.time())
                     return self._json(201, {"bucket": bucket, "key": key, "size": len(raw)})
                 if self.command == "DELETE":
-                    removed = host.broker.delete_object(bucket, key)
+                    removed = host.broker.delete_object(bucket, key, **local)
                     host.pump_storage(time.time())
                     return self._json(200, {"deleted": removed, "bucket": bucket, "key": key})
                 if self.command in ("GET", "HEAD"):
                     try:
-                        data = host.broker.get_object(bucket, key)
+                        data = host.broker.get_object(bucket, key, **local)
                     except (FileNotFoundError, KeyError):
                         return self._json(404, {"error": f"no object {key!r} in {bucket}"})
                     return self._send(200, {"content-type": "application/octet-stream"}, data)
@@ -2117,7 +2248,7 @@ class Host:
                     if workflow is not None and self.command == "POST":
                         # Through the executor directly: tracked, async by default, no env lock held.
                         return self._start_workflow(workflow, req)
-                    resp = host.invoke(function, Event(type=EventType.HTTP, http=req))
+                    resp = host.invoke(function, Event(type=EventType.HTTP, http=req), from_peer=self._from_peer)
                     if not isinstance(resp, Response):
                         resp = Response.json(resp)
                     status, headers, body = resp.render()
@@ -2163,7 +2294,7 @@ class Host:
             items.append(item)
         return {"items": items}
 
-    def deliver_mail(self, server: str, mail: Any) -> Tuple[int, Dict[str, Any]]:
+    def deliver_mail(self, server: str, mail: Any, from_peer: bool = False) -> Tuple[int, Dict[str, Any]]:
         """Run every function with an ``smtp`` trigger on resource ``server`` with ``mail`` (from the smtp service).
 
         ``(200, results)`` when all succeeded; ``500`` when one failed and ``404`` when none listens, so the SMTP
@@ -2181,11 +2312,20 @@ class Host:
                    f"{json.dumps(str(mail.get('subject') or ''))}")
         fields = {"server": server, "from": mail.get("from"), "to": mail.get("to"), "subject": mail.get("subject"),
                   "attachments": [a.get("filename") for a in mail.get("attachments") or [] if isinstance(a, dict)]}
-        if not listeners:
+        others = [] if from_peer or self.peers is None else [
+            g for g in self.peers.subscribers("smtp", server) if g != self.peers.group]
+        if not listeners and not others:
             self.logs.append("WARNING", "smtp", f"{summary}: no function has an smtp trigger on {server!r}",
                              fields=fields)
             return 404, {"error": f"no function has an smtp trigger on {server!r}"}
         results: Dict[str, Any] = {}
+        for group in others:  # functions on this SMTP server in other groups run there
+            try:
+                assert self.peers is not None
+                reply = self.peers.call(group, "POST", f"/__pskit/smtp/{quote(server, safe='')}", mail)
+                results.update((reply or {}).get("delivered") or {})
+            except Exception as exc:  # noqa: BLE001 - the SMTP service makes the sender retry
+                results[f"group {group}"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         for name in listeners:
             self.logs.append("INFO", "smtp", f"{summary} -> {name}", function=name, fields=fields)
             try:
@@ -2342,6 +2482,8 @@ class Host:
             "pid": os.getpid(),
             "role": self.role,
             "replica": self.replica,
+            **({"group": self.peers.group, "default_group": self.peers.default, "groups": sorted(self.peers.urls)}
+               if self.peers is not None else {}),
             "started_at": datetime.fromtimestamp(self.started_at, timezone.utc).isoformat(timespec="seconds"),
             "workflows": sorted((manifest.workflows if manifest else None) or {}),
             "services": {

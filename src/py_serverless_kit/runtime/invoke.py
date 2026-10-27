@@ -4,6 +4,7 @@
 service* regardless of the cloud it runs on:
 
 * ``PSKIT_ENDPOINT_<NAME>`` env var set -> HTTP POST to that URL (any provider)
+* on premises, a function placed on another server -> that server's host (``runtime/peers.py``)
 * local (CLI / tests)                   -> in-process call through the dispatcher
 * aws                                   -> ``lambda:InvokeFunction`` via boto3
 * gcp                                   -> authenticated HTTPS call (ID token from metadata server)
@@ -18,7 +19,7 @@ import json
 import os
 import re
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .adapters.base import envelope
 from .manifest import load_manifest
@@ -26,6 +27,24 @@ from .manifest import load_manifest
 
 class InvokeError(RuntimeError):
     pass
+
+
+NOT_ROUTED = object()
+_ROUTER: Optional[Callable[[str, Any], Any]] = None
+
+
+def install_router(router: Optional[Callable[[str, Any], Any]]) -> None:
+    """``router(function, event)`` runs a function that lives elsewhere and returns its result, or
+    :data:`NOT_ROUTED` for one that runs here. The on-prem host installs one when functions are placed on several
+    servers, so ``invoke()`` and workflow steps reach them unchanged."""
+    global _ROUTER
+    _ROUTER = router
+
+
+def route(function: str, event: Any) -> Any:
+    """The router's answer for ``function`` (:data:`NOT_ROUTED` without a router)."""
+    router = _ROUTER
+    return NOT_ROUTED if router is None else router(function, event)
 
 
 def _env_key(name: str) -> str:
@@ -116,6 +135,9 @@ def invoke(function: str, payload: Any = None, *, asynchronous: bool = False, ti
         from .event import Event, EventType
 
         event = Event(type=EventType.INVOKE, provider=provider, function=function, data=payload)
+        routed = route(function, event)
+        if routed is not NOT_ROUTED:
+            return routed
         saved = os.environ.get("PSKIT_FUNCTION")
         os.environ["PSKIT_FUNCTION"] = function
         try:

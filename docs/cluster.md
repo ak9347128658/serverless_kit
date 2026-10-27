@@ -179,6 +179,8 @@ pskit resources onprem create orders-db --service postgres --cluster prod --node
 
 ### Ports to open
 
+Every step, every role: [network and firewall rules](onprem-network.md).
+
 | Between the servers | |
 |---|---|
 | Swarm | 2377/tcp, 7946/tcp+udp, 4789/udp |
@@ -189,9 +191,13 @@ pskit resources onprem create orders-db --service postgres --cluster prod --node
 
 ## Load balancer: one URL for the whole cluster (optional)
 
-Add one more saved server **outside** the cluster as its load balancer. pskit runs nginx there in Docker
-(container `pskit-lb`, host network) and spreads each deployment's HTTP over the cluster's servers. It works the
-same way for all three orchestrators:
+Add one more saved server **outside** the cluster as its load balancer. pskit runs OpenResty (nginx) there in
+Docker (container `pskit-lb`, host network) and spreads each deployment's HTTP over the cluster's servers with the
+algorithm you pick (`--algorithm`: round robin, sticky round robin, weighted round robin, IP hash, least
+connections (the default) or least time; `--weight edge1=3` per server; see
+[load balancers](load-balancers.md#the-six-algorithms)). It works the same way for all three orchestrators.
+To share one load balancer between clusters and projects by path instead (`http://lb/<service>/`), attach a
+named one: `pskit lb attach edge --cluster prod` ([load balancers](load-balancers.md)).
 
 ```
                 users ──► http://<lb1>/  (nginx on lb1, port 80)

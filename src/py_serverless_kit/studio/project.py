@@ -315,7 +315,38 @@ def _ensure_node_handler(root: Path, source: Path, handler: str, kind: str) -> D
     return {"path": path.resolve().relative_to(root.resolve()).as_posix(), "created": created, "line": line}
 
 
-def ensure_handler(root: Path, handler: str, events: Optional[List[str]] = None) -> Dict[str, Any]:
+def _ensure_subproject(root: Path, source: Path, module: str, language: str) -> None:
+    """The folder that holds ``module`` (``functions.resize.handler`` -> ``functions/resize``) gets its own
+    dependency file, unless it (or a folder above it) already has one."""
+    import json
+
+    from ..packaging.subprojects import marker
+
+    parts = module.split(".")
+    if len(parts) < 2:
+        raise StudioError(400, "a function with its own folder needs a handler like functions.NAME.handler.main")
+    folder = source.joinpath(*parts[:-1])
+    walk = folder
+    while walk != source and source in walk.parents:
+        if (walk / marker(language)).is_file():
+            return
+        walk = walk.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    if language == "node":
+        body = {"name": parts[-2].replace("_", "-"), "private": True, "dependencies": {}}
+        (folder / "package.json").write_bytes((json.dumps(body, indent=2) + "\n").encode("utf-8"))
+    else:
+        (folder / "requirements.txt").write_bytes(
+            b"# Dependencies of this function only. pskit installs them with the function: on premises with\n"
+            b"# provider.options.placement only on the server this function runs on.\n")
+    del root
+
+
+def ensure_handler(root: Path, handler: str, events: Optional[List[str]] = None,
+                   subproject: bool = False) -> Dict[str, Any]:
+    """Add a stub for ``handler`` unless its file already defines it. ``subproject``: the handler's folder (e.g.
+    ``functions/resize/``) becomes the function's own sub-project with an empty ``requirements.txt`` (Python) or
+    ``package.json`` (Node.js) for its dependencies (``packaging/subprojects.py``)."""
     from .meta import HANDLER_TEMPLATES, TEMPLATE_IMPORTS
 
     match = _HANDLER_RE.match(str(handler or "").strip())
@@ -325,7 +356,10 @@ def ensure_handler(root: Path, handler: str, events: Optional[List[str]] = None)
     kinds = [e for e in (events or []) if e in HANDLER_TEMPLATES]
     kind = kinds[0] if kinds else "invoke"
     source = _source_dir(root)
-    if _language(root) == "node":
+    language = _language(root)
+    if subproject:
+        _ensure_subproject(root, source, module, language)
+    if language == "node":
         return _ensure_node_handler(root, source, handler, kind)
     parts = module.split(".")
     package_dir = source.joinpath(*parts)

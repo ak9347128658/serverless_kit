@@ -9,6 +9,7 @@ import { href } from "../route";
 import { InlineIssues, PageHeader } from "../components/Misc";
 import { ServerForm } from "../components/OnPremMachines";
 import { DeployedBadge, useOnPremServers } from "../components/ServerPicker";
+import { DeployedGroups } from "../components/Placement";
 import { capabilityLabel, ProviderCards } from "../components/ProviderCard";
 import { absorbShadows, providerShadows } from "../shadow";
 import { useStudio } from "../store";
@@ -344,6 +345,7 @@ function OnPremSection() {
           </div>
         </FormRow>
         <DeployedBadge deployed={deployed} />
+        <DeployedGroups deployed={deployed} />
         {adding && (
           <ServerForm
             initial={null}

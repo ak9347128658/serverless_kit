@@ -21,11 +21,17 @@ def _apply_saved_server(options: Dict[str, Any], root: Path, stage: str) -> None
     import os
 
     from ..config.loader import ConfigError
+    from .onprem_placement import PlacementError, configured
+    from .onprem_placement import resolve as resolve_placement
     from .onprem_servers import CLUSTER_ENV, SERVER_ENV, ServerError, resolve_deploy
 
+    server, cluster = os.environ.get(SERVER_ENV) or None, os.environ.get(CLUSTER_ENV) or None
     try:
-        resolve_deploy(options, root, stage, os.environ.get(SERVER_ENV) or None, os.environ.get(CLUSTER_ENV) or None)
-    except ServerError as exc:
+        if configured(options):  # functions on several servers: every group's target (core/onprem_placement.py)
+            resolve_placement(options, root, stage, server, cluster)
+        else:
+            resolve_deploy(options, root, stage, server, cluster)
+    except (ServerError, PlacementError) as exc:
         raise ConfigError(str(exc)) from None
 
 

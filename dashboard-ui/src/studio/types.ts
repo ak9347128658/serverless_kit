@@ -369,6 +369,28 @@ export interface OnPremDeployed {
   label: string;
   endpoint?: string | null;
   deployed_at?: string | null;
+  /** provider.options.placement: where each group of functions runs (deployment.json `groups`). */
+  groups?: Record<string, DeployedGroup> | null;
+  /** Load balancer routes of this deployment (deployment.json `balancers`, from provider.options.balancer). */
+  balancers?: DeployedBalancerRoute[] | null;
+}
+
+/** One placement group of a deployed on-prem stage. */
+export interface DeployedGroup {
+  endpoint: string;
+  /** Deploy method: local, ssh, scp or docker. */
+  deploy?: string | null;
+  functions: string[];
+  server?: string | null;
+  cluster?: string | null;
+}
+
+export interface DeployedBalancerRoute {
+  name: string;
+  key: string;
+  path?: string | null;
+  url: string;
+  owner?: string;
 }
 
 export interface OnPremServerTest {
@@ -548,6 +570,10 @@ export interface ClusterBalancer {
   set_at?: string;
   /** Each deployment's URL on the load balancer. */
   urls: Record<string, string>;
+  /** One of `OnPremBalancersState.algorithms` (missing on load balancers set up before 2.3: the default). */
+  algorithm?: string;
+  /** Saved server -> weight (1..100) for weighted algorithms. */
+  weights?: Record<string, number>;
 }
 
 export interface ClusterBalancerStatus extends ClusterBalancer {
@@ -576,6 +602,8 @@ export interface OnPremCluster {
   alerts: ClusterAlertEntry[];
   deployments: Record<string, ClusterDeployment>;
   balancer?: ClusterBalancer | null;
+  /** Named load balancers attached to this cluster, with each deployment's URL there. */
+  balancers?: (NamedBalancer & { urls: Record<string, string> })[];
   created_at?: string;
 }
 
@@ -687,4 +715,126 @@ export interface OnPremClustersState {
   servers: OnPremServer[];
   orchestrators: { id: Orchestrator; label: string; summary: string; ports: string }[];
   last: Record<string, ClusterStatus>;
+}
+
+/** How a load balancer picks a server: static = a fixed rule, dynamic = from live load per request. */
+export type BalancerKind = "static" | "dynamic";
+
+/** One load balancing algorithm (`GET /api/onprem-balancers` → `algorithms`), in display order. */
+export interface LbAlgorithm {
+  name: string;
+  label: string;
+  kind: BalancerKind;
+  summary: string;
+  pros: string[];
+  cons: string[];
+  best_for: string;
+}
+
+/** A named load balancer (OpenResty on a saved server) shared by projects and clusters by path. */
+export interface NamedBalancer {
+  name: string;
+  server: string;
+  address: string;
+  port: number;
+  algorithm: string;
+  algorithm_label: string;
+  kind: BalancerKind;
+  url: string;
+  weights: Record<string, number>;
+  clusters: string[];
+  created_at?: string | null;
+}
+
+export interface BalancerBackend {
+  address: string;
+  port: number;
+  weight: number;
+  backup: boolean;
+  server: string;
+}
+
+/** One route on a load balancer: `{url}/<path>/` (or its own port) to a deployment's servers. */
+export interface BalancerRoute {
+  key: string;
+  path?: string;
+  listen?: number;
+  owner: string;
+  /** `project` or `cluster:<name>`. */
+  source: string;
+  service: string;
+  stage: string;
+  algorithm: string | null;
+  weights: Record<string, number>;
+  backends: BalancerBackend[];
+  updated_at?: string;
+  updated_from?: string;
+  url: string;
+  effective_algorithm: string;
+  /** No algorithm of its own: uses the load balancer's. */
+  inherits: boolean;
+  /** Owned by a deployment of this project (else another project's route on the same server). */
+  mine: boolean;
+}
+
+export interface NamedBalancerStatus extends NamedBalancer {
+  reachable?: boolean;
+  error?: string;
+  cpu?: number | null;
+  memory?: number | null;
+  disk?: number | null;
+  disk_gb?: number;
+  load?: string;
+  /** The OpenResty container: running, exited, missing, unknown. */
+  state: string;
+  running: boolean;
+  routes: BalancerRoute[];
+  server_settings?: JsonObject;
+  /** The server runs other settings (port / algorithm) than the saved ones: Sync rewrites them. */
+  drift?: boolean;
+}
+
+export interface OnPremBalancersState {
+  balancers: NamedBalancer[];
+  algorithms: LbAlgorithm[];
+  default_algorithm: string;
+  servers: OnPremServer[];
+  clusters: { name: string; nodes: string[]; balancer: string | null }[];
+}
+
+/** `POST /api/onprem-balancers/<name>/<action>`: each one runs as a job. */
+export type BalancerAction = "update" | "attach" | "detach" | "sync" | "remove" | "route-remove";
+
+/** One machine a firewall rule allows traffic from / to. `name` may be `users`, `internet` or `admin` (the machine running pskit). */
+export interface FirewallSource {
+  name: string;
+  address: string;
+}
+
+/** `required`: it does not work without it; `feature`: needed for that feature; `optional`: pskit falls back to an SSH tunnel. */
+export type FirewallLevel = "required" | "feature" | "optional";
+
+export interface FirewallRule {
+  server: string;
+  address: string;
+  direction: "inbound" | "outbound";
+  proto: "tcp" | "udp";
+  /** One port or several, e.g. `8080` or `443, 80`. */
+  port: string;
+  sources: FirewallSource[];
+  why: string;
+  level: FirewallLevel;
+}
+
+export interface FirewallServer {
+  server: string;
+  address: string;
+  rules: FirewallRule[];
+  /** Ready-to-run `ufw` commands for this server. */
+  ufw: string[];
+}
+
+/** `GET /api/onprem-firewall` */
+export interface OnPremFirewall {
+  servers: FirewallServer[];
 }

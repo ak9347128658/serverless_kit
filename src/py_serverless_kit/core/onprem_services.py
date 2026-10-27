@@ -1730,6 +1730,9 @@ def create(
     for note in notes:
         emit(note)
     emit(f"{spec['label']} is ready at {req['address']}:{req['port']}")
+    from . import onprem_network as network
+
+    network.emit_rules(emit, f"{spec['label']} {req['key']!r}", network.resource(entry, network.function_hosts(root)))
     if body.get("gui") and companion_for(req["service"]):
         entry["gui"] = add_gui(root, req["key"], emit, run=run, login=str(body.get("gui_login") or "password"),
                                password=str(body.get("gui_password") or ""))

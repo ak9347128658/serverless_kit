@@ -582,3 +582,64 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .live-bar > span { display: block; height: 100%; background: var(--accent); transition: width 0.3s ease; }
 .live-table { max-height: 420px; overflow: auto; }
 .live-table .row-error td { color: var(--err); }
+
+/* load balancers: algorithm picker (static / dynamic cards with a looping animation each) */
+.lb-picker { display: grid; gap: 14px; }
+.lb-group-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.lb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.lb-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease; }
+.lb-card:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+.lb-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.lb-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lb-card-head { display: flex; align-items: center; gap: 6px; }
+.lb-check { margin-left: auto; color: var(--accent); font-weight: 700; }
+.lb-summary { margin: 0; }
+.lb-anim { display: block; width: 100%; height: auto; max-height: 96px; border-radius: 6px; background: var(--bg); }
+.lb-anim-text { font: 600 8px var(--sans); fill: var(--muted); }
+.lb-anim-link { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 2 3; }
+.lb-anim-queue { transform-box: fill-box; transform-origin: left center; }
+.lb-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 12.5px; }
+.lb-list li { animation: lb-in 0.35s ease-out both; }
+.lb-pros li::before { content: "✓ "; color: var(--ok); font-weight: 700; }
+.lb-cons li::before { content: "✗ "; color: var(--err); font-weight: 700; }
+@keyframes lb-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: none; }
+}
+.lb-weights summary { cursor: pointer; }
+.lb-routes td { vertical-align: top; }
+.lb-backends { display: flex; flex-wrap: wrap; gap: 4px; }
+.lb-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.lb-row-active td { background: var(--accent-soft); }
+@media (prefers-reduced-motion: reduce) {
+  .lb-anim *, .lb-list li, .lb-card { animation: none !important; transition: none !important; }
+}
+
+/* placement: provider.options.placement (on premises) */
+.placement { display: grid; gap: 10px; }
+.placement-groups { display: grid; gap: 10px; }
+.placement-group { display: grid; gap: 8px; border: 1px solid var(--line); }
+.placement-group.is-default { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.placement-default { cursor: pointer; }
+.placement-fns { display: flex; flex-wrap: wrap; gap: 6px; }
+.placement-fn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12.5px; }
+.placement-fn.on { border-color: var(--accent); background: var(--accent-soft); }
+.placement-fn input:disabled { cursor: default; }
+.deploy-groups { flex-basis: 100%; display: grid; gap: 8px; }
+
+/* firewall panel (GET /api/onprem-firewall) */
+.fw-panel .card-body { gap: 14px; }
+.fw-server { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); display: flex; flex-direction: column; gap: 8px; }
+.fw-server-head { margin: 0; font-size: 14px; }
+.fw-table td { vertical-align: top; }
+.fw-level { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.03em; padding: 1px 7px; border-radius: 999px; white-space: nowrap; border: 1px solid transparent; }
+.fw-required { background: var(--err-soft); color: var(--err); border-color: var(--err); }
+.fw-feature { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+.fw-optional { background: var(--off-soft); color: var(--off); font-weight: 500; }
+.fw-row-required td:first-child { box-shadow: inset 3px 0 0 var(--err); }
+.fw-row-feature td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.fw-dir, .fw-port { white-space: nowrap; }
+.fw-sources { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.fw-ufw { display: flex; flex-direction: column; gap: 4px; }
+.fw-ufw-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fw-ufw-code { margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); overflow-x: auto; white-space: pre; font-size: 12px; max-height: 260px; }

@@ -1,5 +1,6 @@
 import type { LogsResponse, LogStream } from "../types";
 import type {
+  BalancerAction,
   ClusterAction,
   ClusterAlertEntry,
   ClusterRequests,
@@ -13,6 +14,7 @@ import type {
   OnPremConsoleInfo,
   OnPremConsoleResult,
   OnPremDeployed, OnPremServer,
+  OnPremFirewall,
   OnPremServerTest,
   OnPremTerminal,
   FileContent,
@@ -21,6 +23,9 @@ import type {
   Job,
   JsonObject,
   Meta,
+  NamedBalancer,
+  NamedBalancerStatus,
+  OnPremBalancersState,
   ProjectState,
   SetupResult,
   SavedTestEvent,
@@ -163,8 +168,9 @@ export const api = {
   file: (path: string) => request<FileContent>("GET", "/api/files", undefined, { query: { path } }),
   writeFile: (path: string, text: string, mtime?: number | null) =>
     request<{ path: string; mtime: number }>("PUT", "/api/files", { path, text, mtime }),
-  ensureHandler: (handler: string, events: string[]) =>
-    request<{ path: string; created: boolean; line?: number }>("POST", "/api/handlers/ensure", { handler, events }),
+  /** `subproject`: the handler's folder (functions/<name>/) gets its own requirements.txt / package.json. */
+  ensureHandler: (handler: string, events: string[], subproject = false) =>
+    request<{ path: string; created: boolean; line?: number }>("POST", "/api/handlers/ensure", { handler, events, ...(subproject ? { subproject: true } : {}) }),
   discover: (provider: string, kind: string, region?: string) =>
     request<DiscoverResult>("GET", "/api/discover", undefined, { query: { provider, kind, region } }),
   startJob: (command: string, provider?: string, stage?: string, args?: Record<string, unknown>) =>
@@ -242,6 +248,7 @@ export const api = {
   onpremTerminals: () => request<{ terminals: OnPremTerminal[] }>("GET", "/api/onprem-terminals"),
   onpremTerminalStart: (body: { server?: string; key?: string; shell?: boolean }) => request<OnPremTerminal>("POST", "/api/onprem-terminals", body),
   onpremTerminalStop: (name: string) => request<{ stopped: string }>("POST", `/api/onprem-terminals/${encodeURIComponent(name)}/stop`, {}),
+  firewall: () => request<OnPremFirewall>("GET", "/api/onprem-firewall"),
   clusters: () => request<OnPremClustersState>("GET", "/api/onprem-clusters"),
   clusterCreate: (body: { name: string; orchestrator: string; master: string; advertise?: string }) =>
     request<{ job_id: string }>("POST", "/api/onprem-clusters", body),
@@ -258,6 +265,23 @@ export const api = {
     request<{ job_id: string }>("POST", `/api/onprem-clusters/${encodeURIComponent(name)}/${action}`, body),
   clusterBalancerLogs: (name: string, lines: number) =>
     request<{ text: string }>("GET", `/api/onprem-clusters/${encodeURIComponent(name)}/balancer-logs?lines=${lines}`),
+  balancers: () => request<OnPremBalancersState>("GET", "/api/onprem-balancers"),
+  balancerCreate: (body: {
+    name: string;
+    server: string;
+    port?: number;
+    address?: string;
+    algorithm?: string;
+    weights?: Record<string, number>;
+    clusters?: string[];
+  }) => request<{ job_id: string }>("POST", "/api/onprem-balancers", body),
+  balancer: (name: string) => request<NamedBalancer>("GET", `/api/onprem-balancers/${encodeURIComponent(name)}`),
+  balancerStatus: (name: string) => request<NamedBalancerStatus>("GET", `/api/onprem-balancers/${encodeURIComponent(name)}/status`),
+  balancerLogs: (name: string, lines: number) =>
+    request<{ text: string }>("GET", `/api/onprem-balancers/${encodeURIComponent(name)}/logs`, undefined, { query: { lines } }),
+  balancerForget: (name: string) => request<{ forgotten: string }>("POST", `/api/onprem-balancers/${encodeURIComponent(name)}/forget`, {}),
+  balancerAction: (name: string, action: BalancerAction, body: JsonObject = {}) =>
+    request<{ job_id: string }>("POST", `/api/onprem-balancers/${encodeURIComponent(name)}/${action}`, body),
   onpremApply: (raw: JsonObject, key: string, attach?: string[]) =>
     request<{ raw: JsonObject }>("POST", "/api/onprem-services/apply", { raw, key, attach }),
   onpremUnapply: (raw: JsonObject, key: string) => request<{ raw: JsonObject }>("POST", "/api/onprem-services/unapply", { raw, key }),

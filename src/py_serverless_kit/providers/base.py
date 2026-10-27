@@ -55,6 +55,7 @@ class Artifact:
     size: int
     file_count: int = 0
     build_dir: Optional[Path] = None
+    skip_deps: bool = False  # built without installing dependencies (pskit package --skip-deps, tests)
 
 
 @dataclass
@@ -391,6 +392,12 @@ class Provider(ABC):
 
     def bundle_requirements(self, user_requirements: List[str]) -> List[str]:
         return list(user_requirements) + [r for r in self.extra_requirements if r not in user_requirements]
+
+    def bundle_function_requirements(self, config: ServiceConfig) -> bool:
+        """Whether the bundle gets the requirements of every function sub-project (``functions/<name>/
+        requirements.txt``). On premises with functions placed on several servers each server gets only its own."""
+        del config
+        return True
 
     def describe(self) -> Dict[str, Any]:
         return {

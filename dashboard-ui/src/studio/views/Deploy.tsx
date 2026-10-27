@@ -5,6 +5,8 @@ import { useConfirm, useToast } from "../components/Feedback";
 import { EnumSelect, FormRow, JsonInput, Section, Segmented, TextInput, Toggle } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { DeployedBadge, ServerSelect, useServerChoice } from "../components/ServerPicker";
+import { DeployedGroups, PlacementEditor, readPlacement } from "../components/Placement";
+import { FirewallPanel } from "../components/FirewallPanel";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
 import { compatProblems, overridesOn, restoreTriggersOn, setEnabledOn, skipTriggersOn, type CompatProblem } from "../compat";
@@ -53,6 +55,7 @@ export function DeployView() {
     setRunOn("");
     setClusterPick("");
   }, [target.stage]);
+  const placement = onprem ? readPlacement(draft) : null;
   const onCluster = (runOn || (deployed?.cluster || ymlCluster ? "cluster" : "server")) === "cluster";
   const chosenCluster = clusterPick || deployed?.cluster || ymlCluster || clusters[0]?.name || "";
   // Back to one machine from a cluster: the default ("where it was deployed" / pskit.yml) would be the cluster again.
@@ -269,6 +272,7 @@ export function DeployView() {
                 {chosenCluster && !clusters.some((c) => c.name === chosenCluster) && <option value={chosenCluster}>{chosenCluster} (not found)</option>}
               </select>
               <DeployedBadge deployed={deployed} />
+              {placement && <span className="small">With placement this is the default group&apos;s target; the other groups run where their group says.</span>}
               <span className="muted small">
                 The functions run as 1 main replica on the master plus {typeof ymlReplicas === "number" ? ymlReplicas : 2} web replicas spread over the
                 cluster&apos;s servers (<code className="mono">provider.options.cluster.replicas</code>). The same as{" "}
@@ -288,6 +292,11 @@ export function DeployView() {
           />
           <DeployedBadge deployed={deployed} />
           {needsMachine && <span className="small">This stage is on a cluster now: pick the machine to move it to.</span>}
+          {placement && (
+            <span className="small">
+              With placement this picks where the default group <b>{placement.default}</b> runs; the other groups always run where their group says.
+            </span>
+          )}
           <span className="muted small">
             The stage remembers the machine of its last deploy: Test, Logs and <code className="mono">pskit trigger</code> / <code className="mono">pskit logs</code> use it, and the next deploy goes there unless you pick another (<code className="mono">--server local</code> for this machine).{" "}
             Saved servers come from <b>Resources → On-prem services → Servers</b>. The same as <code className="mono">pskit deploy --server NAME</code>; to make it permanent per stage set{" "}
@@ -295,7 +304,17 @@ export function DeployView() {
           </span>
             </>
           )}
+          {(Object.keys(deployed?.groups || {}).length > 0 || (deployed?.balancers?.length || 0) > 0) && (
+            <div className="deploy-groups">
+              <DeployedGroups deployed={deployed} />
+            </div>
+          )}
         </div>
+      )}
+      {onprem && (
+        <Section title="Where functions run" hint="provider.options.placement" defaultOpen={!!placement}>
+          <PlacementEditor />
+        </Section>
       )}
       <div className="action-grid">
         {ACTIONS.map((a) => (
@@ -314,6 +333,12 @@ export function DeployView() {
         <span className="muted small">Applies to the Remove action. External resources are never deleted.</span>
       </div>
       <JobConsole job={job} onCancel={jobId ? () => void api.cancelJob(jobId).catch((exc: unknown) => toast(errorMessage(exc), "err")) : undefined} />
+
+      {onprem && (
+        <Section title="Firewall" hint="the ports each server must allow" defaultOpen={false}>
+          <FirewallPanel refreshKey={finished ? jobId : null} />
+        </Section>
+      )}
 
       <InvokePanel functions={functions} disabled={running} onRun={(args) => void run("invoke", args)} />
       {workflows.length > 0 && <WorkflowRunPanel workflows={workflows} disabled={running} onRun={(args) => void run("workflow-run", args)} />}

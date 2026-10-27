@@ -9,7 +9,7 @@ import sys
 import traceback
 import webbrowser
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import click
 
@@ -149,6 +149,20 @@ Operate
               pskit cluster requests prod --follow
               pskit cluster list
               pskit cluster remove prod --yes
+  firewall    Ports each on-prem server must open    pskit firewall --server edge2
+  lb          algorithms | create | update | list | status | attach | detach | routes | sync | logs | remove | forget
+              pskit lb algorithms
+              pskit lb create edge --server lb1 --algorithm least_time
+              pskit lb update edge --algorithm weighted_round_robin --weight app1=3
+              pskit lb list
+              pskit lb status edge
+              pskit lb attach edge --cluster prod
+              pskit lb detach edge --cluster prod
+              pskit lb routes remove edge xyz
+              pskit lb sync edge
+              pskit lb logs edge -n 200
+              pskit lb remove edge --yes
+              pskit lb forget edge
   settings    export | import  (.pskit settings and secrets to another machine, encrypted)
               pskit settings export -o prod.pskit-settings
               pskit settings import prod.pskit-settings
@@ -1392,7 +1406,8 @@ def cluster() -> None:
       pskit cluster scale prod --replicas 6
       pskit cluster requests prod --follow          # which server handled each request, live
       pskit cluster leave prod edge2
-      pskit cluster balancer set prod lb1          # one URL (nginx on lb1) for every server
+      pskit cluster balancer set prod lb1          # one URL (OpenResty on lb1) for every server
+      pskit lb attach edge --cluster prod          # or a shared load balancer: http://<edge>/<service>/
 
     Functions use it with provider.options.cluster in pskit.yml (cluster: prod, or {name: prod, replicas: 3}),
     or per deploy: pskit deploy --cluster prod (the stage remembers it; pskit deploy --server NAME goes back to one
@@ -1417,6 +1432,25 @@ def _cluster_root(config_path: Optional[str]) -> Path:
 
 
 _CONFIG_OPTION = click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+_ALGORITHM_OPTION = click.option(
+    "--algorithm", default=None,
+    help="round_robin, sticky_round_robin, weighted_round_robin, ip_hash, least_connections or least_time"
+         " (pskit lb algorithms explains each).")
+_WEIGHT_OPTION = click.option(
+    "--weight", "weights", multiple=True, metavar="SERVER=N",
+    help="Weight 1..100 of a saved server (weighted round robin, least connections, least time). Repeat it.")
+
+
+def _weights(values: Tuple[str, ...]) -> Optional[Dict[str, int]]:
+    if not values:
+        return None
+    out: Dict[str, int] = {}
+    for value in values:
+        server, sep, number = value.partition("=")
+        if not sep or not server.strip() or not number.strip().isdigit():
+            raise click.BadParameter(f"{value!r}: use SERVER=N, for example edge1=3", param_hint="--weight")
+        out[server.strip()] = int(number)
+    return out
 
 
 @cluster.command("list")
@@ -1710,19 +1744,21 @@ def cluster_remove(name: str, yes: bool, config_path: Optional[str]) -> None:
 
 @cluster.group("balancer")
 def cluster_balancer() -> None:
-    """A load balancer in front of the cluster: one more saved server (outside the cluster) running nginx.
+    """A load balancer in front of the cluster: one more saved server (outside the cluster) running OpenResty.
 
     \b
     Examples:
       pskit cluster balancer set prod lb1             # http://<lb1>/ spreads over the cluster's servers
-      pskit cluster balancer set prod lb1 --port 8000
+      pskit cluster balancer set prod lb1 --port 8000 --algorithm least_time
+      pskit cluster balancer set prod lb1 --algorithm weighted_round_robin --weight edge1=3 --weight edge2=1
       pskit cluster balancer logs prod -n 200         # one line per request, with the server that answered
       pskit cluster balancer sync prod                # rewrite its config now (deploy / join / leave do it)
       pskit cluster balancer remove prod
 
     pskit deploy, pskit remove, cluster join and cluster leave update it. Logs, tests and the admin API keep
     using the master. A second deployment on the same cluster needs its own port:
-    provider.options.cluster.balancer_port.
+    provider.options.cluster.balancer_port. To share one load balancer by path between clusters and projects,
+    use pskit lb instead. Algorithms and their trade-offs: pskit lb algorithms.
     """
 
 
@@ -1732,12 +1768,16 @@ def cluster_balancer() -> None:
 @click.option("--port", default=80, show_default=True, type=click.IntRange(1, 65535),
               help="Port users call on the load balancer.")
 @click.option("--address", default="", help="Its address in the URL users call (default: the server's host).")
+@_ALGORITHM_OPTION
+@_WEIGHT_OPTION
 @_CONFIG_OPTION
-def cluster_balancer_set(name: str, server: str, port: int, address: str, config_path: Optional[str]) -> None:
-    """Make saved SERVER the load balancer of cluster NAME (installs Docker and nginx there)."""
+def cluster_balancer_set(name: str, server: str, port: int, address: str, algorithm: Optional[str],
+                         weights: Tuple[str, ...], config_path: Optional[str]) -> None:
+    """Make saved SERVER the load balancer of cluster NAME (installs Docker and OpenResty there)."""
     from ..core.onprem_cluster import set_balancer
 
-    item = _cluster_call(set_balancer, _cluster_root(config_path), name, server, echo, port=port, address=address)
+    item = _cluster_call(set_balancer, _cluster_root(config_path), name, server, echo, port=port, address=address,
+                         algorithm=algorithm, weights=_weights(weights))
     ok(f"{server} is the load balancer of {name}")
     for stack, url in sorted((item.get("balancer") or {}).get("urls", {}).items()):
         echo(f"  {stack}: {url}")
@@ -1776,6 +1816,275 @@ def cluster_balancer_logs(name: str, lines: int, config_path: Optional[str]) -> 
     from ..core.onprem_cluster import balancer_logs
 
     click.echo(_cluster_call(balancer_logs, _cluster_root(config_path), name, lines).rstrip("\n"))
+
+
+# ----------------------------------------------------------------------------- firewall
+@cli.command(short_help="Ports each on-prem server must open (inbound / outbound), with server names.")
+@click.option("--server", "only", default="", help="Only this server (name or address).")
+@click.option("--json", "as_json", is_flag=True)
+@_CONFIG_OPTION
+def firewall(only: str, as_json: bool, config_path: Optional[str]) -> None:
+    """The firewall rules this project's on-prem servers need now: deployments, function groups, clusters, load
+    balancers and resources, per server, with who connects and why, and ufw commands.
+
+    \b
+    Examples:
+      pskit firewall
+      pskit firewall --server edge2
+      pskit firewall --json
+
+    Each step also prints the rules it adds (cluster create / join, deploy, lb create / attach, resources onprem
+    create). REQUIRED: it does not work without it; NEEDED: for that feature; optional: pskit falls back to SSH.
+    Every role and port: docs/onprem-network.md.
+    """
+    from ..core import onprem_network as network
+
+    servers = network.by_server(network.project(_cluster_root(config_path)))
+    if only:
+        servers = [s for s in servers if only in (s["server"], s["address"])]
+    if as_json:
+        click.echo(json.dumps(servers, indent=2))
+        return
+    if not servers:
+        echo("Nothing on premises yet (deploy, create a cluster or a load balancer first).")
+        return
+    rules = [r for s in servers for r in s["rules"]]
+    for line in network.lines("this project", rules):
+        echo(line)
+
+
+# ----------------------------------------------------------------------------- load balancers
+@cli.group("lb", short_help="Shared on-prem load balancers: one URL, a path per project or cluster.")
+def lb_group() -> None:
+    """Load balancers shared by projects and clusters: http://<lb>/xyz/, http://<lb>/abc/, ...
+
+    \b
+    Examples:
+      pskit lb algorithms                              # the 6 algorithms, static / dynamic, pros and cons
+      pskit lb create edge --server lb1 --algorithm least_time
+      pskit lb attach edge --cluster prod               # every deployment on prod: http://<lb1>/<service>/
+      pskit lb status edge                              # its routes (all projects), health, server use
+      pskit lb update edge --algorithm weighted_round_robin --weight app1=3 --weight app2=1
+      pskit lb routes remove edge xyz
+      pskit lb logs edge -n 200
+      pskit lb remove edge
+
+    A project puts itself on one in pskit.yml: provider.options.balancer: edge (path: the service name), or
+    {name: edge, path: xyz, algorithm: sticky_round_robin}. pskit deploy updates its route, pskit remove drops it.
+    Routes are kept on the load balancer server, so projects in other folders or on other machines share it:
+    there, pskit lb create edge --server lb1 finds the running one and adds it.
+    """
+
+
+def _lb_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    from ..core.onprem_balancers import BalancerError
+    from ..core.onprem_cluster import ClusterError
+    from ..core.onprem_services import ServiceError
+
+    try:
+        return fn(*args, **kwargs)
+    except (BalancerError, ClusterError, ServiceError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+@lb_group.command("algorithms")
+@click.option("--json", "as_json", is_flag=True)
+def lb_algorithms(as_json: bool) -> None:
+    """The load balancing algorithms: how each picks a server, static or dynamic, pros, cons, when to use it."""
+    from ..core.onprem_lb import DEFAULT_ALGORITHM, catalog
+
+    items = catalog()
+    if as_json:
+        click.echo(json.dumps(items, indent=2))
+        return
+    for kind, title in (("static", "Static: the rule is fixed, live load is not measured"),
+                        ("dynamic", "Dynamic: decided per request from live measurements")):
+        echo(click.style(title, bold=True))
+        for item in (i for i in items if i["kind"] == kind):
+            default = " (default)" if item["name"] == DEFAULT_ALGORITHM else ""
+            echo(f"  {click.style(item['name'], fg='cyan')}{default}: {item['summary']}")
+            for pro in item["pros"]:
+                echo(f"      + {pro}")
+            for con in item["cons"]:
+                echo(f"      - {con}")
+            echo(f"      best for: {item['best_for']}")
+        echo("")
+
+
+@lb_group.command("create")
+@click.argument("name")
+@click.option("--server", required=True, help="Saved server that runs it (outside the clusters it serves).")
+@click.option("--port", default=None, type=click.IntRange(1, 65535), help="Port users call (default 80).")
+@click.option("--address", default="", help="Its address in the URLs (default: the server's host).")
+@_ALGORITHM_OPTION
+@_WEIGHT_OPTION
+@_CONFIG_OPTION
+def lb_create(name: str, server: str, port: Optional[int], address: str, algorithm: Optional[str],
+              weights: Tuple[str, ...], config_path: Optional[str]) -> None:
+    """Make saved SERVER load balancer NAME (Docker and OpenResty there), or add the one already running there."""
+    from ..core.onprem_balancers import create_balancer
+
+    item = _lb_call(create_balancer, _cluster_root(config_path), name, server, echo, port=port, address=address,
+                    algorithm=algorithm, weights=_weights(weights))
+    ok(f"load balancer {name}: {item['url']} ({item['algorithm_label']}, {item['kind']})")
+
+
+@lb_group.command("update")
+@click.argument("name")
+@click.option("--port", default=None, type=click.IntRange(1, 65535))
+@click.option("--address", default=None)
+@_ALGORITHM_OPTION
+@_WEIGHT_OPTION
+@_CONFIG_OPTION
+def lb_update(name: str, port: Optional[int], address: Optional[str], algorithm: Optional[str],
+              weights: Tuple[str, ...], config_path: Optional[str]) -> None:
+    """Change the port, default algorithm, weights or address (routes on the default algorithm switch too)."""
+    from ..core.onprem_balancers import update_balancer
+
+    item = _lb_call(update_balancer, _cluster_root(config_path), name, echo, port=port, address=address,
+                    algorithm=algorithm, weights=_weights(weights))
+    ok(f"load balancer {name}: {item['url']} ({item['algorithm_label']})")
+
+
+@lb_group.command("list")
+@click.option("--json", "as_json", is_flag=True)
+@_CONFIG_OPTION
+def lb_list(as_json: bool, config_path: Optional[str]) -> None:
+    """Load balancers this project uses."""
+    from ..core.onprem_balancers import list_balancers
+
+    items = list_balancers(_cluster_root(config_path))
+    if as_json:
+        click.echo(json.dumps(items, indent=2))
+        return
+    if not items:
+        echo("No load balancers yet: pskit lb create NAME --server SERVER")
+        return
+    for item in items:
+        clusters = f", clusters: {', '.join(item['clusters'])}" if item["clusters"] else ""
+        echo(f"  {item['name']}: {item['url']} on {item['server']} ({item['algorithm_label']}{clusters})")
+
+
+@lb_group.command("status")
+@click.argument("name")
+@click.option("--json", "as_json", is_flag=True)
+@_CONFIG_OPTION
+def lb_status(name: str, as_json: bool, config_path: Optional[str]) -> None:
+    """Whether it runs, its server's use, and every route on it (from every project)."""
+    from ..core.onprem_balancers import status
+
+    current = _lb_call(status, _cluster_root(config_path), name)
+    if as_json:
+        click.echo(json.dumps(current, indent=2))
+        return
+    state = current.get("state")
+    echo(f"{name}: {current['url']} on {current['server']} - {state}, default {current['algorithm_label']}")
+    if current.get("reachable") is False:
+        fail(f"{current['server']} does not answer: {current.get('error')}")
+    if current.get("cpu") is not None:
+        echo(f"  server: cpu {current.get('cpu')}%, memory {current.get('memory')}%, disk {current.get('disk')}%")
+    if current.get("drift"):
+        echo("  note: another project changed its settings; pskit lb sync takes them from this project again")
+    for route in current.get("routes") or []:
+        mark = "" if route.get("mine") else " (another project)"
+        inherit = " (default)" if route.get("inherits") else ""
+        servers = ", ".join(b.get("server") or b["address"] for b in route.get("backends") or [])
+        echo(f"  {route['url']} -> {route['owner']}{mark}: {route['effective_algorithm']}{inherit} over {servers}")
+    if not current.get("routes"):
+        echo("  no routes yet: pskit lb attach NAME --cluster CLUSTER, or provider.options.balancer in pskit.yml")
+    if state != "running":
+        fail(f"load balancer {name} is not running: pskit lb sync {name}")
+
+
+@lb_group.command("attach")
+@click.argument("name")
+@click.option("--cluster", "cluster_name", required=True, help="Cluster whose deployments it serves.")
+@_CONFIG_OPTION
+def lb_attach(name: str, cluster_name: str, config_path: Optional[str]) -> None:
+    """Serve every deployment of a cluster on load balancer NAME (http://<lb>/<service>/), now and on deploys."""
+    from ..core.onprem_balancers import attach_cluster
+
+    _lb_call(attach_cluster, _cluster_root(config_path), name, cluster_name, echo)
+    ok(f"{name} serves cluster {cluster_name}")
+
+
+@lb_group.command("detach")
+@click.argument("name")
+@click.option("--cluster", "cluster_name", required=True)
+@_CONFIG_OPTION
+def lb_detach(name: str, cluster_name: str, config_path: Optional[str]) -> None:
+    """Stop serving a cluster's deployments on load balancer NAME."""
+    from ..core.onprem_balancers import detach_cluster
+
+    _lb_call(detach_cluster, _cluster_root(config_path), name, cluster_name, echo)
+    ok(f"{name} no longer serves cluster {cluster_name}")
+
+
+@lb_group.group("routes")
+def lb_routes() -> None:
+    """Routes on a load balancer (pskit lb status lists them)."""
+
+
+@lb_routes.command("remove")
+@click.argument("name")
+@click.argument("path")
+@click.option("--yes", is_flag=True, help="Do not ask.")
+@_CONFIG_OPTION
+def lb_routes_remove(name: str, path: str, yes: bool, config_path: Optional[str]) -> None:
+    """Remove the route at PATH (xyz, or port-8081) from load balancer NAME, whichever project owns it."""
+    from ..core.onprem_balancers import remove_route
+
+    if not yes:
+        click.confirm(f"Remove /{path.strip('/')} from load balancer {name}?", abort=True)
+    _lb_call(remove_route, _cluster_root(config_path), name, path, echo)
+
+
+@lb_group.command("sync")
+@click.argument("name")
+@_CONFIG_OPTION
+def lb_sync(name: str, config_path: Optional[str]) -> None:
+    """Rewrite the load balancer from this project's settings: every route, and attached clusters."""
+    from ..core.onprem_balancers import sync_balancer
+
+    _lb_call(sync_balancer, _cluster_root(config_path), name, echo)
+    ok(f"load balancer {name} updated")
+
+
+@lb_group.command("logs")
+@click.argument("name")
+@click.option("-n", "--lines", default=100, show_default=True, type=click.IntRange(1, 10000))
+@_CONFIG_OPTION
+def lb_logs(name: str, lines: int, config_path: Optional[str]) -> None:
+    """Recent requests (upstream= is the server that answered) and errors."""
+    from ..core.onprem_balancers import logs
+
+    click.echo(_lb_call(logs, _cluster_root(config_path), name, lines).rstrip("\n"))
+
+
+@lb_group.command("remove")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Also when other projects still use it (their URLs stop too).")
+@click.option("--yes", is_flag=True, help="Do not ask.")
+@_CONFIG_OPTION
+def lb_remove(name: str, force: bool, yes: bool, config_path: Optional[str]) -> None:
+    """Stop load balancer NAME on its server and forget it."""
+    from ..core.onprem_balancers import remove_balancer
+
+    if not yes:
+        click.confirm(f"Stop load balancer {name}? Every URL on it stops answering.", abort=True)
+    _lb_call(remove_balancer, _cluster_root(config_path), name, echo, force=force)
+    ok(f"load balancer {name} removed")
+
+
+@lb_group.command("forget")
+@click.argument("name")
+@_CONFIG_OPTION
+def lb_forget(name: str, config_path: Optional[str]) -> None:
+    """Forget load balancer NAME in this project only (it keeps running for other projects)."""
+    from ..core.onprem_balancers import forget_balancer
+
+    _lb_call(forget_balancer, _cluster_root(config_path), name)
+    ok(f"forgot {name}")
 
 
 # ----------------------------------------------------------------------------- settings

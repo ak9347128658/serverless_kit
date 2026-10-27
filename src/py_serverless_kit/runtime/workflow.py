@@ -331,7 +331,12 @@ def in_process_runner(provider: str = "local") -> TaskRunner:
     from .dispatch import execute
 
     def run(function: str, data: Any) -> Any:
+        from .invoke import NOT_ROUTED, route
+
         event = Event(type=EventType.WORKFLOW, provider=provider, function=function, data=data)
+        routed = route(function, event)  # a step on another server (on-prem placement)
+        if routed is not NOT_ROUTED:
+            return routed
         result = execute(event, Context(function=function, provider=provider), function)
         return result
 

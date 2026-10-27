@@ -96,12 +96,17 @@ def _int(params: Dict[str, List[str]], name: str, default: int) -> int:
 def _deployed_on(root: Path, stage: str) -> Optional[Dict[str, Any]]:
     """Where ``onprem-<stage>`` was last deployed: the studio's server pickers default to it."""
     from ..core.onprem_control import deployed_host, deployed_on
+    from .system import deployment_record
 
     data = deployed_host(root, stage)
     if data is None:
         return None
-    return {**deployed_on(data["spec"], data.get("server"), data.get("cluster")),
-            "deployed_at": data.get("deployed_at")}
+    out = {**deployed_on(data["spec"], data.get("server"), data.get("cluster")), "deployed_at": data.get("deployed_at")}
+    record = deployment_record(root, "onprem", stage) or {}
+    for key in ("groups", "balancers"):  # provider.options.placement / .balancer (deployment.json)
+        if record.get(key):
+            out[key] = record[key]
+    return out
 
 
 def _obj(body: Any) -> Dict[str, Any]:
@@ -292,7 +297,8 @@ def make_handler(app: Studio) -> type:
                 events = body.get("events") or []
                 if not isinstance(events, list):
                     raise StudioError(400, "events must be a list")
-                return 200, project.ensure_handler(root, str(body.get("handler") or ""), [str(e) for e in events])
+                return 200, project.ensure_handler(root, str(body.get("handler") or ""), [str(e) for e in events],
+                                                   subproject=bool(body.get("subproject")))
             if parts == ["discover"] and method == "GET":
                 provider = _param(params, "provider") or str((app.raw_config().get("provider") or {}).get("name") or "")
                 return 200, discover(
@@ -358,6 +364,12 @@ def make_handler(app: Studio) -> type:
                 return self._onprem_machines(method, parts, params)
             if parts and parts[0] == "onprem-clusters":
                 return self._onprem_clusters(method, parts[1:], params)
+            if parts and parts[0] == "onprem-balancers":
+                return self._onprem_balancers(method, parts[1:], params)
+            if parts == ["onprem-firewall"] and method == "GET":
+                from ..core import onprem_network as network
+
+                return 200, {"servers": network.by_server(network.project(app.root))}
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":
@@ -605,7 +617,7 @@ def make_handler(app: Studio) -> type:
                     label = f"Create cluster {name} ({clu.ORCHESTRATORS[orch]['label']})"
                     return 202, {"job_id": app.jobs.run_callable("onprem-cluster", create, label=label).id}
                 if len(rest) == 1 and method == "GET":
-                    return 200, clu.public(rest[0], clu.get_cluster(root, rest[0]))
+                    return 200, clu.public(rest[0], clu.get_cluster(root, rest[0]), root)
                 if len(rest) == 2 and rest[1] == "status" and method == "GET":
                     current = clu.status(root, rest[0])
                     watcher.last[rest[0]] = current
@@ -646,8 +658,11 @@ def make_handler(app: Studio) -> type:
                         elif action == "scale":
                             clu.scale(root, name, str(body.get("stack") or ""), int(body.get("replicas") or 0), job.emit)
                         elif action == "balancer-set":
+                            weights = body.get("weights")
                             clu.set_balancer(root, name, server, job.emit, port=int(body.get("port") or 80),
-                                             address=str(body.get("address") or ""))
+                                             address=str(body.get("address") or ""),
+                                             algorithm=str(body.get("algorithm") or "") or None,
+                                             weights=weights if isinstance(weights, dict) else None)
                         elif action == "balancer-remove":
                             clu.remove_balancer(root, name, job.emit)
                         elif action == "balancer-sync":
@@ -664,6 +679,96 @@ def make_handler(app: Studio) -> type:
             except (clu.ClusterError, ServiceError, ValueError) as exc:
                 raise StudioError(400, str(exc)) from None
             raise StudioError(404 if method == "GET" else 405, "unknown cluster endpoint")
+
+        def _onprem_balancers(self, method: str, rest: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
+            """Named load balancers shared by projects and clusters (``core/onprem_balancers.py``)."""
+            from ..core import onprem_balancers as bal
+            from ..core import onprem_cluster as clu
+            from ..core import onprem_lb
+            from ..core.onprem_servers import list_servers
+            from ..core.onprem_services import ServiceError
+
+            root = app.root
+            try:
+                if not rest and method == "GET":
+                    return 200, {
+                        "balancers": bal.list_balancers(root),
+                        "algorithms": onprem_lb.catalog(),
+                        "default_algorithm": onprem_lb.DEFAULT_ALGORITHM,
+                        "servers": list_servers(root),
+                        "clusters": [{"name": c["name"], "nodes": [n["server"] for n in c["nodes"]],
+                                      "balancer": (c.get("balancer") or {}).get("server")}
+                                     for c in clu.list_clusters(root)],
+                    }
+                if not rest and method == "POST":
+                    body = _obj(self._body())
+                    name, server = str(body.get("name") or ""), str(body.get("server") or "")
+                    if not name or not server:
+                        raise StudioError(400, "name and server are required")
+                    if name in bal.load_balancers(root):
+                        raise StudioError(400, f"load balancer {name!r} already exists")
+                    port = body.get("port")
+                    weights = body.get("weights")
+                    attach = [str(c) for c in body.get("clusters") or [] if c]
+
+                    def create(job: Any) -> int:
+                        bal.create_balancer(root, name, server, job.emit, port=int(port) if port else None,
+                                            algorithm=str(body.get("algorithm") or "") or None,
+                                            address=str(body.get("address") or ""),
+                                            weights=weights if isinstance(weights, dict) else None)
+                        for cluster in attach:
+                            bal.attach_cluster(root, name, cluster, job.emit)
+                        return 0
+
+                    label = f"Create load balancer {name} on {server}"
+                    return 202, {"job_id": app.jobs.run_callable("onprem-balancer", create, label=label).id}
+                if len(rest) == 1 and method == "GET":
+                    return 200, bal.public(rest[0], bal.get_balancer(root, rest[0]))
+                if len(rest) == 2 and rest[1] == "status" and method == "GET":
+                    return 200, bal.status(root, rest[0])
+                if len(rest) == 2 and rest[1] == "logs" and method == "GET":
+                    return 200, {"text": bal.logs(root, rest[0], _int(params, "lines", 100))}
+                if len(rest) == 2 and rest[1] == "forget" and method == "POST":
+                    bal.forget_balancer(root, rest[0])
+                    return 200, {"forgotten": rest[0]}
+                actions = ("update", "attach", "detach", "sync", "remove", "route-remove")
+                if len(rest) == 2 and rest[1] in actions and method == "POST":
+                    name, action = rest
+                    body = _obj(self._body())
+                    bal.get_balancer(root, name)  # 400 for an unknown load balancer before starting a job
+                    cluster = str(body.get("cluster") or "")
+                    if action in ("attach", "detach") and not cluster:
+                        raise StudioError(400, "cluster is required")
+                    if action == "route-remove" and not body.get("path"):
+                        raise StudioError(400, "path is required")
+                    weights = body.get("weights")
+
+                    def run(job: Any) -> int:
+                        if action == "update":
+                            bal.update_balancer(root, name, job.emit,
+                                                port=int(body["port"]) if body.get("port") else None,
+                                                algorithm=str(body.get("algorithm") or "") or None,
+                                                address=str(body.get("address") or "") or None,
+                                                weights=weights if isinstance(weights, dict) else None)
+                        elif action == "attach":
+                            bal.attach_cluster(root, name, cluster, job.emit)
+                        elif action == "detach":
+                            bal.detach_cluster(root, name, cluster, job.emit)
+                        elif action == "sync":
+                            bal.sync_balancer(root, name, job.emit)
+                        elif action == "route-remove":
+                            bal.remove_route(root, name, str(body["path"]), job.emit)
+                        else:
+                            bal.remove_balancer(root, name, job.emit, force=bool(body.get("force")))
+                        return 0
+
+                    label = {"update": "Update", "attach": f"Attach cluster {cluster} to", "detach":
+                             f"Detach cluster {cluster} from", "sync": "Rewrite", "remove": "Remove",
+                             "route-remove": f"Remove /{body.get('path')} from"}[action] + f" load balancer {name}"
+                    return 202, {"job_id": app.jobs.run_callable("onprem-balancer", run, label=label).id}
+            except (bal.BalancerError, clu.ClusterError, ServiceError, ValueError) as exc:
+                raise StudioError(400, str(exc)) from None
+            raise StudioError(404 if method == "GET" else 405, "unknown load balancer endpoint")
 
         def _onprem_machines(self, method: str, parts: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
             """Saved SSH servers (add / test / shell / remove) and browser terminals (ttyd in Docker)."""

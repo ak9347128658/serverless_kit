@@ -12,6 +12,7 @@ import pytest
 
 from py_serverless_kit.core import onprem_cluster as clu
 from py_serverless_kit.core import onprem_cluster_scripts as scripts
+from py_serverless_kit.core import onprem_lb as lb
 from py_serverless_kit.core import onprem_servers as srv
 
 STAT_A = "cpu  100 0 100 800 0 0 0 0 0 0"
@@ -966,20 +967,25 @@ def _deploy(servers: Path, run, lines: List[str], **settings) -> dict:
 
 
 def test_balancer_conf_and_scripts():
-    conf = scripts.balancer_conf("pskit-shop-dev", 80, 8080, ["10.0.0.6", "10.0.0.7"], ["10.0.0.5"])
-    assert "upstream pskit_pskit_shop_dev {" in conf and "listen 80;" in conf
+    backends = [lb.backend("10.0.0.6", 8080, server="edge2"), lb.backend("10.0.0.7", 8080, server="edge3"),
+                lb.backend("10.0.0.5", 8080, backup=True, server="edge1")]
+    conf = lb.port_route_conf("port-80", 80, "least_connections", backends, comment="pskit-shop-dev")
+    assert "upstream pskit_port_80 {" in conf and "listen 80;" in conf and "# pskit-shop-dev" in conf
     assert "server 10.0.0.6:8080 max_fails=3 fail_timeout=10s;" in conf
-    assert "server 10.0.0.5:8080 backup;" in conf and "least_conn;" in conf
-    assert "proxy_pass http://pskit_pskit_shop_dev;" in conf
-    assert "server [fd00::6]:8080" in scripts.balancer_conf("s", 80, 8080, ["fd00::6"])
+    assert "server 10.0.0.5:8080 backup;" in conf and "least_conn;" in conf and "zone pskit_port_80 64k;" in conf
+    assert "proxy_pass http://pskit_port_80;" in conf
+    assert "server [fd00::6]:8080" in lb.upstream_conf("k", "round_robin", [lb.backend("fd00::6", 8080)])
     with pytest.raises(ValueError):
-        scripts.balancer_conf("s", 80, 8080, ["10.0.0.6; evil"])
-    apply = scripts.balancer_apply_script({"00-pskit.conf": scripts.BALANCER_COMMON, "s.conf": conf}, [80, 8081])
+        lb.backend("10.0.0.6; evil", 8080)
+    files = {**lb.base_files("", 80, "least_connections"), "conf.d/r-port-80.conf": conf}
+    apply = lb.apply_script("", files, replace_routes=True, checks={"80": "http://127.0.0.1:80/__pskit/health"})
     assert "nginx -t" in apply and "nginx -s reload" in apply and "--network host" in apply
-    assert '-v "$lb/conf.d:/etc/nginx/conf.d:ro" nginx:1.27-alpine' in apply
-    assert "for p in 80 8081; do" in apply and apply.endswith("echo PSKIT_LB_DONE=1\n")
-    for text in (apply, scripts.balancer_apply_script({}, []), scripts.balancer_remove_script(),
-                 scripts.balancer_logs_script(50)):
+    assert '-v "$lb/conf.d:/etc/nginx/conf.d:ro" -v "$lb/pskit-lua:/etc/nginx/pskit-lua:ro"' in apply
+    assert lb.LB_IMAGE in apply and 'rm -f "$next"/conf.d/*.conf' in apply
+    assert "PSKIT_LB_OK=80" in apply and apply.endswith("echo PSKIT_LB_DONE=1\n")
+    with pytest.raises(ValueError):
+        lb.apply_script("", {"../etc/passwd": "x"})
+    for text in (apply, lb.apply_script("", {}), lb.remove_script(""), lb.logs_script("", 50)):
         assert text.startswith("#!/bin/sh\nset -eu\n")
         _sh_ok(text)
 

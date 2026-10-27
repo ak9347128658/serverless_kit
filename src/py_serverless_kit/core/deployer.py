@@ -131,7 +131,13 @@ class Deployer:
         )
         if self.project.config.provider.name == "onprem":
             self._remember_onprem(record)
+            self._onprem_balancers(record)
         self.save_record(record)
+        if self.project.config.provider.name == "onprem":
+            from . import onprem_network as network
+
+            network.emit_rules(self.echo, f"{self.project.config.service} ({self.project.config.provider.stage})",
+                               network.deployment(self.project.root, self.project.work_dir))
         self.run_hook("after_deploy")
         return record
 
@@ -160,6 +166,8 @@ class Deployer:
                     self.echo(f"  keeping {address} (delete later with `pskit resources delete`)")
                 self.runner.state_rm(kept)
         self.runner.destroy(auto_approve=auto_approve)
+        if project.config.provider.name == "onprem":
+            self._drop_routes()
         record_path = project.work_dir / RECORD_FILE
         if record_path.is_file():
             record = json.loads(record_path.read_text("utf-8"))
@@ -169,6 +177,18 @@ class Deployer:
             record_path.write_text(json.dumps(record, indent=2), "utf-8")
         self.run_hook("after_remove")
         return kept
+
+    def _drop_routes(self) -> None:
+        """``pskit remove``: this deployment's routes leave the load balancers it was on."""
+        from .onprem_balancers import BalancerError, load_balancers, remove_owner
+
+        known = load_balancers(self.project.root)
+        for route in self._remembered_routes():
+            if route.get("name") in known and route.get("owner"):
+                try:
+                    remove_owner(self.project.root, str(route["name"]), str(route["owner"]), self.echo)
+                except BalancerError as exc:
+                    self.echo(f"  WARNING: {exc}")
 
     # ---------------------------------------------------------------- data resources
     def cloud_resources(self) -> Dict[str, List[Dict[str, Any]]]:
@@ -236,6 +256,84 @@ class Deployer:
         data = remember_deploy(self.project.work_dir, server or None, name or None)
         if data is not None:
             record["deployed_on"] = deployed_on(data["spec"], data["server"], data.get("cluster"))
+        groups = (record.get("outputs") or {}).get("groups") if isinstance(record.get("outputs"), dict) else None
+        if isinstance(groups, dict) and groups:
+            record["groups"] = groups  # provider.options.placement: where each group of functions runs
+
+    def _onprem_balancers(self, record: Dict[str, Any]) -> None:
+        """After an on-prem deploy: this deployment's routes on the load balancers in provider.options.balancer."""
+        from .onprem_control import deployed_host
+
+        data = deployed_host(self.project.root, self.project.config.provider.stage)
+        groups = record.get("groups") if isinstance(record.get("groups"), dict) else None
+        routes = self._sync_balancers(self.project.config.provider.options, data, groups)
+        if routes is not None:
+            record["balancers"] = routes
+            self._remember_routes(routes)
+
+    def _sync_balancers(self, options: Dict[str, Any], data: Optional[Dict[str, Any]],
+                        groups: Optional[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        """``provider.options.balancer``: this deployment's route on each named load balancer (only warns)."""
+        from .onprem_balancers import BalancerError, parse_option, sync_project
+        from .onprem_cluster import scripts as cluster_scripts
+
+        try:
+            wanted = parse_option(options.get("balancer"))
+        except ValueError as exc:
+            self.echo(f"  WARNING: provider.options.balancer: {exc}")
+            return None
+        previous = self._remembered_routes()
+        if not wanted and not previous:
+            return None
+        cfg = self.project.config
+        owner = cluster_scripts.stack_name(cfg.service, cfg.provider.stage)
+        try:
+            backends = self._backends(data, groups)
+            return sync_project(self.project.root, wanted, owner, cfg.service, cfg.provider.stage, backends,
+                                self.echo, previous=previous)
+        except (BalancerError, ValueError) as exc:
+            self.echo(f"  WARNING: load balancer not updated: {exc}")
+            return None
+
+    def _backends(self, data: Optional[Dict[str, Any]], groups: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Where the load balancer sends this deployment's HTTP: a cluster's servers, or each host serving HTTP
+        (with placement, every group's host: any of them passes a route on to the group that has it)."""
+        from urllib.parse import urlsplit
+
+        from .onprem_balancers import cluster_backends
+        from .onprem_cluster import _ip, get_cluster
+
+        spec = (data or {}).get("spec") or {}
+        cluster = (data or {}).get("cluster")
+        port = int(spec.get("port") or 8080)
+        if cluster:
+            return cluster_backends(get_cluster(self.project.root, str(cluster)), port)
+        endpoints = [g.get("endpoint") for g in (groups or {}).values()] if groups else [spec.get("endpoint")]
+        out = []
+        for endpoint in endpoints:
+            url = urlsplit(str(endpoint or ""))
+            host = url.hostname or ""
+            if not host or host in ("127.0.0.1", "localhost", "::1"):
+                raise ValueError(f"the host answers on {endpoint}, which the load balancer server cannot reach:"
+                                 " set provider.options.advertise (and host: 0.0.0.0)")
+            out.append({"address": _ip(host), "port": int(url.port or port), "server": host})
+        return out
+
+    def _remembered_routes(self) -> List[Dict[str, Any]]:
+        try:
+            data = json.loads((self.project.work_dir / "onprem_deployed.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [r for r in data.get("balancers") or [] if isinstance(r, dict)]
+
+    def _remember_routes(self, routes: List[Dict[str, Any]]) -> None:
+        path = self.project.work_dir / "onprem_deployed.json"
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return
+        data["balancers"] = routes
+        path.write_bytes((json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
     def load_record(self) -> Optional[Dict[str, Any]]:
         path = self.project.work_dir / RECORD_FILE

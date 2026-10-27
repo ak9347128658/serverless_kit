@@ -33,6 +33,7 @@ names each one.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 import re
@@ -42,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..config.schema import ResourceConfig, ServiceConfig
+from ..config.schema import ResourceConfig, ServiceConfig, is_generated_handler
 from ..runtime.cron import CronError, next_cron, resolve_zone
 from ..runtime.drivers import S3_PRESETS
 from ..runtime.onprem_host import ENV_FILE
@@ -157,6 +158,13 @@ def _stop_previous():
         pass
 
 
+def _long(path):
+    # Windows: vendored packages nest deeply; an extended path lifts the 260-character limit.
+    if sys.platform == "win32" and not str(path).startswith("\\\\\\\\?\\\\"):
+        return "\\\\\\\\?\\\\" + str(Path(path).resolve())
+    return str(path)
+
+
 def _activate():
     staging = ROOT / "staging"
     app = ROOT / "app"
@@ -164,12 +172,12 @@ def _activate():
         return
     _stop_previous()
     if app.exists():
-        shutil.rmtree(app)
+        shutil.rmtree(_long(app))
     try:
         staging.rename(app)
     except OSError:
-        shutil.copytree(staging, app)
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.copytree(_long(staging), _long(app))
+        shutil.rmtree(_long(staging), ignore_errors=True)
 
 
 if (ROOT / "staging").is_dir():
@@ -300,6 +308,8 @@ class OnPremProvider(Provider):
             "deploy",
             "env_file",
             "cluster",
+            "placement",
+            "balancer",
         }
         known |= set(_TUNING)
         for key, (kind, low) in _TUNING.items():
@@ -471,6 +481,14 @@ class OnPremProvider(Provider):
                         bad_dead = _safe_name(dead, "dead_letter queue")
                         if bad_dead:
                             issues.append(Issue("error", bad_dead, f"functions.{name}"))
+        issues.extend(self._placement_validation(config))
+        if options.get("balancer") not in (None, "", False):
+            from ..core.onprem_balancers import parse_option
+
+            try:
+                parse_option(options["balancer"])
+            except ValueError as exc:
+                issues.append(Issue("error", str(exc), "provider.options.balancer"))
         dropped = _foreign_names(config.provider.terraform.extra)
         if dropped:
             issues.append(
@@ -510,11 +528,13 @@ class OnPremProvider(Provider):
         path = Path(str(config.provider.options.get("env_file") or ""))
         return path if path.is_absolute() else root / path
 
+    _group_stage: Optional[str] = None  # while one placement group renders: its stage (unit, paths, container)
+
     def _deploy(self, config: ServiceConfig) -> Any:
         return parse_deploy(
             config.provider.options,
             service=config.service,
-            stage=config.provider.stage,
+            stage=self._group_stage or config.provider.stage,
             runtime=config.provider.runtime,
             architecture=config.provider.architecture,
         )
@@ -561,7 +581,7 @@ class OnPremProvider(Provider):
                 return text
             return spec.remote_path.rstrip("/") + "/" + text.lstrip("./")
         if not raw:
-            path = root / ".pskit" / "onprem-data" / f"{config.service}-{config.provider.stage}"
+            path = root / ".pskit" / "onprem-data" / f"{config.service}-{self._group_stage or config.provider.stage}"
         else:
             path = Path(str(raw))
             if not path.is_absolute():
@@ -736,7 +756,7 @@ class OnPremProvider(Provider):
                 "environment": ctx.environment(name, fn),
                 "events": events,
             }
-        unit = unit_name(cfg.service, cfg.provider.stage)
+        unit = unit_name(cfg.service, self._group_stage or cfg.provider.stage)
         extra: Dict[str, Any] = {}
         deploy_json = spec.as_json()
         cluster = _cluster_settings(options)
@@ -772,21 +792,36 @@ class OnPremProvider(Provider):
             "unit_name": unit,
         }
 
-    def write_project(self, ctx: RenderContext, spec: Dict[str, Any]) -> str:
-        root = ctx.work_dir / APP_DIR
+    def write_project(self, ctx: RenderContext, spec: Dict[str, Any], app_dir: str = APP_DIR,
+                      exclude: Tuple[str, ...] = (), requirements: Tuple[str, ...] = ()) -> str:
+        """Write one host under ``<work_dir>/<app_dir>``. A placement group leaves out the sub-project folders of
+        functions placed elsewhere (``exclude``) and installs its functions' ``requirements`` into its bundle."""
+        root = ctx.work_dir / app_dir
         staging = root / "staging"
         if staging.exists():
             _rmtree(staging)
         root.mkdir(parents=True, exist_ok=True)
         build = ctx.artifact.build_dir
         if build is not None and Path(build).is_dir():
+            ignore = _ignore_folders(Path(build), exclude) if exclude else None
             if sys.platform == "win32":
                 # Vendored packages nest deeply; extended paths lift the 260-character limit.
-                shutil.copytree(_extended_path(Path(build)), _extended_path(staging))
+                shutil.copytree(_extended_path(Path(build)), _extended_path(staging), ignore=ignore)
             else:
-                shutil.copytree(build, staging)
+                shutil.copytree(build, staging, ignore=ignore)
         else:  # pragma: no cover - the packager always sets build_dir
             staging.mkdir(parents=True)
+        if requirements and ctx.artifact.build_dir is not None and not ctx.artifact.skip_deps:
+            from ..packaging.builder import _pip_install
+
+            reqs = root / "requirements.group.txt"
+            reqs.write_bytes(("\n".join(requirements) + "\n").encode("utf-8"))
+            try:
+                _pip_install(reqs, staging, self.pip_platform_for(ctx.config), ctx.config.package.pip_args)
+            except Exception as exc:  # noqa: BLE001 - BuildError: say which group
+                raise ValueError(f"installing the requirements of {spec.get('group')} ({', '.join(requirements)})"
+                                 f" failed. Functions that need conflicting versions belong on different servers"
+                                 f" (provider.options.placement).\n{exc}") from None
         text = json.dumps(spec, indent=2, sort_keys=True) + "\n"
         _write(root / "pskit_host.json", text)
         env_target = root / ENV_FILE
@@ -828,9 +863,13 @@ class OnPremProvider(Provider):
             user = str((deploy.get("ssh") or {}).get("user") or "pskit")
             desc = f"pskit {spec['service']} ({spec['stage']})"
             _write(root / "pskit.service", systemd_unit_text(desc, remote, user))
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        extra = "\n".join(("exclude",) + exclude + ("requirements",) + requirements) if (exclude or requirements) else ""
+        return hashlib.sha256((text + extra).encode("utf-8")).hexdigest()
 
     def render_resources(self, doc: TerraformDoc, ctx: RenderContext) -> None:
+        if _placement_of(ctx.config.provider.options):
+            self._render_groups(doc, ctx)
+            return
         spec = self._spec(ctx)
         digest = self.write_project(ctx, spec)
         doc.resource(
@@ -892,11 +931,174 @@ class OnPremProvider(Provider):
         if extra:
             doc.merge(extra)
 
+    # ------------------------------------------------------------------ placement (functions on several servers)
+    def bundle_function_requirements(self, config: ServiceConfig) -> bool:
+        placement = _placement_of(config.provider.options)
+        # Several groups: each installs its own functions' requirements (write_project).
+        return not (placement and config.language != "node" and len(placement.get("groups") or {}) > 1)
+
+    def _parsed_placement(self, config: ServiceConfig) -> Dict[str, Any]:
+        from ..core.onprem_placement import parse
+
+        names = [n for n, fn in config.functions.items() if fn.enabled and not is_generated_handler(fn.handler)]
+        return parse(_placement_of(config.provider.options), names, list(config.workflows))
+
+    def _placement_validation(self, config: ServiceConfig) -> List[Issue]:
+        raw = config.provider.options.get("placement")
+        if raw is None:
+            return []
+        from ..core.onprem_placement import owners
+
+        try:
+            parsed = self._parsed_placement(config)
+        except ValueError as exc:
+            return [Issue("error", str(exc), "provider.options.placement")]
+        issues: List[Issue] = []
+        try:
+            routed = self._routed_drivers(config)
+        except ValueError:
+            routed = {}
+        _owners, errors = owners(config, parsed["function_group"], parsed["default"], routed)
+        issues += [Issue("error", e, "provider.options.placement") for e in errors]
+        if config.provider.options.get("cluster"):
+            issues.append(Issue("warning", "with placement, options.cluster is the default group's; put clusters"
+                                " on groups instead (groups.NAME.cluster)", "provider.options.cluster"))
+        if len(parsed["groups"]) > 1:
+            for name, body in parsed["groups"].items():
+                if (body.get("target") or {}).get("local") and not config.provider.options.get("advertise"):
+                    issues.append(Issue("warning", f"group {name} runs on this machine: other groups reach it at"
+                                        " options.advertise (set it to this machine's LAN address)",
+                                        f"provider.options.placement.groups.{name}"))
+        return issues
+
+    def _routed_drivers(self, config: ServiceConfig) -> Dict[str, Dict[str, Any]]:
+        spec = self._deploy(config)
+        out: Dict[str, Dict[str, Any]] = {}
+        for key, res in config.resources.items():
+            driver = self._driver(key, res, Path("."), spec)
+            if driver is not None:
+                out[key] = driver
+                out[f"{res.type}:{res.native_name(key)}"] = driver
+        return out
+
+    def _render_groups(self, doc: TerraformDoc, ctx: RenderContext) -> None:
+        """One host (Terraform ``terraform_data``) per placement group; core/onprem_placement.py."""
+        from ..core.onprem_placement import app_dir, group_stage, owners, peer_token, resource_name
+        from ..packaging.subprojects import excluded_dirs, function_requirements
+
+        cfg = ctx.config
+        parsed = self._parsed_placement(cfg)
+        default = parsed["default"]
+        resolved = (_placement_of(cfg.provider.options) or {}).get("_groups") or {}
+        source = (ctx.root / cfg.package.source).resolve()
+        many = len(parsed["groups"]) > 1
+        found, errors = owners(cfg, parsed["function_group"], default, self._routed_drivers(cfg))
+        if errors:
+            raise ValueError("; ".join(errors))
+        token = peer_token(ctx.root, cfg.provider.stage)
+        group_ctx: Dict[str, RenderContext] = {}
+        specs: Dict[str, Dict[str, Any]] = {}
+        for name, body in parsed["groups"].items():
+            from ..core.onprem_placement import group_options
+
+            opts = copy.deepcopy(resolved.get(name) or group_options(cfg.provider.options, name, body, default))
+            if many and str(opts.get("host") or "127.0.0.1") in ("127.0.0.1", "localhost"):
+                opts["host"] = "0.0.0.0"  # noqa: S104 - the other groups call this host
+            group_cfg = cfg.model_copy(deep=True)
+            group_cfg.provider.options = opts
+            gctx = dataclasses.replace(ctx, config=group_cfg)
+            self._group_stage = group_stage(cfg.provider.stage, name, default)
+            try:
+                spec = self._spec(gctx)
+            finally:
+                self._group_stage = None
+            spec["functions"] = {f: v for f, v in spec["functions"].items() if parsed["function_group"].get(f) == name}
+            group_ctx[name] = gctx
+            specs[name] = spec
+        groups = {name: {"url": spec["endpoint"]} for name, spec in specs.items()}
+        function_groups = {f: {"group": g, "timeout": cfg.timeout_of(cfg.functions[f])}
+                           for f, g in parsed["function_group"].items() if f in cfg.functions}
+        outputs: Dict[str, Any] = {}
+        fn_out: Dict[str, Any] = {}
+        for name, spec in specs.items():
+            spec.update({"group": name, "default_group": default, "groups": groups, "function_groups": function_groups,
+                         "owners": found, "peer_token": token})
+            if name != default:
+                spec["deploy_stage"] = group_stage(cfg.provider.stage, name, default)
+            members = parsed["groups"][name]["functions"]
+            exclude = tuple(excluded_dirs(source, cfg.functions, members, cfg.language)) if many else ()
+            reqs = tuple(function_requirements(source, cfg.functions, members)) \
+                if many and cfg.language != "node" and self.vendor_dependencies else ()
+            folder = app_dir(name, default)
+            digest = self.write_project(group_ctx[name], spec, folder, exclude, reqs)
+            self._host_resource(doc, ctx, resource_name(name, default), folder, digest, spec)
+            for f in members:
+                if f not in cfg.functions:
+                    continue
+                http = bool(cfg.functions[f].events_of("http"))
+                fn_out[f] = {"id": ctx.physical_name(f), "url": spec["endpoint"] if http else None,
+                             "console": spec["endpoint"] + "/__pskit/health", "group": name,
+                             **({"base_url": spec["endpoint"]} if http else {})}
+            group_deploy = (resolved.get(name) or {}).get("deploy")
+            cluster = spec.get("cluster") or {}
+            outputs[name] = {"endpoint": spec["endpoint"], "deploy": spec["deploy"]["method"], "functions": members,
+                             "server": group_deploy.get("server") if isinstance(group_deploy, dict) else None,
+                             "cluster": cluster.get("name")}
+        endpoint = specs[default]["endpoint"]
+        wf_out = {wf: {"id": ctx.physical_name(f"{wf}-orchestrator"), "url": f"{endpoint}/workflows/{wf}"}
+                  for wf in cfg.workflows}
+        doc.output("pskit", {"functions": fn_out, "workflows": wf_out, "endpoint": endpoint,
+                             "services": specs[default]["services"], "deploy": specs[default]["deploy"]["method"],
+                             "groups": outputs}, description="py-serverless-kit on-premises deployment")
+        self._merge_extra(doc, ctx)
+
+    def _host_resource(self, doc: TerraformDoc, ctx: RenderContext, resource: str, folder: str, digest: str,
+                       spec: Dict[str, Any]) -> None:
+        doc.resource(
+            "terraform_data",
+            resource,
+            {
+                "triggers_replace": [ctx.artifact.sha256, digest],
+                "input": {"endpoint": spec["endpoint"], "method": spec["deploy"]["method"]},
+                "provisioner": [
+                    {"local-exec": {"working_dir": "${path.module}/" + folder,
+                                    "interpreter": [sys.executable, "onprem_deploy.py"], "command": "apply"}},
+                    {"local-exec": {"when": "destroy", "working_dir": "${path.module}/" + folder,
+                                    "interpreter": [sys.executable, "onprem_deploy.py"], "command": "destroy"}},
+                ],
+            },
+        )
+
+    def _merge_extra(self, doc: TerraformDoc, ctx: RenderContext) -> None:
+        extra, dropped = _without_foreign(ctx.config.provider.terraform.extra)
+        for name in dropped:
+            doc.warnings.append(
+                f"omitted terraform.extra resource `{name}` (on-premises does not configure that cloud provider)"
+            )
+        if extra:
+            doc.merge(extra)
+
     def render(self, ctx: RenderContext) -> TerraformDoc:
         # init_doc has no provider plugin. User extra is filtered in render_resources.
         doc = self.init_doc(ctx)
         self.render_resources(doc, ctx)
         return doc
+
+
+def _placement_of(options: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    raw = options.get("placement")
+    return raw if isinstance(raw, dict) and raw.get("groups") else None
+
+
+def _ignore_folders(build: Path, exclude: Tuple[str, ...]) -> Callable[[str, List[str]], List[str]]:
+    """``shutil.copytree`` ignore: the sub-project folders (relative to the bundle) of other groups' functions."""
+    skip = {(build / rel).resolve() for rel in exclude}
+
+    def ignore(folder: str, names: List[str]) -> List[str]:
+        base = Path(folder[4:] if folder.startswith("\\\\?\\") else folder).resolve()  # Windows extended path
+        return [n for n in names if (base / n).resolve() in skip]
+
+    return ignore
 
 
 def _remote_driver(key: str, use: str, get: Callable[..., Any], native: str) -> Dict[str, Any]:
