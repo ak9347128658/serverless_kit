@@ -13,7 +13,11 @@ path you already have instead.
   ``created`` / ``deleted``. Dropping a file in the bucket directory does the same.
 * ``POST /__pskit/invoke/<function>`` calls a function.
 * ``POST /__pskit/workflows/<name>`` starts a workflow and answers ``202`` with its
-  ``execution_id`` (``?wait=true`` waits and returns the result).
+  ``execution_id`` (``?wait=true`` waits and returns the result). With ``?entry=true`` the body is
+  ``{"input": ..., "entry_result": ...}``: the first task's function already ran (another group's host).
+* A workflow whose first state is a task also starts when that function runs on its own (HTTP, ``invoke()``,
+  a schedule, a queue...): the run uses that call's result for the first state. ``options.start_on_entry: false``
+  turns this off.
   ``GET /__pskit/executions[?workflow=&status=&limit=&offset=]``,
   ``GET /__pskit/executions/<id>`` and ``POST /__pskit/executions/<id>/cancel``
   inspect and control runs; records live under ``<data_dir>/executions``.
@@ -75,7 +79,7 @@ from .context import Context
 from .cron import CronError, next_cron, rate_seconds, resolve_zone
 from .dispatch import execute
 from .event import Event, EventType, Headers, HttpRequest, Record
-from .executions import Executor, FileExecutionStore, valid_id
+from .executions import NO_ENTRY, Executor, FileExecutionStore, entry_function, valid_id
 from .invoke import NOT_ROUTED, install_router
 from .manifest import load_manifest, set_manifest
 from .peers import HOP_HEADER, Peers, run_peer_call
@@ -879,8 +883,13 @@ class RemoteExecutor:
     def knows(self, name: str) -> bool:
         return name in self.workflows
 
-    def start(self, name: str, data: Any, wait: bool = False, task_runner: Any = None) -> Dict[str, Any]:
-        path = f"/__pskit/workflows/{quote(name, safe='')}" + ("?wait=true" if wait else "")
+    def start(
+        self, name: str, data: Any, wait: bool = False, task_runner: Any = None, entry_result: Any = NO_ENTRY
+    ) -> Dict[str, Any]:
+        args = (["wait=true"] if wait else []) + (["entry=true"] if entry_result is not NO_ENTRY else [])
+        path = f"/__pskit/workflows/{quote(name, safe='')}" + ("?" + "&".join(args) if args else "")
+        if entry_result is not NO_ENTRY:
+            data = {"input": data, "entry_result": entry_result}
         status, _headers, raw = main_request(
             self.main_url, self.token, "POST", path, dumps(data).encode("utf-8"), {"content-type": "application/json"},
             timeout=24 * 3600 if wait else 30,
@@ -900,6 +909,22 @@ class RemoteExecutor:
 
     def shutdown(self) -> None:
         return None
+
+
+def _response_value(resp: Response) -> Any:
+    """The body of a function's HTTP answer as a workflow value: parsed JSON, else text."""
+    body = resp.body
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = bytes(body).decode("utf-8")
+        except UnicodeDecodeError:
+            return base64.b64encode(bytes(body)).decode("ascii")
+    if isinstance(body, str):
+        try:
+            return json.loads(body)
+        except ValueError:
+            return body
+    return body
 
 
 def _filter_match(policy: Optional[Dict[str, Any]], attributes: Dict[str, Any], body: Any) -> bool:
@@ -1056,6 +1081,58 @@ class Host:
                 return name
         return None
 
+    def entry_workflows(self, function: str) -> List[str]:
+        """Workflows whose first state is a task of ``function``: they start when it runs on its own."""
+        manifest = getattr(self, "manifest", None)
+        return [
+            name
+            for name, wf in sorted(((manifest.workflows if manifest else None) or {}).items())
+            if wf.get("start_on_entry", True) and entry_function(wf.get("definition") or {}) == function
+        ]
+
+    def _start_entry_workflows(self, function: str, event: Event, result: Any) -> None:
+        """``function`` ran on its own (not as a workflow step): start each workflow it is the first task of.
+
+        The run takes the call's input as the workflow input and its result as the first state's result, so the
+        function does not run twice. A failed HTTP answer (status >= 400) starts nothing.
+        """
+        names = self.entry_workflows(function)
+        executor = self.executor
+        if not names or executor is None:
+            return
+        output = result
+        if isinstance(result, Response):
+            if result.status >= 400:
+                return
+            output = _response_value(result)
+        elif isinstance(result, BatchResult):
+            if not result.ok:
+                return
+            output = None
+        if event.http is not None:
+            data = event.http.json(default=None) if event.http.body else dict(event.http.query)
+        elif event.records:
+            bodies = [r.json(default=r.text()) for r in event.records]
+            data = bodies[0] if len(bodies) == 1 else bodies
+        else:
+            data = event.data
+        started: List[str] = []
+        for name in names:
+            if not executor.knows(name):
+                continue
+            try:
+                run = executor.start(name, data, entry_result=output)
+            except Exception as exc:  # noqa: BLE001 - the function's own answer must not fail because of it
+                self.logs.append("ERROR", "host", f"workflow {name} did not start after {function}: {exc}",
+                                 function=function)
+                continue
+            execution_id = str((run or {}).get("execution_id") or "")
+            started.append(execution_id)
+            self.logs.append("INFO", "host", f"{function} started workflow {name} (execution {execution_id})",
+                             function=function)
+        if isinstance(result, Response) and started:
+            result.headers.setdefault("x-pskit-execution-id", ", ".join(started))
+
     def capture_output(self) -> None:
         """Send this process's logging and stdout/stderr into the log buffer."""
         level = str(self.spec.get("log_level") or os.environ.get("PSKIT_LOG_LEVEL") or "INFO")
@@ -1152,6 +1229,11 @@ class Host:
                 raise
             finally:
                 self._record_invocation(function, event, t0, result, error)
+        if event.type != EventType.WORKFLOW and self.orchestrated(function) is None:
+            try:
+                self._start_entry_workflows(function, event, result)
+            except Exception as exc:  # noqa: BLE001 - never fails the call that already succeeded
+                self.logs.append("ERROR", "host", f"workflows after {function} not started: {exc}", function=function)
         return result
 
     def _invoke_remote(self, function: str, group: str, event: Event) -> Any:
@@ -2239,12 +2321,17 @@ class Host:
                     except ValueError:
                         raise ValueError("workflow input must be JSON") from None
                 else:
-                    data = {k: v for k, v in req.query.items() if k != "wait"} or None
+                    data = {k: v for k, v in req.query.items() if k not in ("wait", "entry")} or None
+                entry: Dict[str, Any] = {}
+                if str(req.query.get("entry") or "").lower() in ("1", "true", "yes") and isinstance(data, dict):
+                    # Another group's host ran the first task's function: the run starts with its result.
+                    entry = {"entry_result": data.get("entry_result")}
+                    data = data.get("input")
                 if not wants_wait(Event(type=EventType.HTTP, http=req)):
-                    started = executor.start(name, data)
+                    started = executor.start(name, data, **entry)
                     started["status_url"] = f"/__pskit/executions/{started['execution_id']}"
                     return self._json(202, started)
-                record = executor.start(name, data, wait=True)
+                record = executor.start(name, data, wait=True, **entry)
                 body = executor.result_body(record)
                 return self._json(200 if record.get("status") == "SUCCEEDED" else 500, body)
 

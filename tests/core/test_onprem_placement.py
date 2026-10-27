@@ -195,6 +195,15 @@ def _config(api_port: int, gpu_port: int) -> str:
     """
 
 
+GPU_JOB = """
+          gpujob:
+            start_at: Resize
+            states:
+              Resize: {type: task, function: resize, next: Hello}
+              Hello: {type: task, function: hello, end: true}
+"""
+
+
 def test_render_one_host_per_group(make_project, render):
     project = make_project(_config(9180, 9181), files=HANDLERS)
     assert [str(i) for i in project.validate() if i.level == "error"] == []
@@ -258,7 +267,8 @@ def _http(url: str, data: bytes = None, timeout: float = 30):  # type: ignore[as
 def test_groups_call_each_other(make_project, render, tmp_path):
     api_port, gpu_port = _free_port(), _free_port()
     project = make_project(_config(api_port, gpu_port).replace(
-        "            port:", f"            data_dir: {tmp_path.as_posix()}/d\n            port:", 1), files=HANDLERS)
+        "            port:", f"            data_dir: {tmp_path.as_posix()}/d\n            port:", 1) + GPU_JOB,
+        files=HANDLERS)
     render(project)
     procs = []
     try:
@@ -280,6 +290,16 @@ def test_groups_call_each_other(make_project, render, tmp_path):
         status, body = _http(f"http://127.0.0.1:{api_port}/resize")
         assert status == 404 and f"127.0.0.1:{gpu_port}/resize" in body and "runs on group gpu" in body
         assert _http(f"http://127.0.0.1:{gpu_port}/resize") == (200, {"resize": "gpu", "data": None})
+        # resize is gpujob's first task: its call on the gpu host starts gpujob, which runs on the default group.
+        while True:
+            items = _http(f"http://127.0.0.1:{api_port}/__pskit/executions?workflow=gpujob")[1]["items"]
+            if items and items[0]["status"] != "RUNNING":
+                break
+            assert time.time() < deadline + 15, items
+            time.sleep(0.2)
+        run = _http(f"http://127.0.0.1:{api_port}/__pskit/executions/{items[0]['execution_id']}")[1]
+        assert run["status"] == "SUCCEEDED", run
+        assert run["output"] == {"step": "hello", "data": {"resize": "gpu", "data": None}}
         # pskit trigger --direct / the studio's Test: the envelope is unwrapped, and the call reaches gpu.
         status, body = _http(f"http://127.0.0.1:{api_port}/__pskit/invoke/resize", b'{"__pskit": "invoke", "data": {"n": 1}}')
         assert (status, body) == (200, {"result": {"resize": "gpu", "data": {"n": 1}}})

@@ -57,6 +57,7 @@ Full example: [`examples/07-workflow-orders`](../examples/07-workflow-orders).
 | `timeout` | — | AWS `TimeoutSeconds`; embedded orchestrator function timeout (capped at the provider's max), also enforced by the embedded engine (the run ends `TIMED_OUT`) |
 | `options.type` | `STANDARD` | AWS only: `STANDARD` or `EXPRESS` |
 | `options.http` | `true` | embedded only: `false` removes the orchestrator's HTTP trigger |
+| `options.start_on_entry` | `true` | on premises only: `false` stops the workflow from starting when its first task function runs on its own (see below) |
 | `options.sync` | `true` | Azure native only: `false` drops the `Response` actions, so the caller gets `202` at once instead of the output |
 
 All `next` / `default` / `catch.next` targets are checked to exist, and every `function` must be defined under `functions`.
@@ -144,6 +145,7 @@ Error names are the **Python exception class names** your handler raises (e.g. `
 - Invoke it with `POST /workflows/<workflow>` and the JSON input as the body (when the provider supports HTTP and `options.http` isn't `false`), or invoke it directly.
 - Every run has an `execution_id`. On a cloud the response is synchronous: `{"execution_id": ..., "workflow": ..., "status": "SUCCEEDED", "output": ..., "duration_ms": ...}`, or HTTP 500 `{"execution_id": ..., "status": "FAILED", "error": ..., "cause": ...}`.
 - On premises the run is tracked by the host. `POST /workflows/<workflow>` answers `202` with the `execution_id` at once (`?wait=true` returns the result), and the run can be listed, followed and cancelled. See [Workflow executions](workflow-executions.md).
+- On premises, a workflow whose first state is a `task` also starts when that function runs **on its own**: its HTTP route, `invoke()`, `pskit trigger`, a schedule, a queue and so on. The call's input becomes the workflow input, and the function's result is used as the first state's result, so the function does not run twice. The function's own response is unchanged. An HTTP response carries the run's id in `x-pskit-execution-id`. A failed call (an exception, or an HTTP status of 400 or more) starts nothing. Calls made by the workflow itself never start another run. With placement, the run starts on the default group even when the function runs on another group's server. Set `options.start_on_entry: false` to turn this off. Other clouds don't do this: start the workflow itself there.
 - The **whole run must fit in one function invocation**: total time ≤ the provider's max timeout (e.g. 900 s on AWS/Huawei/Tencent, 600 s on Azure, 120 s on IBM). Long `wait` states don't fit; use a native engine or split the workflow. `pskit validate` warns about this.
 - The HTTP route is public when the provider's HTTP is public. Set `options.http: false` for sensitive workflows.
 

@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.3.4] - 2026-10-27
+
+### Fixed
+- On premises, calling a workflow's first task function on its own did not run the workflow. A workflow such as
+  `step01 -> step02 -> step3` now starts when `step01` runs from any trigger (its HTTP route, `invoke()`,
+  `pskit trigger`, a schedule, a queue, ...). The run takes the call's input as the workflow input and `step01`'s
+  result as the first state's result, so `step01` does not run twice. The run is tracked like any other execution,
+  and an HTTP answer carries its id in `x-pskit-execution-id`. A failed call (an exception, or HTTP status >= 400)
+  starts nothing. When placement puts the function on another group's server, the run still starts and runs on
+  the default group. Set `options.start_on_entry: false` on a workflow to turn this off.
+
 ## [2.3.3] - 2026-10-27
 
 ### Fixed

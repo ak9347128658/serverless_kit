@@ -56,6 +56,28 @@ SUMMARY_KEYS = (
 MAX_HISTORY = 1000
 _ID_RE = re.compile(r"^[0-9a-f]{8,64}$")
 _SAVE_INTERVAL = 0.25
+NO_ENTRY: Any = object()  # Executor.start: no result of the first task was given
+
+
+def entry_function(definition: Dict[str, Any]) -> Optional[str]:
+    """The function of the first state when that state is a task, else ``None``."""
+    first = (definition.get("states") or {}).get(definition.get("start_at")) or {}
+    if first.get("type") != "task":
+        return None
+    return first.get("function") or None
+
+
+def _seeded(runner: TaskRunner, function: Optional[str], result: Any) -> TaskRunner:
+    """``runner`` whose first call of ``function`` (the first state: it already ran) returns ``result``."""
+    pending = [True]
+
+    def run(name: str, data: Any) -> Any:
+        if pending and name == function:
+            pending.clear()
+            return result
+        return runner(name, data)
+
+    return run
 
 
 def _iso(ts: float) -> str:
@@ -306,8 +328,13 @@ class Executor:
         *,
         wait: bool = False,
         task_runner: Optional[TaskRunner] = None,
+        entry_result: Any = NO_ENTRY,
     ) -> Dict[str, Any]:
-        """Start a run. Returns the summary at once, or the finished record with ``wait=True``."""
+        """Start a run. Returns the summary at once, or the finished record with ``wait=True``.
+
+        ``entry_result``: the first state's function already ran (it was called on its own); the run uses this
+        result for that state instead of calling the function again.
+        """
         spec = self.workflows.get(workflow)
         if spec is None:
             known = ", ".join(sorted(self.workflows)) or "<none>"
@@ -337,6 +364,8 @@ class Executor:
             self._runs[execution_id] = run
         self.store.save(self._public(record))
         runner = task_runner or self.task_runner
+        if entry_result is not NO_ENTRY:
+            runner = _seeded(runner, entry_function(spec.get("definition") or {}), entry_result)
         if wait:
             return self._public(self._execute(run, spec, data, runner))
         accepted = summary(record)  # before the worker can change it

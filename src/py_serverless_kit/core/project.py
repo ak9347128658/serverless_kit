@@ -190,6 +190,9 @@ class Project:
             if wf.timeout:
                 # Enforced by the embedded engine (the on-prem host has no function timeout above it).
                 workflows[name]["timeout"] = wf.timeout
+            if wf.options.get("start_on_entry") is False:
+                # On premises: running the first task's function on its own does not start the workflow.
+                workflows[name]["start_on_entry"] = False
         return {
             "service": self.config.service,
             "stage": self.config.provider.stage,
