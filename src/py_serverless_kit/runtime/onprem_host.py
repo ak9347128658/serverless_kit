@@ -1251,7 +1251,7 @@ class Host:
 
     def served_elsewhere(self, function: str) -> Optional[Tuple[str, str]]:
         """``(group, url)`` when an HTTP request for ``function`` reached a host that does not run it and does not
-        pass routes on (only the default group with ``placement.gateway`` does)."""
+        pass routes on (with ``placement.gateway`` every group does)."""
         fns = self.spec.get("functions") or {}
         if self.peers is None or function in fns or self.spec.get("gateway"):
             return None

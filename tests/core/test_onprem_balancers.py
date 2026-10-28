@@ -179,6 +179,51 @@ def test_cluster_attachment_follows_deployments(root):
         bal.detach_cluster(root, "edge", "prod", lines.append, run=fake)
 
 
+def test_one_project_placed_on_two_attached_clusters_gets_one_route_to_both(root):
+    fake = FakeServers()
+    lines: List[str] = []
+    srv.save_server(root, "app3", {"host": "10.0.0.7", "user": "root", "auth": "agent"})
+    clusters = {
+        "c1": {"orchestrator": "swarm", "master": "app1", "advertise": "10.0.0.5",
+               "nodes": {"app1": {"role": "master", "node": "n1", "address": "10.0.0.5"},
+                         "app2": {"role": "worker", "node": "n2", "address": "10.0.0.6"}},
+               "deployments": {"pskit-shop-dev": {"service": "shop", "stage": "dev", "port": 8080}}},
+        "c2": {"orchestrator": "nomad", "master": "app3", "advertise": "10.0.0.7", "master_serves": True,
+               "nodes": {"app3": {"role": "master", "node": "n3", "address": "10.0.0.7"}},
+               "deployments": {"pskit-shop-dev-workers02": {"service": "shop", "stage": "dev", "port": 8090}}},
+    }
+    clu._save(root, clusters)
+    bal.create_balancer(root, "edge", "lb1", lines.append, run=fake)
+    bal.attach_cluster(root, "edge", "c1", lines.append, run=fake)
+    bal.attach_cluster(root, "edge", "c2", lines.append, run=fake)
+    routes = fake.routes()
+    assert list(routes) == ["p-shop"] and not any("already serves" in line for line in lines)
+    route = routes["p-shop"]
+    assert route["owner"] == "pskit-shop-dev" and route["source"] == "cluster:c1"
+    assert {(b["address"], b["port"]) for b in route["backends"]} == {
+        ("10.0.0.5", 8080), ("10.0.0.6", 8080), ("10.0.0.7", 8090)}
+
+    # A deploy on either cluster keeps both; detaching one leaves the other's servers.
+    bal.sync_cluster(root, "c1", lines.append, run=fake)
+    assert len(fake.routes()["p-shop"]["backends"]) == 3
+    bal.detach_cluster(root, "edge", "c2", lines.append, run=fake)
+    assert {b["address"] for b in fake.routes()["p-shop"]["backends"]} == {"10.0.0.5", "10.0.0.6"}
+    bal.detach_cluster(root, "edge", "c1", lines.append, run=fake)
+    assert fake.routes() == {}
+
+
+def test_a_cluster_behind_a_load_balancer_turns_the_placement_gateway_on(root):
+    from py_serverless_kit.core import onprem_placement as pl
+
+    fake = FakeServers()
+    clu._save(root, {"c1": {"orchestrator": "swarm", "master": "app1", "advertise": "10.0.0.5",
+                            "nodes": {"app1": {"role": "master", "node": "n1", "address": "10.0.0.5"}}}})
+    assert pl.behind_balancer(root, ["c1", ""]) is False
+    bal.create_balancer(root, "edge", "lb1", [].append, run=fake)
+    bal.attach_cluster(root, "edge", "c1", [].append, run=fake)
+    assert pl.behind_balancer(root, ["c1"]) is True and pl.behind_balancer(root, ["other"]) is False
+
+
 def test_unreachable_balancer_only_warns_on_deploy(root):
     fake = FakeServers()
     bal.create_balancer(root, "edge", "lb1", lambda _l: None, run=fake)

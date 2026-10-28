@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { useStudio } from "../store";
-import type { JsonObject, OnPremCluster, OnPremDeployed, OnPremServer } from "../types";
+import type { DeployedGroup, JsonObject, OnPremCluster, OnPremDeployed, OnPremServer } from "../types";
 import { asArray, asObject, getIn, isObject, setIn, str } from "../util";
 import {
   clusterName,
@@ -118,7 +118,12 @@ export function PlacementEditor() {
           </p>
           {(() => {
             const raw = asObject(getIn(draft, path));
-            const balancer = !!getIn(draft, ["provider", "options", "balancer"]);
+            // On by default behind a load balancer: options.balancer, or a group's cluster with one (own or attached).
+            const behind = new Set(
+              clusters.filter((c) => !!c.balancer || (c.balancers || []).length > 0).map((c) => c.name),
+            );
+            const balancer =
+              !!getIn(draft, ["provider", "options", "balancer"]) || placement.groups.some((g) => behind.has(clusterName(g.body.cluster)));
             const on = typeof raw.gateway === "boolean" ? raw.gateway : balancer;
             return (
               <label className="check small" title="provider.options.placement.gateway">
@@ -127,11 +132,11 @@ export function PlacementEditor() {
                   checked={on}
                   onChange={(e) => replace(setIn(draft, [...path, "gateway"], e.target.checked === balancer ? undefined : e.target.checked) as JsonObject)}
                 />{" "}
-                One URL: the default group answers every route and passes other groups&apos; routes on
+                One URL: every group answers every route and passes other groups&apos; routes on
                 <span className="muted">
                   {" "}
-                  ({on ? "on" : "off"}: {on ? "the other servers still answer only their own routes" : "each server answers only the routes of its own functions"}
-                  {balancer ? "; on by default with a load balancer" : ""})
+                  ({on ? "on" : "off"}: {on ? "any server can take any request" : "each server answers only the routes of its own functions"}
+                  {balancer ? "; on by default behind a load balancer" : ""})
                 </span>
               </label>
             );
@@ -577,6 +582,11 @@ export function RunsOnField({
   );
 }
 
+/** Where a deployed group runs, for one line of text: "cluster prod", "app1" or "this machine". */
+export function groupWhere(g: DeployedGroup): string {
+  return g.cluster ? `cluster ${g.cluster}` : g.server || (g.deploy === "local" || !g.deploy ? "this machine" : g.deploy);
+}
+
 /** After a deploy: each placement group's host and the load balancer URLs (deployment.json `groups` / `balancers`). */
 export function DeployedGroups({ deployed }: { deployed: OnPremDeployed | null }) {
   const groups = Object.entries(deployed?.groups || {});
@@ -599,7 +609,7 @@ export function DeployedGroups({ deployed }: { deployed: OnPremDeployed | null }
               {groups.map(([name, g]) => (
                 <tr key={name}>
                   <td className="mono">{name}</td>
-                  <td className="small">{g.cluster ? `cluster ${g.cluster}` : g.server || (g.deploy === "local" || !g.deploy ? "this machine" : g.deploy)}</td>
+                  <td className="small">{groupWhere(g)}</td>
                   <td className="mono small">
                     {g.endpoint ? (
                       <a href={g.endpoint} target="_blank" rel="noreferrer">

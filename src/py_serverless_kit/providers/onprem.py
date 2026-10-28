@@ -1047,7 +1047,15 @@ class OnPremProvider(Provider):
 
     def _render_groups(self, doc: TerraformDoc, ctx: RenderContext) -> None:
         """One host (Terraform ``terraform_data``) per placement group; core/onprem_placement.py."""
-        from ..core.onprem_placement import app_dir, gateway, group_stage, owners, peer_token, resource_name
+        from ..core.onprem_placement import (
+            app_dir,
+            behind_balancer,
+            gateway,
+            group_stage,
+            owners,
+            peer_token,
+            resource_name,
+        )
         from ..packaging.subprojects import excluded_dirs, function_requirements
 
         cfg = ctx.config
@@ -1084,8 +1092,9 @@ class OnPremProvider(Provider):
                            for f, g in parsed["function_group"].items() if f in cfg.functions}
         outputs: Dict[str, Any] = {}
         fn_out: Dict[str, Any] = {}
+        balanced = behind_balancer(ctx.root, [str((s.get("cluster") or {}).get("name") or "") for s in specs.values()])
         for name, spec in specs.items():
-            spec["gateway"] = name == default and gateway(parsed, cfg.provider.options)
+            spec["gateway"] = gateway(parsed, cfg.provider.options, balanced)
             spec.update({"group": name, "default_group": default, "groups": groups, "function_groups": function_groups,
                          "owners": found, "peer_token": token})
             if name != default:

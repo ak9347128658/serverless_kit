@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.3.6] - 2026-10-28
+
+### Fixed
+- On premises, a project whose placement groups run on two scaling clusters (Swarm, Kubernetes / k3s or Nomad)
+  attached to one load balancer got a route only to the first cluster: the second cluster's deployment
+  (`pskit-<service>-<stage>-<group>`) was skipped as if the project had set its own route, and requests for its
+  functions reached the first cluster's servers, which answered `404 ... runs on group X, not on this server`.
+  Now the project gets one route, `/<service>/`, to the servers of every attached cluster that runs one of its
+  groups (each on its own port), kept up to date on deploy, remove, join, leave, attach and detach. The same
+  applies to a project's own `options.balancer` route.
+- `placement.gateway` is now on by default when a group's cluster has a load balancer or is attached to one, and
+  turns it on for **every** group (not only the default one): a server passes the routes of the other groups'
+  functions on to them, so any server behind the load balancer answers every route. Run `pskit deploy` again.
+- Studio, **Logs**: a stage on a scaling cluster, or split over placement groups, no longer shows a *Server* picker
+  (it read as if the logs came from that one server). It shows the source instead, every replica of the cluster or
+  every group and where it runs, and explains that a line's `group` / `node` fields say where it ran.
+- Studio, **Deploy**: with placement whose default group has its own *Runs on*, the *Run on* picker at the top is
+  replaced by a summary of each group and its target. Before, it showed a machine or cluster that could differ from
+  the groups below, and deploying passed it as `--server` / `--cluster`, moving the default group there.
+- Studio: the *One URL* (`placement.gateway`) checkbox says every group passes routes on and shows it on by default
+  when a group's cluster is behind a load balancer.
+
 ## [2.3.5] - 2026-10-27
 
 ### Added

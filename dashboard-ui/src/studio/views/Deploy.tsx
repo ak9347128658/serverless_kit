@@ -8,6 +8,7 @@ import { EnumSelect, FormRow, JsonInput, Section, Segmented, TextInput, Toggle }
 import { PageHeader } from "../components/Misc";
 import { DeployedBadge, ServerSelect, useServerChoice } from "../components/ServerPicker";
 import { DeployedGroups, PlacementEditor, readPlacement } from "../components/Placement";
+import { targetLabel } from "../placement";
 import { FirewallPanel } from "../components/FirewallPanel";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
@@ -62,10 +63,14 @@ export function DeployView() {
     setClusterPick("");
   }, [target.stage]);
   const placement = onprem ? readPlacement(draft) : null;
+  // Split over groups whose default group has its own target: each group's "Runs on" decides, and a --server /
+  // --cluster here would move the default group away from it. So no picker then.
+  const groupTargets = placement ? placement.groups.map((g) => ({ name: g.name, where: targetLabel(g.body) })) : [];
+  const byGroups = !!placement && !!groupTargets.find((g) => g.name === placement.default)?.where;
   const onCluster = (runOn || (deployed?.cluster || ymlCluster ? "cluster" : "server")) === "cluster";
   const chosenCluster = clusterPick || deployed?.cluster || ymlCluster || clusters[0]?.name || "";
   // Back to one machine from a cluster: the default ("where it was deployed" / pskit.yml) would be the cluster again.
-  const needsMachine = onprem && !onCluster && !machine && !!(deployed?.cluster || ymlCluster);
+  const needsMachine = onprem && !byGroups && !onCluster && !machine && !!(deployed?.cluster || ymlCluster);
   // A finished deploy / remove changes where the stage runs: show it and keep the picker on it.
   const finished = job.status !== "running" && job.status !== "idle";
   useEffect(() => {
@@ -180,7 +185,9 @@ export function DeployView() {
     } else if (command === "deploy") {
       const where = !onprem
         ? ""
-        : onCluster
+        : byGroups
+          ? ` (${groupTargets.map((g) => `${g.name} on ${g.where || "the default group's target"}`).join(", ")})`
+          : onCluster
           ? ` on cluster ${chosenCluster}`
           : machine === "local"
             ? " on this machine"
@@ -190,7 +197,7 @@ export function DeployView() {
                 ? ` on ${deployed.label}`
                 : "";
       const movingFrom =
-        !onprem || !deployed
+        !onprem || !deployed || byGroups
           ? ""
           : onCluster
             ? deployed.cluster !== chosenCluster
@@ -212,7 +219,7 @@ export function DeployView() {
       if (ok !== "confirm") return;
     }
     const placed = ["package", "plan", "deploy", "remove", "info"].includes(command);
-    if (placed && onprem && onCluster && !chosenCluster) {
+    if (placed && onprem && !byGroups && onCluster && !chosenCluster) {
       toast("Pick a cluster, or create one on the Scaling cluster page.", "warn");
       return;
     }
@@ -222,7 +229,7 @@ export function DeployView() {
     }
     try {
       const withMachine =
-        !onprem || !placed
+        !onprem || !placed || byGroups
           ? args
           : onCluster
             ? { ...(args || {}), cluster: chosenCluster }
@@ -258,6 +265,26 @@ export function DeployView() {
       {onprem && (
         <div className="card card-pad row-gap wrap deploy-machine">
           <b>Run on</b>
+          {byGroups && placement ? (
+            <>
+              <span>
+                Split over {groupTargets.length} group{groupTargets.length === 1 ? "" : "s"}:{" "}
+                {groupTargets.map((g, i) => (
+                  <span key={g.name}>
+                    {i > 0 && ", "}
+                    <b className="mono">{g.name}</b>
+                    {g.name === placement.default ? " (default)" : ""} on <b>{g.where || "the default group's target"}</b>
+                  </span>
+                ))}
+              </span>
+              <DeployedBadge deployed={deployed} />
+              <span className="muted small">
+                Each group runs where its <i>Runs on</i> says in <b>Where functions run</b> below; change it there. The address above is the default
+                group&apos;s, which Test, Logs and <code className="mono">pskit logs</code> use.
+              </span>
+            </>
+          ) : (
+            <>
           <Segmented
             label="Run on"
             value={onCluster ? "cluster" : "server"}
@@ -279,7 +306,11 @@ export function DeployView() {
                 {chosenCluster && !clusters.some((c) => c.name === chosenCluster) && <option value={chosenCluster}>{chosenCluster} (not found)</option>}
               </select>
               <DeployedBadge deployed={deployed} />
-              {placement && <span className="small">With placement this is the default group&apos;s target; the other groups run where their group says.</span>}
+              {placement && (
+                <span className="small">
+                  With placement this picks where the default group <b>{placement.default}</b> runs; the other groups always run where their group says.
+                </span>
+              )}
               <span className="muted small">
                 The functions run as 1 main replica on the master plus {typeof ymlReplicas === "number" ? ymlReplicas : 2} web replicas spread over the
                 cluster&apos;s servers (<code className="mono">provider.options.cluster.replicas</code>). The same as{" "}
@@ -309,6 +340,8 @@ export function DeployView() {
             Saved servers come from <b>Resources → On-prem services → Servers</b>. The same as <code className="mono">pskit deploy --server NAME</code>; to make it permanent per stage set{" "}
             <code className="mono">provider.options.deploy.server</code>. Use one stage per machine to keep their deployments apart.
           </span>
+            </>
+          )}
             </>
           )}
           {(Object.keys(deployed?.groups || {}).length > 0 || (deployed?.balancers?.length || 0) > 0) && (

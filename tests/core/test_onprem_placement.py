@@ -381,9 +381,11 @@ def test_each_group_gets_only_its_own_handlers_of_a_shared_file(make_project, re
     assert api["gateway"] is False and gpu["gateway"] is False  # each server answers only its own routes
 
 
-def test_gateway_is_the_default_groups_and_on_with_a_load_balancer():
+def test_gateway_is_on_with_a_load_balancer():
     parsed = pl.parse({"groups": {"api": {}, "gpu": {"local": True, "functions": ["r"]}}}, ["r"])
     assert pl.gateway(parsed, {}) is False and pl.gateway(parsed, {"balancer": "edge"}) is True
+    assert pl.gateway(parsed, {}, balanced=True) is True  # a group's cluster is behind a load balancer
+    assert pl.gateway(pl.parse({"gateway": False, "groups": {"api": {}}}, []), {}, balanced=True) is False
     explicit = pl.parse({"gateway": True, "groups": {"api": {}}}, [])
     assert pl.gateway(explicit, {}) is True
     with pytest.raises(pl.PlacementError, match="gateway is true or false"):

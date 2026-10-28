@@ -136,13 +136,26 @@ def parse(raw: Any, functions: List[str], workflows: Optional[List[str]] = None)
             **({"gateway": raw["gateway"]} if raw.get("gateway") is not None else {})}
 
 
-def gateway(parsed: Dict[str, Any], options: Dict[str, Any]) -> bool:
-    """Whether the default group answers every route, passing other groups' routes on (one URL for the project).
-    ``placement.gateway``; unset: on with a load balancer (it needs one entry point), else off, so each server
+def gateway(parsed: Dict[str, Any], options: Dict[str, Any], balanced: bool = False) -> bool:
+    """Whether every group answers every route, passing other groups' routes on (one URL for the project).
+    ``placement.gateway``; unset: on with a load balancer (``options.balancer``, or ``balanced``: a group's cluster
+    has one or is attached to one), since it sends a request to any group's servers; else off, so each server
     answers only the routes of the functions it runs."""
     if "gateway" in parsed:
         return bool(parsed["gateway"])
-    return options.get("balancer") not in (None, "", False)
+    return balanced or options.get("balancer") not in (None, "", False)
+
+
+def behind_balancer(root: Path, clusters: List[str]) -> bool:
+    """Whether one of ``clusters`` has its own load balancer or is attached to a named one."""
+    from .onprem_balancers import attached_to
+    from .onprem_cluster import load_clusters
+
+    try:
+        saved = load_clusters(root)
+        return any(isinstance((saved.get(c) or {}).get("balancer"), dict) or attached_to(root, c) for c in clusters)
+    except Exception:  # noqa: BLE001 - unreadable saved state: no load balancer
+        return False
 
 
 def group_stage(stage: str, group: str, default: str) -> str:

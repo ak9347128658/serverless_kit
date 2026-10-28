@@ -63,7 +63,9 @@ pskit lb attach edge --cluster prod
 pskit lb detach edge --cluster prod
 ```
 
-A project's own `balancer` setting wins over the cluster's route for that deployment.
+A project's own `balancer` setting wins over the cluster's route for that deployment. A project whose
+[placement groups](placement.md) run on several attached clusters gets one route, `/<service>/`, to the servers of
+all of them; each server passes another group's routes on to it.
 
 ## Shared between projects and machines
 

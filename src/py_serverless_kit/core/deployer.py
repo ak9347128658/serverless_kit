@@ -300,14 +300,21 @@ class Deployer:
         (with placement, the default group's host: it passes a route on to the group that has it)."""
         from urllib.parse import urlsplit
 
-        from .onprem_balancers import cluster_backends
-        from .onprem_cluster import _ip, get_cluster
+        from .onprem_balancers import cluster_backends, owner_backends
+        from .onprem_cluster import _ip, get_cluster, load_clusters
+        from .onprem_cluster import scripts as cluster_scripts
 
         spec = (data or {}).get("spec") or {}
         cluster = (data or {}).get("cluster")
         port = int(spec.get("port") or 8080)
         if cluster:
-            return cluster_backends(get_cluster(self.project.root, str(cluster)), port)
+            # Placement groups on other clusters too: every group's host passes the others' routes on.
+            names = {str(cluster)} | {str(g.get("cluster")) for g in (groups or {}).values()
+                                      if isinstance(g, dict) and g.get("cluster")}
+            clusters = {n: c for n, c in load_clusters(self.project.root).items() if n in names}
+            cfg = self.project.config
+            found = owner_backends(clusters, cluster_scripts.stack_name(cfg.service, cfg.provider.stage))
+            return found or cluster_backends(get_cluster(self.project.root, str(cluster)), port)
         # With placement only the default group passes routes on (placement.gateway): it is the entry point.
         endpoints = [spec.get("endpoint")]
         out = []

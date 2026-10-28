@@ -6,6 +6,7 @@ import { useConfirm } from "../components/Feedback";
 import { Section } from "../components/Forms";
 import { PageHeader } from "../components/Misc";
 import { DeployedBadge, ServerSelect, useServerChoice } from "../components/ServerPicker";
+import { groupWhere } from "../components/Placement";
 import { href } from "../route";
 import { useStudio } from "../store";
 import { asObject } from "../util";
@@ -21,6 +22,9 @@ export function LogsView({ rest }: { rest: string[] }) {
   const name = meta.providers.find((p) => p.name === target.provider)?.display_name || target.provider;
   const onprem = target.provider === "onprem";
   const { servers, deployed, server, setServer } = useServerChoice(onprem, target.stage);
+  // On a cluster (or split over groups) the logs come from every replica / group, not from one server: no picker.
+  const groups = Object.entries(deployed?.groups || {});
+  const spread = !!deployed?.cluster || groups.length > 1;
   return (
     <div className="page">
       <PageHeader
@@ -34,14 +38,44 @@ export function LogsView({ rest }: { rest: string[] }) {
       />
       {onprem && (
         <div className="card card-pad row-gap wrap deploy-machine">
-          <b>Server</b>
-          <ServerSelect value={server} onChange={setServer} servers={servers} deployed={deployed} />
+          {spread ? (
+            <>
+              <b>Source</b>
+              {groups.length > 1 ? (
+                <span>
+                  Every group of this project:{" "}
+                  {groups.map(([g, body], i) => (
+                    <span key={g}>
+                      {i > 0 && ", "}
+                      <b className="mono">{g}</b> on {groupWhere(body)}
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span>
+                  Every replica of cluster <b>{deployed?.cluster}</b>
+                </span>
+              )}
+            </>
+          ) : (
+            <>
+              <b>Server</b>
+              <ServerSelect value={server} onChange={setServer} servers={servers} deployed={deployed} />
+            </>
+          )}
           <DeployedBadge deployed={deployed} />
           <span className="muted small">
-            {deployed?.cluster ? (
+            {spread ? (
               <>
-                This stage runs on cluster <b>{deployed.cluster}</b>. Logs from every replica are shown together. On Nomad each server is read
-                directly, so a web replica's lines show with the main replica. CLI: <code className="mono">pskit logs -f</code>.
+                {groups.length > 1 ? (
+                  <>
+                    Each group sends its logs to the main replica of the default group, so this list shows all of them together; the{" "}
+                    <code className="mono">group</code> and <code className="mono">node</code> fields of a line say where it ran.
+                  </>
+                ) : (
+                  <>Logs from every replica (master and joined servers) are shown together; a line&apos;s <code className="mono">node</code> field says which one wrote it.</>
+                )}{" "}
+                The address above is only where pskit reads them. CLI: <code className="mono">pskit logs -f</code>.
               </>
             ) : (
               <>
@@ -52,7 +86,7 @@ export function LogsView({ rest }: { rest: string[] }) {
           </span>
         </div>
       )}
-      <DeployedLogs provider={target.provider} stage={target.stage} functions={functions} only={only} server={onprem ? server || undefined : undefined} streams />
+      <DeployedLogs provider={target.provider} stage={target.stage} functions={functions} only={only} server={onprem && !spread ? server || undefined : undefined} streams />
     </div>
   );
 }

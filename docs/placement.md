@@ -94,7 +94,7 @@ with a shared secret (`.pskit/onprem-<stage>/peer-token`, out of git):
 | You do | What happens |
 |---|---|
 | `invoke("resize", data)` in a function on `api` | runs on `gpu`, the result (or the error, with its type) comes back |
-| an HTTP request to `api` for a route of `resize` | `404` with the URL on `gpu` (each server answers only its own routes); with `placement.gateway: true` the default group passes it to `gpu` |
+| an HTTP request to `api` for a route of `resize` | `404` with the URL on `gpu` (each server answers only its own routes); with `placement.gateway: true` (on by default behind a load balancer) `api` passes it to `gpu` |
 | a **workflow** step that is a function on another server | runs there; `Retry` / `Catch` match its error type by name |
 | start a workflow on any group | it runs (and is recorded) on the default group; executions stay in one place |
 | send to a built-in queue whose consumer runs on `gpu` | the message is stored on `gpu` and its consumer runs there |
@@ -121,15 +121,18 @@ the others; unit `pskit-<service>-<stage>-<group>`, folder `onprem_app_<group>`,
 `deployment.json` list each group's endpoint and functions.
 
 Each server answers only the HTTP routes of the functions it runs; a route of another group gets a `404` that
-names the group and its URL. For one URL for the whole project, make the default group the entry point:
+names the group and its URL. For one URL for the whole project, let every server answer every route:
 
 ```yaml
     placement:
-      gateway: true        # the default group answers every route, passing other groups' routes on
+      gateway: true        # every group answers every route, passing other groups' routes on
 ```
 
-With a [load balancer](load-balancers.md) (`options.balancer: edge`) `gateway` is on unless you set it to `false`,
-and the load balancer sends the project's path to the default group.
+With a [load balancer](load-balancers.md) `gateway` is on unless you set it to `false`: `options.balancer: edge`,
+or a group on a cluster that has its own load balancer or is attached to a named one (`pskit lb attach edge
+--cluster prod`). The load balancer gives the project one route (`/<service>/`) to the servers of **every** group
+it can reach; a request that lands on another group's server is passed on to the right group. So with groups on
+clusters `c1` and `c2`, both attached to `edge`, `http://edge/<service>/<route>` works for the functions of both.
 
 `--server NAME` / `--cluster NAME` move the default group only; the other groups always run where `pskit.yml`
 puts them.

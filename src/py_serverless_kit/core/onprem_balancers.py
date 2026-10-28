@@ -541,7 +541,8 @@ def detach_cluster(root: Path, name: str, cluster: str, emit: Emit, *, run: Opti
     if cluster not in (item.get("clusters") or []):
         raise BalancerError(f"load balancer {name} does not serve cluster {cluster}")
     _update(root, name, lambda c: c.__setitem__("clusters", sorted(set(c.get("clusters") or []) - {cluster})))
-    set_routes(root, name, [], emit, drop_sources=(f"cluster:{cluster}", ()), run=run, strict=False)
+    # The other attached clusters' routes are rewritten too: a project placed on both loses this one's servers.
+    _sync_attached(root, name, _cluster().load_clusters(root), emit, run=run, strict=False, label=cluster)
     emit(f"Load balancer {name} no longer serves cluster {cluster}.")
     return public(name, get_balancer(root, name))
 
@@ -558,6 +559,29 @@ def cluster_backends(cluster: Dict[str, Any], port: int) -> List[Dict[str, Any]]
             + [{"address": str(nodes[s].get("address")), "port": port, "server": s, "backup": True} for s in backup])
 
 
+def deployment_owner(stack: str, dep: Dict[str, Any]) -> str:
+    """The project deployment a cluster stack belongs to (``pskit-<service>-<stage>``): the placement groups of one
+    project (``pskit-<service>-<stage>-<group>``, maybe on other clusters) share it, and so one route."""
+    if not dep.get("service") or not dep.get("stage"):
+        return stack
+    return str(_cluster().scripts.stack_name(str(dep["service"]), str(dep["stage"])))
+
+
+def owner_backends(clusters: Dict[str, Dict[str, Any]], owner: str) -> List[Dict[str, Any]]:
+    """The servers of every cluster in ``clusters`` that runs a group of ``owner``, each on that group's port."""
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for _name, cluster in sorted(clusters.items()):
+        for stack, dep in sorted((cluster.get("deployments") or {}).items()):
+            if deployment_owner(stack, dep) != owner:
+                continue
+            for b in cluster_backends(cluster, int(dep.get("port") or 8080)):
+                if (b["address"], b["port"]) not in seen:
+                    seen.add((b["address"], b["port"]))
+                    out.append(b)
+    return out
+
+
 def sync_cluster(root: Path, cluster_name: str, emit: Emit, *, run: Optional[RunFn] = None,
                  cluster: Optional[Dict[str, Any]] = None, only: str = "", strict: bool = False) -> None:
     """Each load balancer attached to ``cluster_name`` gets a route per deployment there (``/<service>``, or
@@ -566,40 +590,62 @@ def sync_cluster(root: Path, cluster_name: str, emit: Emit, *, run: Optional[Run
     names = [only] if only else attached_to(root, cluster_name)
     if not names:
         return
-    current = cluster if cluster is not None else _cluster().get_cluster(root, cluster_name)
-    deployments = dict(current.get("deployments") or {})
-    services: Dict[str, int] = {}
-    for dep in deployments.values():
-        services[str(dep.get("service"))] = services.get(str(dep.get("service")), 0) + 1
-    source = f"cluster:{cluster_name}"
+    saved = dict(_cluster().load_clusters(root))
+    saved[cluster_name] = cluster if cluster is not None else _cluster().get_cluster(root, cluster_name)
     for name in names:
-        try:
-            existing = read_server(root, name, run=run)["routes"]
-        except BalancerError as exc:
-            if strict:
-                raise
-            emit(f"  WARNING: load balancer {name} did not answer ({exc}). Once it does: pskit lb sync {name}")
+        _sync_attached(root, name, saved, emit, run=run, strict=strict, label=cluster_name)
+
+
+def _sync_attached(root: Path, name: str, clusters: Dict[str, Dict[str, Any]], emit: Emit, *,
+                   run: Optional[RunFn] = None, strict: bool = False, label: str = "") -> None:
+    """Rewrite every cluster route on load balancer ``name`` from all the clusters attached to it. A project whose
+    placement groups run on several attached clusters gets one route to the servers of all of them (each host
+    passes another group's routes on to it)."""
+    attached = {c: clusters[c] for c in (get_balancer(root, name).get("clusters") or []) if c in clusters}
+    try:
+        existing = read_server(root, name, run=run)["routes"]
+    except BalancerError as exc:
+        if strict:
+            raise
+        emit(f"  WARNING: load balancer {name} did not answer ({exc}). Once it does: pskit lb sync {name}")
+        return
+    # The project set its own route (provider.options.balancer): left to the project.
+    own = {str(r.get("owner")) for r in existing.values()
+           if r.get("source") is not None and not str(r.get("source")).startswith("cluster:")}
+    found: Dict[str, Dict[str, Any]] = {}
+    for cname, current in sorted(attached.items()):
+        for stack, dep in sorted((current.get("deployments") or {}).items()):
+            owner = deployment_owner(stack, dep)
+            entry = found.setdefault(owner, {"service": str(dep.get("service") or stack),
+                                             "stage": str(dep.get("stage") or ""), "clusters": []})
+            entry["clusters"].append(cname)
+            if stack == owner:
+                entry["home"] = cname  # the default group's cluster
+    services: Dict[str, int] = {}
+    for entry in found.values():
+        services[entry["service"]] = services.get(entry["service"], 0) + 1
+    routes = []
+    for owner, entry in sorted(found.items()):
+        if owner in own:
             continue
-        own = {str(r.get("owner")) for r in existing.values() if r.get("source") not in (None, source)}
-        routes = []
-        for stack, dep in sorted(deployments.items()):
-            if stack in own:
-                continue  # the project set its own route (provider.options.balancer)
-            service = str(dep.get("service") or stack)
-            path = service if services.get(service, 0) < 2 else f"{service}-{dep.get('stage')}"
-            backends = cluster_backends(current, int(dep.get("port") or 8080))
-            if not backends:
-                emit(f"  WARNING: {stack} is not on load balancer {name}: the cluster has no server with an address")
-                continue
-            routes.append(make_route(stack, backends, path=path, source=source, service=service,
-                                     stage=str(dep.get("stage") or "")))
-        emit(f"Updating load balancer {name} for cluster {cluster_name} ...")
-        try:
-            set_routes(root, name, routes, emit, drop_sources=(source, tuple(deployments)), run=run, strict=strict)
-        except BalancerError as exc:
-            if strict:
-                raise
-            emit(f"  WARNING: {exc}")
+        service = entry["service"]
+        path = service if services.get(service, 0) < 2 else f"{service}-{entry['stage']}"
+        backends = owner_backends(attached, owner)
+        if not backends:
+            emit(f"  WARNING: {owner} is not on load balancer {name}: the cluster has no server with an address")
+            continue
+        home = entry.get("home") or entry["clusters"][0]
+        routes.append(make_route(owner, backends, path=path, source=f"cluster:{home}", service=service,
+                                 stage=entry["stage"]))
+    gone = tuple(sorted({str(r.get("owner")) for r in existing.values()
+                         if str(r.get("source") or "").startswith("cluster:")} - set(found)))
+    emit(f"Updating load balancer {name} for cluster {label} ...")
+    try:
+        set_routes(root, name, routes, emit, drop_owners=gone, run=run, strict=strict)
+    except BalancerError as exc:
+        if strict:
+            raise
+        emit(f"  WARNING: {exc}")
 
 
 # ----------------------------------------------------------------------------------------------- status
