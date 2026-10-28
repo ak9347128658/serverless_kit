@@ -4623,7 +4623,10 @@ def ui_object_lock(p: Dict[str, Any], _r: Request) -> Dict[str, Any]:
 
 
 def ui_presign(p: Dict[str, Any], req: Request) -> Dict[str, Any]:
-    expires = int(p.get("expires") or 3600)
+    try:
+        expires = int(p.get("expires") or 3600)
+    except (TypeError, ValueError):
+        raise _invalid("Expiry must be a number of seconds.") from None
     if expires < 1 or expires > 604800:
         raise _invalid("Expiry must be between 1 second and 7 days.")
     access = req.who if req.who in CREDENTIALS else next(iter(CREDENTIALS), "")

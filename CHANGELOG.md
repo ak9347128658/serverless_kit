@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-28
+
+### Added
+- Share links with a custom expiry: the S3 compatible server's console (`aws/s3/ui`) and the pskit studio's bucket
+  browser take any time from 1 second to 7 days (seconds, minutes, hours or days) next to the presets, and show when
+  the link expires. A time outside that range is refused with a clear message instead of being silently changed.
+- The S3 console's *Block public access* card has a *Block all (make private)* button.
+
+### Fixed
+- Studio *Make private* left a bucket readable without keys: it only deleted the bucket policy, so objects uploaded
+  with a `public-read` ACL (or a public bucket ACL) were still served, and the badge said "private". It now also
+  resets the bucket ACL to `private` and turns on all four *block public access* settings, which ignore public
+  object ACLs and policies; services without these APIs (MinIO) keep the policy-only behaviour. The badge reads
+  "private (public access blocked)" once nothing is public. *Make public (read)* turns the block off first so the
+  public policy is accepted.
+- The S3 compatible server (Python) answered a non-numeric console share expiry with a server error; it is now a
+  `400 InvalidArgument`.
+- On premises, a load balancer sent every request of a Kubernetes (k3s) cluster to one server, while a Swarm cluster
+  on the same load balancer was spread correctly. Two causes:
+  - The load balancer reused its connections to the servers (`keepalive`), and a k3s node picks a pod once per
+    connection (ServiceLB / kube-proxy), so every request stuck to the pod those few connections first reached.
+    Routes to Kubernetes servers now open a new connection per request, so each one is balanced again. Swarm and
+    Nomad routes keep reusing connections.
+  - Kubernetes could put both web replicas on one server (its default lets up to 3 share one). Web pods now spread
+    one per server first (`topologySpreadConstraints`, `maxSkew: 1`).
+
+  Run `pskit deploy` again on the Kubernetes cluster (or `pskit lb sync <name>`) to rewrite its routes and spread
+  its pods.
+
 ## [2.5.0] - 2026-10-28
 
 ### Fixed

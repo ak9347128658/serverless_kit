@@ -532,3 +532,29 @@ def test_usage_guide_and_browser_use_the_service_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(onprem_browser, "_fetch", fake_fetch)
     assert onprem_browser.browse(entry, "s3", "buckets", {}) == {"buckets": []}
     assert seen["authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDLOCAL/")
+
+
+def test_private_bucket_refuses_requests_without_keys_but_share_links_work_until_they_expire(server):
+    entry = {"service": "s3", "address": "127.0.0.1", "port": server.port, "target": {"method": "local"},
+             "user": ACCESS, "env": {"PSKIT_M_ACCESS_KEY": ACCESS, "PSKIT_M_SECRET_KEY": SECRET}}
+    server.ok("PUT", "media")
+    server.ok("PUT", "media", "open.txt", body=b"was public", headers={"x-amz-acl": "public-read"})
+    assert server.call("GET", "media", "open.txt", signed=False)[2] == b"was public"
+    out = onprem_browser.browse(entry, "s3", "policy", {"bucket": "media", "preset": "public-read"})
+    assert out["blocked"] is False and server.call("GET", "media", "open.txt", signed=False)[0] == 200
+
+    out = onprem_browser.browse(entry, "s3", "policy", {"bucket": "media", "preset": "private"})
+    assert out == {"policy": "", "blocked": True}
+    assert server.call("GET", "media", "open.txt", signed=False)[0] == 403   # the object ACL is ignored now
+    assert server.raw("GET", server.url + "/-/website/media/open.txt")[0] in (403, 404)
+    assert server.ok("GET", "media", "open.txt")[1] == b"was public"          # keys still work
+
+    url = onprem_browser.browse(entry, "s3", "share", {"bucket": "media", "key": "open.txt", "expires": 2})["url"]
+    assert "X-Amz-Expires=2&" in url and server.raw("GET", url)[2] == b"was public"
+    time.sleep(3.1)
+    assert server.raw("GET", url)[0] == 403
+    for bad in (0, 604801, "soon"):
+        with pytest.raises(onprem_browser.BrowseError, match="expires|1 second"):
+            onprem_browser.browse(entry, "s3", "share", {"bucket": "media", "key": "open.txt", "expires": bad})
+    console = _console_post(server, "Presign", {"bucket": "media", "key": "open.txt", "expires": 90})
+    assert console["expires"] == 90 and "X-Amz-Expires=90&" in console["url"]

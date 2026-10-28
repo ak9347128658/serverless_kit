@@ -147,12 +147,19 @@ def hostport(address: str, port: int) -> str:
     return f"{address}:{int(port)}"
 
 
-def backend(address: str, port: int, *, weight: int = 1, backup: bool = False, server: str = "") -> Dict[str, Any]:
+def backend(address: str, port: int, *, weight: int = 1, backup: bool = False, server: str = "",
+            per_request: bool = False) -> Dict[str, Any]:
+    """``per_request``: the server picks a replica per connection (a Kubernetes node: ServiceLB / kube-proxy), so
+    the load balancer opens a new connection for every request instead of reusing one (``keepalive``), which would
+    pin every request to the replica that connection first reached."""
     hostport(address, port)  # validates
     weight = 1 if weight is None else int(weight)
     if not 1 <= weight <= 100:
         raise ValueError(f"weight of {server or address} must be 1..100")
-    return {"address": str(address), "port": int(port), "weight": weight, "backup": bool(backup), "server": server}
+    out = {"address": str(address), "port": int(port), "weight": weight, "backup": bool(backup), "server": server}
+    if per_request:
+        out["per_request"] = True
+    return out
 
 
 # ----------------------------------------------------------------------------------------------- files
@@ -355,7 +362,10 @@ def upstream_conf(key: str, algorithm: str, backends: Sequence[Dict[str, Any]], 
             if b.get("backup") and not _hashing(algorithm):
                 params = " backup"
             lines.append(f"    server {hostport(b['address'], b['port'])}{params};")
-    lines.append("    keepalive 32;")
+    if any(b.get("per_request") for b in backends):
+        lines.append("    # no keepalive: Kubernetes picks a replica per connection, so each request gets a new one")
+    else:
+        lines.append("    keepalive 32;")
     return f"{head}upstream {name} {{\n" + "\n".join(lines) + "\n}\n"
 
 

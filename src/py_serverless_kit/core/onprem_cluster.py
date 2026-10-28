@@ -966,7 +966,8 @@ def _balancer_files(cluster: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[int, 
             continue
         try:
             backends = [lb.backend(b["address"], b["port"], weight=int(weights.get(b["server"], 1)),
-                                   backup=bool(b.get("backup")), server=b["server"]) for b in found]
+                                   backup=bool(b.get("backup")), server=b["server"],
+                                   per_request=bool(b.get("per_request"))) for b in found]
             files[f"conf.d/r-port-{listen}.conf"] = lb.port_route_conf(f"port-{listen}", listen, algorithm, backends,
                                                                       comment=stack)
         except ValueError as exc:

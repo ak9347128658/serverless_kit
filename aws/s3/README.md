@@ -117,10 +117,11 @@ RestoreObject), but a restore is immediate. Notifications, replication and loggi
 
 Open `http://127.0.0.1:9000/ui/` and sign in with an access key ID and its secret access key (or the
 `S3_UI_PASSWORD`). Buckets: create (versioning, object lock), delete (optionally emptying it first), and every setting:
-versioning, tags, default encryption, website hosting, object lock, block public access, bucket policy, object
+versioning, tags, default encryption, website hosting, object lock, block public access (*Block all* makes the
+bucket private), bucket policy, object
 ownership, ACL, CORS, lifecycle (with *Run lifecycle now*), unfinished multipart uploads, replication, notifications,
 logging. Objects: browse folders, search, upload files and whole folders (drag and drop, with progress), create
-folders, download, preview images, video, audio and text, share links (presigned GET or PUT, up to 7 days), copy,
+folders, download, preview images, video, audio and text, share links (presigned GET or PUT, valid for a preset or any custom time from 1 second to 7 days), copy,
 move and rename (also folders), delete, versions (download, delete, make current, show deleted objects), metadata and
 storage class, tags, ACLs, object lock retention and legal hold.
 
@@ -150,3 +151,22 @@ attachments (only images, video, audio, plain text and PDF can be previewed inli
 The Python and Node.js servers read and write the same layout, so you can switch between them on the same volume.
 Writes are atomic (temporary file, then rename). Back up `/data` (`tar czf - -C /data .`), which is what pskit's
 *Backup* does.
+
+## Private buckets and share links
+
+A bucket is private by default: requests without keys get `403 AccessDenied`. Anonymous access only happens when a
+bucket policy allows `Principal: "*"` or an ACL is `public-read` (the bucket's, or an object's). To make sure nothing
+in a bucket is reachable without keys, turn on all four *block public access* switches (console: *Block all*; pskit
+studio: *Make private*): public policies and public object ACLs are then ignored, and the website endpoint refuses
+too.
+
+Presigned URLs still work on a private bucket, until they expire. Pick any expiry from 1 second to 7 days
+(604800 seconds, the S3 maximum); a longer one, or a link used after it expired, is refused with `403`:
+
+```python
+url = s3.generate_presigned_url("get_object", Params={"Bucket": "photos", "Key": "2024/cat.jpg"}, ExpiresIn=90)
+```
+
+```bash
+aws --endpoint-url http://127.0.0.1:9000 s3 presign s3://photos/2024/cat.jpg --expires-in 600
+```

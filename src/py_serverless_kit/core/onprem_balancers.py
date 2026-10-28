@@ -353,7 +353,7 @@ def _route_files(item: Dict[str, Any], route: Dict[str, Any]) -> Dict[str, str]:
     for b in route.get("backends") or []:
         weight = weights.get(str(b.get("server") or ""), b.get("weight") or 1)
         backends.append(lb.backend(str(b["address"]), int(b["port"]), weight=int(weight), backup=bool(b.get("backup")),
-                                   server=str(b.get("server") or "")))
+                                   server=str(b.get("server") or ""), per_request=bool(b.get("per_request"))))
     comment = f"{route.get('owner')} ({route.get('source') or 'project'})"
     if route.get("listen"):
         files = {f"conf.d/r-{key}.conf": lb.port_route_conf(key, int(route["listen"]), algorithm, backends,
@@ -381,7 +381,8 @@ def make_route(owner: str, backends: List[Dict[str, Any]], *, path: str = "", li
             "algorithm": lb.normalize_algorithm(algorithm) if algorithm else None,
             "weights": lb.weights_for([], weights),
             "backends": [lb.backend(str(b["address"]), int(b["port"]), weight=int(b.get("weight") or 1),
-                                    backup=bool(b.get("backup")), server=str(b.get("server") or ""))
+                                    backup=bool(b.get("backup")), server=str(b.get("server") or ""),
+                                    per_request=bool(b.get("per_request")))
                          for b in backends],
             "updated_at": _now(), "updated_from": socket.gethostname(),
         }
@@ -552,11 +553,14 @@ def attached_to(root: Path, cluster: str) -> List[str]:
 
 
 def cluster_backends(cluster: Dict[str, Any], port: int) -> List[Dict[str, Any]]:
-    """Every server of a cluster that answers a deployment's port (the master as backup when it does not serve)."""
+    """Every server of a cluster that answers a deployment's port (the master as backup when it does not serve).
+    Kubernetes servers are marked ``per_request`` (see :func:`onprem_lb.backend`)."""
     primary, backup = _cluster()._backends(cluster)
     nodes = cluster.get("nodes") or {}
-    return ([{"address": str(nodes[s].get("address")), "port": port, "server": s} for s in primary]
-            + [{"address": str(nodes[s].get("address")), "port": port, "server": s, "backup": True} for s in backup])
+    extra = {"per_request": True} if cluster.get("orchestrator") == "kubernetes" else {}
+    return ([{"address": str(nodes[s].get("address")), "port": port, "server": s, **extra} for s in primary]
+            + [{"address": str(nodes[s].get("address")), "port": port, "server": s, "backup": True, **extra}
+               for s in backup])
 
 
 def deployment_owner(stack: str, dep: Dict[str, Any]) -> str:

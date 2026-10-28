@@ -77,6 +77,21 @@ def test_s3_upload_metadata_errors_and_share(monkeypatch):
     assert q["X-Amz-Expires"] == ["600"] and q["X-Amz-SignedHeaders"] == ["host"] and len(q["X-Amz-Signature"][0]) == 64
 
 
+
+def test_s3_make_private_also_blocks_public_access_where_the_service_has_it(monkeypatch):
+    nope = (501, {}, b"<Error><Code>NotImplemented</Code></Error>")
+    fake = FakeService([(204, {}, b""), nope, nope, (404, {}, b""), nope])  # MinIO: no ACLs, no public access block
+    monkeypatch.setattr(brw, "_fetch", fake)
+    assert brw.browse(MINIO, "s3", "policy", {"bucket": "files", "preset": "private"}) == {"policy": "", "blocked": False}
+    assert [(c["method"], urlsplit(c["path"]).query) for c in fake.calls] == [
+        ("DELETE", "policy="), ("PUT", "acl="), ("PUT", "publicAccessBlock="), ("GET", "policy="),
+        ("GET", "publicAccessBlock=")]
+    assert fake.calls[1]["headers"]["x-amz-acl"] == "private"
+    assert fake.calls[2]["data"].count(b">true<") == 4
+    with pytest.raises(brw.BrowseError, match="1 second to 7 days"):
+        brw.browse(MINIO, "s3", "share", {"bucket": "files", "key": "a", "expires": 8 * 24 * 3600})
+    assert "X-Amz-Expires=5&" in brw.browse(MINIO, "s3", "share", {"bucket": "files", "key": "a", "expires": 5})["url"]
+
 def test_vault_secrets(monkeypatch):
     bao = {"service": "openbao", "address": "127.0.0.1", "port": 8200, "target": {"method": "local"},
            "env": {"PSKIT_S_TOKEN": "tok", "PSKIT_S_MOUNT": "secret"}}

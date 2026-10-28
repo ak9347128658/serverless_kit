@@ -275,7 +275,7 @@ def _s3(entry: Dict[str, Any], action: str, body: Dict[str, Any]) -> Dict[str, A
             s3.call("DELETE", bucket, key, ok=(200, 204))
         return {"copied": f"{to_bucket}/{to_key}"}
     if action == "share":
-        expires = max(60, min(7 * 24 * 3600, int(body.get("expires") or 3600)))
+        expires = _expires(body)
         return {"url": s3.presign(_bucket(body), _key(body), expires), "expires": expires}
     if action == "versioning":
         bucket = _bucket(body)
@@ -292,8 +292,13 @@ def _s3(entry: Dict[str, Any], action: str, body: Dict[str, Any]) -> Dict[str, A
             body = {**body, "policy": json.dumps({"Version": "2012-10-17", "Statement": [{
                 "Effect": "Allow", "Principal": {"AWS": ["*"]}, "Action": ["s3:GetObject"],
                 "Resource": [f"arn:aws:s3:::{bucket}/*"]}]})}
+            _set_public_block(s3, bucket, False)  # a block refuses public policies
         if body.get("preset") == "private":
             s3.call("DELETE", bucket, query={"policy": ""}, ok=(200, 204))
+            # Objects uploaded with a public-read ACL (or a public bucket ACL) stay readable without keys after the
+            # policy is gone: reset the bucket ACL and block public access, which also ignores public object ACLs.
+            _try(s3, "PUT", bucket, query={"acl": ""}, headers={"x-amz-acl": "private"})
+            _set_public_block(s3, bucket, True)
         elif body.get("policy"):
             try:
                 text = json.dumps(json.loads(str(body["policy"])))
@@ -301,8 +306,56 @@ def _s3(entry: Dict[str, Any], action: str, body: Dict[str, Any]) -> Dict[str, A
                 raise BrowseError("the policy must be JSON") from None
             s3.call("PUT", bucket, query={"policy": ""}, body=text.encode(), ok=(200, 204))
         status, _h, data = s3.call("GET", bucket, query={"policy": ""}, ok=(200, 404))
-        return {"policy": data.decode("utf-8", "replace") if status == 200 else ""}
+        return {"policy": data.decode("utf-8", "replace") if status == 200 else "",
+                "blocked": _public_blocked(s3, bucket)}
     raise BrowseError(f"unknown S3 action {action!r}")
+
+
+MAX_SHARE = 7 * 24 * 3600  # the longest S3 presigned URL
+PUBLIC_BLOCK = ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")
+
+
+def _expires(body: Dict[str, Any]) -> int:
+    """Seconds a share link stays valid: any whole number from 1 second to 7 days (default 1 hour)."""
+    raw = body.get("expires")
+    try:
+        expires = int(raw) if raw not in (None, "") else 3600
+    except (TypeError, ValueError):
+        raise BrowseError("expires must be a number of seconds") from None
+    if not 1 <= expires <= MAX_SHARE:
+        raise BrowseError("a share link is valid for 1 second to 7 days (604800 seconds)")
+    return expires
+
+
+def _try(s3: S3, method: str, bucket: str, **kwargs: Any) -> bool:
+    """A call some S3 services don't implement (MinIO has no ACLs or public access block): False when refused."""
+    try:
+        s3.call(method, bucket, ok=(200, 204), **kwargs)
+    except BrowseError:
+        return False
+    return True
+
+
+def _set_public_block(s3: S3, bucket: str, on: bool) -> bool:
+    flags = "".join(f"<{n}>{'true' if on else 'false'}</{n}>" for n in PUBLIC_BLOCK)
+    xml = f'<PublicAccessBlockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{flags}' \
+          "</PublicAccessBlockConfiguration>"
+    return _try(s3, "PUT", bucket, query={"publicAccessBlock": ""}, body=xml.encode())
+
+
+def _public_blocked(s3: S3, bucket: str) -> bool:
+    """Requests without keys are refused whatever the policy and ACLs say (public access block)."""
+    try:
+        status, _h, data = s3.call("GET", bucket, query={"publicAccessBlock": ""}, ok=(200, 404))
+    except BrowseError:
+        return False
+    if status != 200:
+        return False
+    try:
+        root = _xml(data)
+    except BrowseError:
+        return False
+    return all((root.findtext(n) or "").strip().lower() == "true" for n in ("IgnorePublicAcls", "RestrictPublicBuckets"))
 
 
 def _s3_delete_versions(s3: S3, bucket: str, prefix: str) -> int:

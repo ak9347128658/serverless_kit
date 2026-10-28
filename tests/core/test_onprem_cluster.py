@@ -1098,6 +1098,32 @@ def test_master_serves_defaults_and_web_placement(servers):
     assert "affinity" not in k8s["items"][1]["spec"]["template"]["spec"]
 
 
+
+def test_kubernetes_requests_spread_over_every_server_behind_the_load_balancer():
+    from py_serverless_kit.core import onprem_balancers as balancers
+
+    # Web pods: one per server first (the scheduler's default would let two share a server); main is pinned.
+    k8s = scripts.kubernetes_manifest("s", "i", port=8080, replicas=2, master_node="m", cpu=0.25, memory_mb=256)
+    spread = k8s["items"][3]["spec"]["template"]["spec"]["topologySpreadConstraints"]
+    assert spread == [{"maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway",
+                       "labelSelector": {"matchLabels": {"app": "s", "role": "web"}}}]
+    assert "topologySpreadConstraints" not in k8s["items"][1]["spec"]["template"]["spec"]
+
+    # Kubernetes nodes pick a pod per connection: no reused upstream connections, or every request sticks to one.
+    nodes = {"m": {"address": "10.0.0.5"}, "w": {"address": "10.0.0.6"}}
+    kube = {"orchestrator": "kubernetes", "master": "m", "nodes": nodes, "master_serves": True}
+    swarm = {**kube, "orchestrator": "swarm"}
+    found = balancers.cluster_backends(kube, 8080)
+    assert [b["server"] for b in found] == ["m", "w"] and all(b["per_request"] for b in found)
+    assert not any(b.get("per_request") for b in balancers.cluster_backends(swarm, 8080))
+    route = balancers.make_route("pskit-shop-dev", found, path="shop")
+    assert all(b["per_request"] for b in route["backends"])
+    for algorithm in ("round_robin", "least_connections", "least_time", "ip_hash"):
+        conf = lb.upstream_conf("shop", algorithm, route["backends"])
+        assert "keepalive" not in conf.replace("no keepalive", "") and "10.0.0.6" in conf, algorithm
+    plain = [lb.backend("10.0.0.7", 8080, server="s1")]
+    assert "keepalive 32;" in lb.upstream_conf("shop", "round_robin", plain) and "per_request" not in plain[0]
+
 def test_balancer_refuses_members_and_shared_ports(servers):
     srv.save_server(servers, "lb1", {"host": "10.0.0.9", "user": "root", "auth": "agent"})
     fake = FakeSSH()

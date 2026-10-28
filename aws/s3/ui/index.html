@@ -700,19 +700,37 @@ function deleteOne(o) {
   deleteSelected();
 }
 
+const SHARE_MAX = 604800; // the longest presigned URL: 7 days
+const SHARE_UNITS = [["1", "seconds"], ["60", "minutes"], ["3600", "hours"], ["86400", "days"]];
+
 function share(o) {
-  const expiry = h("select", {}, [["900", "15 minutes"], ["3600", "1 hour"], ["43200", "12 hours"], ["86400", "1 day"], ["604800", "7 days (the longest)"]]
+  const expiry = h("select", {}, [["900", "15 minutes"], ["3600", "1 hour"], ["43200", "12 hours"], ["86400", "1 day"], ["604800", "7 days (the longest)"], ["custom", "Custom…"]]
     .map(([v, l]) => h("option", { value: v, selected: v === "3600" }, l)));
+  const amount = h("input", { type: "number", min: "1", step: "1", value: "30" });
+  const unit = h("select", {}, SHARE_UNITS.map(([v, l]) => h("option", { value: v, selected: v === "60" }, l)));
+  const custom = h("div", { class: "row", style: "display:none" }, h("div", { class: "grow" }, amount), unit);
   const method = h("select", {}, h("option", { value: "GET" }, "Download (GET)"), h("option", { value: "PUT" }, "Upload a new version (PUT)"));
   const out = h("textarea", { readonly: true, style: "min-height:90px" });
+  const until = h("p", { class: "muted" });
+  const seconds = () => expiry.value === "custom" ? Math.round(Number(amount.value) * Number(unit.value)) : Number(expiry.value);
   const make = async () => {
-    const data = await attempt(() => api("Presign", { bucket: state.bucket, key: o.key, versionId: o.latest ? "" : o.versionId, expires: Number(expiry.value), method: method.value, host: location.host, scheme: location.protocol.replace(":", "") }));
-    if (data) out.value = data.url;
+    custom.style.display = expiry.value === "custom" ? "" : "none";
+    const expires = seconds();
+    if (!Number.isFinite(expires) || expires < 1 || expires > SHARE_MAX) {
+      out.value = "";
+      until.textContent = "A link is valid for 1 second to 7 days.";
+      return;
+    }
+    const data = await attempt(() => api("Presign", { bucket: state.bucket, key: o.key, versionId: o.latest ? "" : o.versionId, expires, method: method.value, host: location.host, scheme: location.protocol.replace(":", "") }));
+    if (data) {
+      out.value = data.url;
+      until.textContent = `Expires ${new Date(Date.now() + data.expires * 1000).toLocaleString()} (${data.expires} seconds).`;
+    }
   };
-  expiry.onchange = make; method.onchange = make;
+  expiry.onchange = make; method.onchange = make; unit.onchange = make; amount.onchange = make;
   modal("Share link (presigned URL)", [
-    h("p", { class: "muted" }, "Anyone with the link can use it until it expires, without keys. It is signed with your access key."),
-    h("label", {}, "Valid for"), expiry, h("label", {}, "Allows"), method, h("label", {}, "Link"), out,
+    h("p", { class: "muted" }, "Anyone with the link can use it until it expires, without keys, even when the bucket is private. It is signed with your access key."),
+    h("label", {}, "Valid for"), expiry, custom, h("label", {}, "Allows"), method, h("label", {}, "Link"), out, until,
   ], [{ label: "Copy link", run: async () => { await copy(out.value); return false; } }]);
   make();
 }
@@ -853,10 +871,11 @@ function renderPermissions(body) {
   const publicPolicy = JSON.stringify({ Version: "2012-10-17", Statement: [{ Sid: "PublicRead", Effect: "Allow", Principal: "*", Action: "s3:GetObject", Resource: `arn:aws:s3:::${info.name}/*` }] }, null, 2);
   body.append(
     h("div", { class: "card" }, h("h3", {}, "Block public access"),
-      h("p", { class: "muted" }, "Requests without keys are refused unless a bucket policy or an ACL makes objects public. These switches stop that."),
+      h("p", { class: "muted" }, "Requests without keys are refused unless a bucket policy or an ACL makes objects public. These switches stop that. With all four on the bucket is private: only signed requests and presigned share links reach its objects."),
       ...checks.map(([n, el]) => h("label", { class: "check" }, el, n)),
       h("div", { class: "row", style: "margin-top:8px" },
         h("button", { class: "primary", onclick: () => setting("publicAccessBlock", `<PublicAccessBlockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${checks.map(([n, el]) => `<${n}>${el.checked}</${n}>`).join("")}</PublicAccessBlockConfiguration>`) }, "Save"),
+        h("button", { onclick: () => setting("publicAccessBlock", `<PublicAccessBlockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">${checks.map(([n]) => `<${n}>true</${n}>`).join("")}</PublicAccessBlockConfiguration>`, "Bucket is private") }, "Block all (make private)"),
         info.configs.publicAccessBlock ? h("button", { class: "danger", onclick: () => setting("publicAccessBlock", "", "Removed") }, "Remove") : null)),
     h("div", { class: "card" }, h("h3", {}, "Bucket policy", info.policyPublic ? h("span", { class: "chip warn", style: "margin-left:8px" }, "public") : null),
       h("p", { class: "muted" }, "IAM policy JSON. Statements for Principal \"*\" decide what requests without keys may do (GetObject, PutObject, ListBucket, ...). Every valid key has full access."),

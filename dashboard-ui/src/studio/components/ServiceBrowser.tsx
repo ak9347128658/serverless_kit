@@ -23,6 +23,14 @@ export function ServiceBrowser({ serviceKey, kinds, onClose }: { serviceKey: str
 
 type Body = Record<string, unknown>;
 
+const SHARE_MAX = 7 * 24 * 3600; // the longest S3 presigned URL
+const SHARE_UNITS = [
+  { value: "1", label: "seconds" },
+  { value: "60", label: "minutes" },
+  { value: "3600", label: "hours" },
+  { value: "86400", label: "days" },
+];
+
 function useBrowse(serviceKey: string, kind: string) {
   return useCallback(<T,>(action: string, body: Body = {}) => api.onpremBrowse<T>(serviceKey, kind, action, body), [serviceKey, kind]);
 }
@@ -112,7 +120,8 @@ function StorageBrowser({ serviceKey, kind }: { serviceKey: string; kind: string
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<{ head: Head; versions: Version[] } | null>(null);
-  const [share, setShare] = useState<string | null>(null);
+  const [share, setShare] = useState<{ url: string; expires: number } | null>(null);
+  const [shareFor, setShareFor] = useState<{ key: string; amount: string; unit: string } | null>(null);
   const [folderName, setFolderName] = useState("");
   const [target, setTarget] = useState<{ key: string; mode: "move" | "copy"; to: string } | null>(null);
   const [settings, setSettings] = useState(false);
@@ -212,9 +221,14 @@ function StorageBrowser({ serviceKey, kind }: { serviceKey: string; kind: string
   };
 
   const makeShare = async (key: string, expires: number) => {
-    const r = await run(() => call<{ url: string }>("share", { bucket, key, expires }));
+    if (!Number.isFinite(expires) || expires < 1 || expires > SHARE_MAX) {
+      setError("A share link is valid for 1 second to 7 days.");
+      return;
+    }
+    const r = await run(() => call<{ url: string; expires: number }>("share", { bucket, key, expires }));
     if (r) {
-      setShare(r.url);
+      setShare({ url: r.url, expires: Date.now() + r.expires * 1000 });
+      setShareFor(null);
       navigator.clipboard?.writeText(r.url).then(() => toast("Share link copied", "ok"), () => undefined);
     }
   };
@@ -369,12 +383,15 @@ function StorageBrowser({ serviceKey, kind }: { serviceKey: string; kind: string
                       </button>
                       <EnumSelect
                         value=""
-                        onChange={(v) => v && void makeShare(o.key, Number(v))}
+                        onChange={(v) =>
+                          v === "custom" ? setShareFor({ key: o.key, amount: "30", unit: "60" }) : v && void makeShare(o.key, Number(v))
+                        }
                         options={[
                           { value: "", label: "Share…" },
                           { value: "3600", label: "link for 1 hour" },
                           { value: "86400", label: "link for 1 day" },
                           { value: "604800", label: "link for 7 days" },
+                          { value: "custom", label: "link for…" },
                         ]}
                       />
                       <button type="button" className="btn btn-sm" onClick={() => setTarget({ key: o.key, mode: "move", to: o.key })}>
@@ -410,16 +427,44 @@ function StorageBrowser({ serviceKey, kind }: { serviceKey: string; kind: string
           </div>
         </>
       )}
+      {shareFor && (
+        <div className="card card-pad stack">
+          <b>Share link for {shareFor.key}</b>
+          <div className="row-gap">
+            <span className="small">Valid for</span>
+            <TextInput value={shareFor.amount} onChange={(amount) => setShareFor({ ...shareFor, amount })} />
+            <EnumSelect value={shareFor.unit} onChange={(unit) => setShareFor({ ...shareFor, unit })} options={SHARE_UNITS} />
+          </div>
+          <div className="muted small">From 1 second to 7 days. After that the link is refused.</div>
+          <div className="row-gap">
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={busy}
+              onClick={() => void makeShare(shareFor.key, Math.round(Number(shareFor.amount) * Number(shareFor.unit)))}
+            >
+              Create link
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => setShareFor(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       {share && (
         <div className="hint-box">
           Share link (copied):{" "}
-          <a className="mono small" href={share} target="_blank" rel="noreferrer">
-            {share.length > 90 ? share.slice(0, 90) + "…" : share}
+          <a className="mono small" href={share.url} target="_blank" rel="noreferrer">
+            {share.url.length > 90 ? share.url.slice(0, 90) + "…" : share.url}
           </a>{" "}
           <button type="button" className="btn btn-sm" onClick={() => setShare(null)}>
             Hide
           </button>
-          {!s3 && <div className="muted small">The emulator has no signed links: this URL works without a login while the port is reachable.</div>}
+          {s3 ? (
+            <div className="muted small">Expires {new Date(share.expires).toLocaleString()}. It works even when the bucket is private.</div>
+          ) : (
+            <div className="muted small">The emulator has no signed links: this URL works without a login while the port is reachable.</div>
+          )}
         </div>
       )}
       {target && (
@@ -519,20 +564,25 @@ function BucketSettings({ call, bucket }: { call: <T>(action: string, body?: Bod
   const toast = useToast();
   const [versioning, setVersioning] = useState<string | null>(null);
   const [policy, setPolicy] = useState("");
+  const [blocked, setBlocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const show = (r: { policy: string; blocked?: boolean }) => {
+    setPolicy(r.policy ? JSON.stringify(JSON.parse(r.policy), null, 2) : "");
+    setBlocked(!!r.blocked);
+  };
   useEffect(() => {
     call<{ status: string }>("versioning", { bucket }).then((r) => setVersioning(r.status), (e) => setError(errorMessage(e)));
-    call<{ policy: string }>("policy", { bucket }).then((r) => setPolicy(r.policy ? JSON.stringify(JSON.parse(r.policy), null, 2) : ""), () => undefined);
+    call<{ policy: string; blocked?: boolean }>("policy", { bucket }).then(show, () => undefined);
   }, [call, bucket]);
   const apply = (body: Body, done: string) =>
-    call<{ policy: string }>("policy", { bucket, ...body }).then(
+    call<{ policy: string; blocked?: boolean }>("policy", { bucket, ...body }).then(
       (r) => {
-        setPolicy(r.policy ? JSON.stringify(JSON.parse(r.policy), null, 2) : "");
+        show(r);
         toast(done, "ok");
       },
       (e) => setError(errorMessage(e)),
     );
-  const isPublic = /"s3:GetObject"/.test(policy) && /"\*"/.test(policy);
+  const isPublic = !blocked && /"s3:GetObject"/.test(policy) && /"\*"/.test(policy);
   return (
     <div className="card card-pad stack">
       {error && <div className="form-error">{error}</div>}
@@ -551,13 +601,19 @@ function BucketSettings({ call, bucket }: { call: <T>(action: string, body?: Bod
       />
       <div className="row-gap wrap">
         <b>Access</b>
-        <span className={`badge ${isPublic ? "badge-warn" : ""}`}>{isPublic ? "public read" : policy ? "custom policy" : "private"}</span>
+        <span className={`badge ${isPublic ? "badge-warn" : ""}`}>
+          {blocked ? "private (public access blocked)" : isPublic ? "public read" : policy ? "custom policy" : "private"}
+        </span>
         <button type="button" className="btn btn-sm" onClick={() => void apply({ preset: "private" }, "Bucket is private")}>
           Make private
         </button>
         <button type="button" className="btn btn-sm" onClick={() => void apply({ preset: "public-read" }, "Anyone can read objects now")}>
           Make public (read)
         </button>
+      </div>
+      <div className="muted small">
+        Make private removes the policy, resets the bucket ACL and blocks public access, so objects uploaded with a public-read ACL
+        are refused without keys too (where the service supports it). Share links keep working until they expire.
       </div>
       <label className="small">Bucket policy (JSON, the S3 format)</label>
       <textarea className="input mono" rows={8} value={policy} onChange={(e) => setPolicy(e.target.value)} placeholder="no policy: private" />

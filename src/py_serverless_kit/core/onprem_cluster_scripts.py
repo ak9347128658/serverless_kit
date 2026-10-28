@@ -394,10 +394,16 @@ def kubernetes_manifest(stack: str, image: str, *, port: int, replicas: int, mas
             pod["volumes"] = [{"name": "data", "hostPath": {"path": f"{data_root or DATA_ROOT}/{stack}",
                                                              "type": "DirectoryOrCreate"}}]
             pod["nodeSelector"] = {"kubernetes.io/hostname": master_node}
-        elif avoid_master:
-            off_master = {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": [master_node]}
-            pod["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
-                "nodeSelectorTerms": [{"matchExpressions": [off_master]}]}}}
+        else:
+            # One web replica per server before any gets a second (the scheduler's default lets 3 share a server),
+            # so every server the load balancer sends to runs one.
+            pod["topologySpreadConstraints"] = [{"maxSkew": 1, "topologyKey": "kubernetes.io/hostname",
+                                                 "whenUnsatisfiable": "ScheduleAnyway",
+                                                 "labelSelector": {"matchLabels": labels}}]
+            if avoid_master:
+                off_master = {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": [master_node]}
+                pod["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{"matchExpressions": [off_master]}]}}}
         return {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
