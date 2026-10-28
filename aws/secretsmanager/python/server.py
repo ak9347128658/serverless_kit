@@ -22,10 +22,21 @@ Settings (environment):
 ``SM_UI`` (``on``), ``SM_UI_PASSWORD``
     The web console, and a console password other than the secret key (sign in with any access key id then).
 
-The data is one JSON file (``secretsmanager.json``, mode 600) written atomically. The Node.js server
-(``../nodejs/server.js``) reads and writes the same file, so you can switch between them.
+``SM_MASTER_KEY``
+    Encrypts secret values at rest: 32 random bytes in base64 (``openssl rand -base64 32``), key id ``default``.
+``SM_MASTER_KEYS``, ``SM_MASTER_KEY_ID``
+    More master keys (``id1:base64key,id2:base64key``; ``KmsKeyId`` on CreateSecret / UpdateSecret picks one) and
+    the id used for secrets without a KmsKeyId. Changing it rewraps the data keys on the next start.
+``SM_ENCRYPTION``
+    ``aes-256-gcm`` (default when a master key is set), ``chacha20-poly1305``, ``aes-256-cbc-hmac`` or ``off``.
 
-``python server.py --check`` exits 0 when the server answers on ``/health`` (a container health check).
+The data is one JSON file (``secretsmanager.json``, mode 600) written atomically. With a master key every version's
+value is stored encrypted with its own data key (envelope encryption); the API returns it decrypted to signed
+callers, so clients don't change. The Node.js server (``../nodejs/server.js``) reads and writes the same file, so you
+can switch between them.
+
+``python server.py --check`` exits 0 when the server answers on ``/health`` (a container health check);
+``python server.py --rewrap`` encrypts, decrypts or rewraps the file for the current settings and exits.
 """
 
 from __future__ import annotations
@@ -114,24 +125,482 @@ def _today() -> float:
     return float(int(time.time()) // 86400 * 86400)
 
 
+# ----------------------------------------------------------------------------- encryption at rest
+#
+# Envelope encryption, as AWS does with KMS: every secret version gets its own random 256-bit data key (DEK) that
+# encrypts the value; the DEK is stored wrapped (AES-256-GCM) by a master key (SM_MASTER_KEY / SM_MASTER_KEYS). The
+# value's associated data is "ARN|VersionId", so a ciphertext can't be moved to another secret or version. The
+# standard library has no ciphers, so AES, GCM, ChaCha20 and Poly1305 are written out here; they are checked against
+# the FIPS-197, SP 800-38D and RFC 8439 test vectors and against Node's crypto (../nodejs/server.js).
+
+
+def _gf_mul(a: int, b: int) -> int:
+    out = 0
+    while b:
+        if b & 1:
+            out ^= a
+        a = ((a << 1) ^ 0x11B) if a & 0x80 else a << 1
+        b >>= 1
+    return out
+
+
+def _aes_tables() -> Tuple[List[int], List[int], List[List[int]], List[List[int]]]:
+    exp, log_ = [0] * 255, [0] * 256
+    g = 1
+    for i in range(255):  # powers of the generator 3
+        exp[i], log_[g] = g, i
+        g = _gf_mul(g, 3)
+    sbox = [0] * 256
+    for x in range(256):
+        inv = exp[(255 - log_[x]) % 255] if x else 0
+        s = inv
+        for shift in (1, 2, 3, 4):
+            s ^= ((inv << shift) | (inv >> (8 - shift))) & 0xFF
+        sbox[x] = s ^ 0x63
+    inv_sbox = [0] * 256
+    for x, s in enumerate(sbox):
+        inv_sbox[s] = x
+    te: List[List[int]] = [[], [], [], []]
+    td: List[List[int]] = [[], [], [], []]
+    for x in range(256):
+        s, i = sbox[x], inv_sbox[x]
+        col = (_gf_mul(s, 2), s, s, _gf_mul(s, 3))
+        icol = (_gf_mul(i, 14), _gf_mul(i, 9), _gf_mul(i, 13), _gf_mul(i, 11))
+        for r in range(4):  # Te[r] / Td[r] are Te[0] / Td[0] rotated right by r bytes
+            te[r].append(int.from_bytes(bytes(col[(k - r) % 4] for k in range(4)), "big"))
+            td[r].append(int.from_bytes(bytes(icol[(k - r) % 4] for k in range(4)), "big"))
+    return sbox, inv_sbox, te, td
+
+
+_SBOX: List[int] = []
+_INV_SBOX: List[int] = []
+_TE: List[List[int]] = []
+_TD: List[List[int]] = []
+
+
+class _AES256:
+    """The AES-256 block cipher (FIPS-197) with 32-bit lookup tables."""
+
+    def __init__(self, key: bytes) -> None:
+        global _SBOX, _INV_SBOX, _TE, _TD
+        if not _SBOX:
+            _SBOX, _INV_SBOX, _TE, _TD = _aes_tables()
+        if len(key) != 32:
+            raise ValueError("AES-256 needs a 32-byte key")
+        sb = _SBOX
+        w = [int.from_bytes(key[i:i + 4], "big") for i in range(0, 32, 4)]
+        rcon = 1
+        for i in range(8, 60):
+            t = w[i - 1]
+            if i % 8 == 0:
+                t = ((t << 8) | (t >> 24)) & 0xFFFFFFFF
+                t = (sb[t >> 24] << 24 | sb[(t >> 16) & 255] << 16 | sb[(t >> 8) & 255] << 8 | sb[t & 255]) ^ (rcon << 24)
+                rcon = _gf_mul(rcon, 2)
+            elif i % 8 == 4:
+                t = sb[t >> 24] << 24 | sb[(t >> 16) & 255] << 16 | sb[(t >> 8) & 255] << 8 | sb[t & 255]
+            w.append(w[i - 8] ^ t)
+        self.enc = w
+        dec: List[int] = []
+        for r in range(14, -1, -1):
+            for t in w[4 * r:4 * r + 4]:
+                if 0 < r < 14:  # InvMixColumns on the middle round keys (the equivalent inverse cipher)
+                    t = (_TD[0][sb[t >> 24]] ^ _TD[1][sb[(t >> 16) & 255]] ^ _TD[2][sb[(t >> 8) & 255]]
+                         ^ _TD[3][sb[t & 255]])
+                dec.append(t)
+        self.dec = dec
+
+    def encrypt_block(self, block: bytes) -> bytes:
+        te0, te1, te2, te3 = _TE
+        sb, k = _SBOX, self.enc
+        s0, s1, s2, s3 = (int.from_bytes(block[i:i + 4], "big") ^ k[i // 4] for i in range(0, 16, 4))
+        for r in range(1, 14):
+            o = 4 * r
+            s0, s1, s2, s3 = (
+                te0[s0 >> 24] ^ te1[(s1 >> 16) & 255] ^ te2[(s2 >> 8) & 255] ^ te3[s3 & 255] ^ k[o],
+                te0[s1 >> 24] ^ te1[(s2 >> 16) & 255] ^ te2[(s3 >> 8) & 255] ^ te3[s0 & 255] ^ k[o + 1],
+                te0[s2 >> 24] ^ te1[(s3 >> 16) & 255] ^ te2[(s0 >> 8) & 255] ^ te3[s1 & 255] ^ k[o + 2],
+                te0[s3 >> 24] ^ te1[(s0 >> 16) & 255] ^ te2[(s1 >> 8) & 255] ^ te3[s2 & 255] ^ k[o + 3],
+            )
+        out = (
+            (sb[s0 >> 24] << 24 | sb[(s1 >> 16) & 255] << 16 | sb[(s2 >> 8) & 255] << 8 | sb[s3 & 255]) ^ k[56],
+            (sb[s1 >> 24] << 24 | sb[(s2 >> 16) & 255] << 16 | sb[(s3 >> 8) & 255] << 8 | sb[s0 & 255]) ^ k[57],
+            (sb[s2 >> 24] << 24 | sb[(s3 >> 16) & 255] << 16 | sb[(s0 >> 8) & 255] << 8 | sb[s1 & 255]) ^ k[58],
+            (sb[s3 >> 24] << 24 | sb[(s0 >> 16) & 255] << 16 | sb[(s1 >> 8) & 255] << 8 | sb[s2 & 255]) ^ k[59],
+        )
+        return b"".join(v.to_bytes(4, "big") for v in out)
+
+    def decrypt_block(self, block: bytes) -> bytes:
+        td0, td1, td2, td3 = _TD
+        ib, k = _INV_SBOX, self.dec
+        s0, s1, s2, s3 = (int.from_bytes(block[i:i + 4], "big") ^ k[i // 4] for i in range(0, 16, 4))
+        for r in range(1, 14):
+            o = 4 * r
+            s0, s1, s2, s3 = (
+                td0[s0 >> 24] ^ td1[(s3 >> 16) & 255] ^ td2[(s2 >> 8) & 255] ^ td3[s1 & 255] ^ k[o],
+                td0[s1 >> 24] ^ td1[(s0 >> 16) & 255] ^ td2[(s3 >> 8) & 255] ^ td3[s2 & 255] ^ k[o + 1],
+                td0[s2 >> 24] ^ td1[(s1 >> 16) & 255] ^ td2[(s0 >> 8) & 255] ^ td3[s3 & 255] ^ k[o + 2],
+                td0[s3 >> 24] ^ td1[(s2 >> 16) & 255] ^ td2[(s1 >> 8) & 255] ^ td3[s0 & 255] ^ k[o + 3],
+            )
+        out = (
+            (ib[s0 >> 24] << 24 | ib[(s3 >> 16) & 255] << 16 | ib[(s2 >> 8) & 255] << 8 | ib[s1 & 255]) ^ k[56],
+            (ib[s1 >> 24] << 24 | ib[(s0 >> 16) & 255] << 16 | ib[(s3 >> 8) & 255] << 8 | ib[s2 & 255]) ^ k[57],
+            (ib[s2 >> 24] << 24 | ib[(s1 >> 16) & 255] << 16 | ib[(s0 >> 8) & 255] << 8 | ib[s3 & 255]) ^ k[58],
+            (ib[s3 >> 24] << 24 | ib[(s2 >> 16) & 255] << 16 | ib[(s1 >> 8) & 255] << 8 | ib[s0 & 255]) ^ k[59],
+        )
+        return b"".join(v.to_bytes(4, "big") for v in out)
+
+
+class DecryptError(Exception):
+    """A tag did not match: wrong master key, or the data was changed."""
+
+
+def _xor(a: bytes, b: bytes) -> bytes:
+    return (int.from_bytes(a, "big") ^ int.from_bytes(b[:len(a)], "big")).to_bytes(len(a), "big")
+
+
+_GCM_R = 0xE1 << 120
+
+
+def _ghash(h: int, aad: bytes, ct: bytes) -> int:
+    # GF(2^128) multiplication by H, 4 bits at a time with a 16-entry table built per message.
+    table = [0] * 16
+    v = h
+    for bit in (8, 4, 2, 1):
+        table[bit] = v
+        v = (v >> 1) ^ (_GCM_R if v & 1 else 0)
+    for i in (3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15):
+        table[i] = table[i & 8] ^ table[i & 4] ^ table[i & 2] ^ table[i & 1]
+    reduce = [0] * 16  # the bits shifted out of the low nibble, folded back with R
+    for i in range(16):
+        r = 0
+        for bit in range(4):
+            if i & (1 << bit):
+                r ^= _GCM_R >> (3 - bit)
+        reduce[i] = r
+
+    def mul(x: int) -> int:
+        z = 0
+        for shift in range(0, 128, 4):
+            low = z & 15
+            z = (z >> 4) ^ reduce[low]
+            z ^= table[(x >> shift) & 15]
+        return z
+
+    y = 0
+    for data in (aad, ct):
+        for i in range(0, len(data), 16):
+            y = mul(y ^ int.from_bytes(data[i:i + 16].ljust(16, b"\0"), "big"))
+    return mul(y ^ ((len(aad) * 8) << 64 | len(ct) * 8))
+
+
+def _ctr(cipher: _AES256, iv: bytes, start: int, data: bytes) -> bytes:
+    out = bytearray()
+    for n, i in enumerate(range(0, len(data), 16)):
+        pad = cipher.encrypt_block(iv + ((start + n) & 0xFFFFFFFF).to_bytes(4, "big"))
+        out += _xor(data[i:i + 16], pad)
+    return bytes(out)
+
+
+def aes_gcm_encrypt(key: bytes, iv: bytes, plain: bytes, aad: bytes) -> Tuple[bytes, bytes]:
+    cipher = _AES256(key)
+    h = int.from_bytes(cipher.encrypt_block(bytes(16)), "big")
+    ct = _ctr(cipher, iv, 2, plain)
+    tag = _xor(cipher.encrypt_block(iv + b"\0\0\0\1"), _ghash(h, aad, ct).to_bytes(16, "big"))
+    return ct, tag
+
+
+def aes_gcm_decrypt(key: bytes, iv: bytes, ct: bytes, tag: bytes, aad: bytes) -> bytes:
+    cipher = _AES256(key)
+    h = int.from_bytes(cipher.encrypt_block(bytes(16)), "big")
+    want = _xor(cipher.encrypt_block(iv + b"\0\0\0\1"), _ghash(h, aad, ct).to_bytes(16, "big"))
+    if not hmac.compare_digest(want, tag):
+        raise DecryptError("AES-GCM tag mismatch")
+    return _ctr(cipher, iv, 2, ct)
+
+
+def _chacha_block(key: bytes, counter: int, nonce: bytes) -> bytes:
+    m = 0xFFFFFFFF
+    state = [0x61707865, 0x3320646E, 0x79622D32, 0x6B206574,
+             *(int.from_bytes(key[i:i + 4], "little") for i in range(0, 32, 4)),
+             counter & m, *(int.from_bytes(nonce[i:i + 4], "little") for i in range(0, 12, 4))]
+    x = list(state)
+
+    def qr(a: int, b: int, c: int, d: int) -> None:
+        x[a] = (x[a] + x[b]) & m
+        x[d] ^= x[a]
+        x[d] = ((x[d] << 16) | (x[d] >> 16)) & m
+        x[c] = (x[c] + x[d]) & m
+        x[b] ^= x[c]
+        x[b] = ((x[b] << 12) | (x[b] >> 20)) & m
+        x[a] = (x[a] + x[b]) & m
+        x[d] ^= x[a]
+        x[d] = ((x[d] << 8) | (x[d] >> 24)) & m
+        x[c] = (x[c] + x[d]) & m
+        x[b] ^= x[c]
+        x[b] = ((x[b] << 7) | (x[b] >> 25)) & m
+
+    for _ in range(10):
+        qr(0, 4, 8, 12)
+        qr(1, 5, 9, 13)
+        qr(2, 6, 10, 14)
+        qr(3, 7, 11, 15)
+        qr(0, 5, 10, 15)
+        qr(1, 6, 11, 12)
+        qr(2, 7, 8, 13)
+        qr(3, 4, 9, 14)
+    return b"".join(((x[i] + state[i]) & m).to_bytes(4, "little") for i in range(16))
+
+
+def _chacha20(key: bytes, nonce: bytes, start: int, data: bytes) -> bytes:
+    out = bytearray()
+    for n, i in enumerate(range(0, len(data), 64)):
+        out += _xor(data[i:i + 64], _chacha_block(key, start + n, nonce))
+    return bytes(out)
+
+
+def _poly1305(key: bytes, msg: bytes) -> bytes:
+    r = int.from_bytes(key[:16], "little") & 0x0FFFFFFC0FFFFFFC0FFFFFFC0FFFFFFF
+    s = int.from_bytes(key[16:32], "little")
+    p = (1 << 130) - 5
+    acc = 0
+    for i in range(0, len(msg), 16):
+        acc = (acc + int.from_bytes(msg[i:i + 16] + b"\1", "little")) * r % p
+    return ((acc + s) & ((1 << 128) - 1)).to_bytes(16, "little")
+
+
+def _chacha_mac_data(aad: bytes, ct: bytes) -> bytes:
+    pad = lambda b: b + bytes(-len(b) % 16)  # noqa: E731
+    return pad(aad) + pad(ct) + len(aad).to_bytes(8, "little") + len(ct).to_bytes(8, "little")
+
+
+def chacha20_poly1305_encrypt(key: bytes, nonce: bytes, plain: bytes, aad: bytes) -> Tuple[bytes, bytes]:
+    ct = _chacha20(key, nonce, 1, plain)
+    return ct, _poly1305(_chacha_block(key, 0, nonce)[:32], _chacha_mac_data(aad, ct))
+
+
+def chacha20_poly1305_decrypt(key: bytes, nonce: bytes, ct: bytes, tag: bytes, aad: bytes) -> bytes:
+    want = _poly1305(_chacha_block(key, 0, nonce)[:32], _chacha_mac_data(aad, ct))
+    if not hmac.compare_digest(want, tag):
+        raise DecryptError("ChaCha20-Poly1305 tag mismatch")
+    return _chacha20(key, nonce, 1, ct)
+
+
+def hkdf_sha256(key: bytes, info: bytes, length: int = 32, salt: bytes = b"") -> bytes:
+    prk = hmac.new(salt or bytes(32), key, hashlib.sha256).digest()
+    out, block = b"", b""
+    for n in range(1, -(-length // 32) + 1):
+        block = hmac.new(prk, block + info + bytes([n]), hashlib.sha256).digest()
+        out += block
+    return out[:length]
+
+
+def _cbc_keys(dek: bytes) -> Tuple[bytes, bytes]:
+    return hkdf_sha256(dek, b"pskit-sm aes-256-cbc enc"), hkdf_sha256(dek, b"pskit-sm hmac-sha256 mac")
+
+
+def _cbc_mac(mac_key: bytes, aad: bytes, iv: bytes, ct: bytes) -> bytes:
+    return hmac.new(mac_key, len(aad).to_bytes(8, "big") + aad + iv + ct, hashlib.sha256).digest()
+
+
+def aes_cbc_hmac_encrypt(dek: bytes, iv: bytes, plain: bytes, aad: bytes) -> Tuple[bytes, bytes]:
+    enc_key, mac_key = _cbc_keys(dek)
+    cipher = _AES256(enc_key)
+    pad = 16 - len(plain) % 16
+    data = plain + bytes([pad]) * pad
+    out, prev = bytearray(), iv
+    for i in range(0, len(data), 16):
+        prev = cipher.encrypt_block(_xor(data[i:i + 16], prev))
+        out += prev
+    return bytes(out), _cbc_mac(mac_key, aad, iv, bytes(out))
+
+
+def aes_cbc_hmac_decrypt(dek: bytes, iv: bytes, ct: bytes, tag: bytes, aad: bytes) -> bytes:
+    enc_key, mac_key = _cbc_keys(dek)
+    if not hmac.compare_digest(_cbc_mac(mac_key, aad, iv, ct), tag) or not ct or len(ct) % 16:
+        raise DecryptError("AES-CBC HMAC-SHA256 tag mismatch")
+    cipher = _AES256(enc_key)
+    out, prev = bytearray(), iv
+    for i in range(0, len(ct), 16):
+        block = ct[i:i + 16]
+        out += _xor(cipher.decrypt_block(block), prev)
+        prev = block
+    pad = out[-1]
+    if not 1 <= pad <= 16 or out[-pad:] != bytes([pad]) * pad:
+        raise DecryptError("AES-CBC padding is not valid")
+    return bytes(out[:-pad])
+
+
+# name -> (SM_ENCRYPTION value, nonce bytes, encrypt, decrypt)
+ALGORITHMS: Dict[str, Tuple[str, int, Any, Any]] = {
+    "AES-256-GCM": ("aes-256-gcm", 12, aes_gcm_encrypt, aes_gcm_decrypt),
+    "ChaCha20-Poly1305": ("chacha20-poly1305", 12, chacha20_poly1305_encrypt, chacha20_poly1305_decrypt),
+    "AES-256-CBC-HMAC-SHA256": ("aes-256-cbc-hmac", 16, aes_cbc_hmac_encrypt, aes_cbc_hmac_decrypt),
+}
+_B64 = lambda b: base64.b64encode(b).decode("ascii")  # noqa: E731
+
+
+class Keyring:
+    """The master keys (``SM_MASTER_KEY`` is key id ``default``, ``SM_MASTER_KEYS=id:key,...`` adds more), the
+    algorithm new versions are encrypted with (``SM_ENCRYPTION``) and the key id they are wrapped with."""
+
+    def __init__(self, env: Any) -> None:
+        self.keys: Dict[str, bytes] = {}
+        if env.get("SM_MASTER_KEY"):
+            self.keys["default"] = self._key("SM_MASTER_KEY", env["SM_MASTER_KEY"])
+        for pair in (env.get("SM_MASTER_KEYS") or "").split(","):
+            if not pair.strip():
+                continue
+            kid, sep, value = pair.strip().partition(":")
+            if not sep or not kid.strip() or not value.strip():
+                raise ValueError("SM_MASTER_KEYS must be id1:base64key,id2:base64key")
+            self.keys[kid.strip()] = self._key(f"SM_MASTER_KEYS ({kid.strip()})", value.strip())
+        self.current = (env.get("SM_MASTER_KEY_ID") or "").strip() or \
+            ("default" if "default" in self.keys else min(self.keys, default="default"))
+        mode = (env.get("SM_ENCRYPTION") or "").strip().lower()
+        names = {v[0]: k for k, v in ALGORITHMS.items()}
+        if mode not in ("", "off", *names):
+            raise ValueError(f"SM_ENCRYPTION must be one of {', '.join(names)} or off")
+        self.alg = "" if mode == "off" or (not mode and not self.keys) else names[mode or "aes-256-gcm"]
+        if self.alg and not self.keys:
+            raise ValueError(f"SM_ENCRYPTION={mode} needs a master key: set SM_MASTER_KEY (32 bytes, base64)")
+        if self.alg and self.current not in self.keys:
+            raise ValueError(f"SM_MASTER_KEY_ID {self.current!r} is not in SM_MASTER_KEY / SM_MASTER_KEYS")
+
+    @staticmethod
+    def _key(name: str, value: str) -> bytes:
+        try:
+            raw = base64.b64decode(value.strip(), validate=True)
+        except ValueError:
+            raw = b""
+        if len(raw) != 32:
+            raise ValueError(f"{name} must be 32 random bytes in base64 (openssl rand -base64 32)")
+        return raw
+
+    def key_id(self, kms_key_id: Any, strict: bool = False) -> str:
+        """The master key id a secret's ``KmsKeyId`` names (an id, ``alias/<id>``, or a KMS ARN ending in one).
+        ``aws/secretsmanager`` and no KmsKeyId mean the current key."""
+        if not kms_key_id:
+            return self.current
+        name = str(kms_key_id).rsplit(":", 1)[-1]
+        for prefix in ("alias/", "key/"):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        if name == "aws/secretsmanager":
+            return self.current
+        if name in self.keys:
+            return name
+        if strict and self.alg:
+            raise _request(f"KmsKeyId {kms_key_id} is not a master key of this server "
+                           f"(known: {', '.join(sorted(self.keys))}).")
+        return self.current
+
+    def _wrap(self, dek: bytes, kid: str, aad: bytes) -> Dict[str, str]:
+        iv = secrets.token_bytes(12)
+        ct, tag = aes_gcm_encrypt(self.keys[kid], iv, dek, aad + b"|" + kid.encode("utf-8"))
+        return {"kid": kid, "dek": _B64(ct + tag), "dek_iv": _B64(iv)}
+
+    def _unwrap(self, rec: Dict[str, Any], aad: bytes) -> bytes:
+        kid = str(rec.get("kid"))
+        if kid not in self.keys:
+            raise DecryptError(f"master key {kid!r} is not set (SM_MASTER_KEY / SM_MASTER_KEYS)")
+        blob = base64.b64decode(rec["dek"])
+        try:
+            return aes_gcm_decrypt(self.keys[kid], base64.b64decode(rec["dek_iv"]), blob[:-16], blob[-16:],
+                                   aad + b"|" + kid.encode("utf-8"))
+        except DecryptError:
+            raise DecryptError(f"master key {kid!r} does not open the data key (wrong key?)") from None
+
+    def seal(self, field: str, plain: bytes, aad: bytes, kid: str) -> Dict[str, str]:
+        _mode, size, encrypt, _decrypt = ALGORITHMS[self.alg]
+        dek, iv = secrets.token_bytes(32), secrets.token_bytes(size)
+        ct, tag = encrypt(dek, iv, plain, aad)
+        return {"alg": self.alg, "field": field, "iv": _B64(iv), "ct": _B64(ct), "tag": _B64(tag),
+                **self._wrap(dek, kid, aad)}
+
+    def open(self, rec: Dict[str, Any], aad: bytes) -> bytes:
+        if rec.get("alg") not in ALGORITHMS:
+            raise DecryptError(f"unknown algorithm {rec.get('alg')!r}")
+        dek = self._unwrap(rec, aad)
+        try:
+            return ALGORITHMS[rec["alg"]][3](dek, base64.b64decode(rec["iv"]), base64.b64decode(rec["ct"]),
+                                             base64.b64decode(rec["tag"]), aad)
+        except DecryptError:
+            raise DecryptError("the value's tag does not match (the data was changed)") from None
+
+    def rewrap(self, rec: Dict[str, Any], aad: bytes, kid: str) -> Dict[str, str]:
+        """The same ciphertext with its data key wrapped by master key ``kid``."""
+        return {**rec, **self._wrap(self._unwrap(rec, aad), kid, aad)}
+
+
+def _aad(secret: Dict[str, Any], vid: str) -> bytes:
+    return f"{secret['ARN']}|{vid}".encode("utf-8")
+
+
 # ----------------------------------------------------------------------------- store
 
 
 class Store:
-    """Every secret, in memory and in one JSON file. Callers hold ``lock``."""
+    """Every secret, in memory (values in plain text) and in one JSON file (values encrypted when the keyring has an
+    algorithm). Callers hold ``lock``."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, keyring: Keyring) -> None:
         self.path = path
+        self.keyring = keyring
         self.lock = threading.RLock()
         self.secrets: Dict[str, Dict[str, Any]] = {}
+        # (ARN, VersionId) -> the version's "Encrypted" record. Versions never change, so each is sealed once.
+        self.sealed: Dict[Tuple[str, str], Dict[str, Any]] = {}
         if path.is_file():
             data = json.loads(path.read_text("utf-8") or "{}")
             self.secrets = {s["Name"]: s for s in data.get("secrets") or []}
+            for secret in self.secrets.values():
+                for vid, version in secret["Versions"].items():
+                    rec = version.pop("Encrypted", None)
+                    if rec is None:
+                        continue
+                    try:
+                        plain = keyring.open(rec, _aad(secret, vid))
+                    except (DecryptError, KeyError, ValueError) as exc:
+                        raise DecryptError(f"can't decrypt secret {secret['Name']!r} version {vid}: {exc}") from None
+                    version[rec["field"]] = plain.decode("utf-8") if rec["field"] == "SecretString" else _B64(plain)
+                    self.sealed[(secret["ARN"], vid)] = rec
+
+    def stale(self) -> bool:
+        """The file doesn't match the settings: plain values to encrypt (or the reverse), or data keys to rewrap."""
+        for secret in self.secrets.values():
+            kid = self.keyring.key_id(secret.get("KmsKeyId"))
+            for vid in secret["Versions"]:
+                rec = self.sealed.get((secret["ARN"], vid))
+                if bool(rec) != bool(self.keyring.alg) or (rec and rec["kid"] != kid):
+                    return True
+        return False
+
+    def _on_disk(self, secret: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.keyring.alg:
+            return secret
+        kid = self.keyring.key_id(secret.get("KmsKeyId"))
+        versions = {}
+        for vid, version in secret["Versions"].items():
+            key, aad = (secret["ARN"], vid), _aad(secret, vid)
+            rec = self.sealed.get(key)
+            if rec is None:
+                field = "SecretString" if "SecretString" in version else "SecretBinary"
+                plain = version[field].encode("utf-8") if field == "SecretString" else base64.b64decode(version[field])
+                rec = self.keyring.seal(field, plain, aad, kid)
+            elif rec["kid"] != kid:
+                rec = self.keyring.rewrap(rec, aad, kid)
+            self.sealed[key] = rec
+            versions[vid] = {**{k: v for k, v in version.items() if k not in ("SecretString", "SecretBinary")},
+                             "Encrypted": rec}
+        return {**secret, "Versions": versions}
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
-        payload = {"format": 1, "secrets": [self.secrets[n] for n in sorted(self.secrets)]}
+        written = [self._on_disk(self.secrets[n]) for n in sorted(self.secrets)]
+        live = {(s["ARN"], vid) for s in self.secrets.values() for vid in s["Versions"]}
+        self.sealed = {k: v for k, v in self.sealed.items() if k in live and self.keyring.alg}
+        payload = {"format": 2 if self.keyring.alg else 1, "secrets": written}
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as handle:
             handle.write(json.dumps(payload, indent=1, sort_keys=True).encode("utf-8"))
@@ -401,6 +870,7 @@ def create_secret(p: Dict[str, Any], region: str) -> Dict[str, Any]:
     if p.get("Description") is not None:
         secret["Description"] = str(p["Description"])
     if p.get("KmsKeyId"):
+        STORE.keyring.key_id(p["KmsKeyId"], strict=True)
         secret["KmsKeyId"] = str(p["KmsKeyId"])
     out = {"ARN": secret["ARN"], "Name": name}
     if value is not None:
@@ -460,6 +930,8 @@ def put_secret_value(p: Dict[str, Any], _region: str) -> Dict[str, Any]:
 def update_secret(p: Dict[str, Any], _region: str) -> Dict[str, Any]:
     secret = STORE.live(p.get("SecretId"))
     value = _value(p)
+    if p.get("KmsKeyId"):
+        STORE.keyring.key_id(p["KmsKeyId"], strict=True)
     out = {"ARN": secret["ARN"], "Name": secret["Name"]}
     if p.get("Description") is not None:
         secret["Description"] = str(p["Description"])
@@ -987,17 +1459,31 @@ def main() -> int:
     if AUTH not in ("sigv4", "off"):
         print("SM_AUTH must be sigv4 or off", file=sys.stderr)
         return 2
-    if AUTH != "off" and not CREDENTIALS:
+    if AUTH != "off" and not CREDENTIALS and "--rewrap" not in sys.argv[1:]:
         print("set SM_SECRET_ACCESS_KEY (and SM_ACCESS_KEY_ID), or SM_CREDENTIALS=id:secret, or SM_AUTH=off",
               file=sys.stderr)
         return 2
-    STORE = Store(STORE_FILE)
+    try:
+        STORE = Store(STORE_FILE, Keyring(ENV))
+    except (ValueError, DecryptError) as exc:
+        print(f"secretsmanager: {exc}", file=sys.stderr)
+        return 2
+    if STORE.stale():  # encrypt a plain file, decrypt with SM_ENCRYPTION=off, or rewrap to the current master key
+        STORE.save()
+    if "--rewrap" in sys.argv[1:]:
+        log(f"rewrapped {STORE_FILE} to master key {STORE.keyring.current!r}" if STORE.keyring.alg
+            else f"wrote {STORE_FILE} unencrypted")
+        return 0
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     server.daemon_threads = True
+    keyring = STORE.keyring
     log(f"Secrets Manager compatible server {VERSION} (Python) on {BIND}:{PORT}, data {STORE_FILE}, "
-        f"{len(STORE.secrets)} secrets, auth {AUTH}" + (", console /ui/" if UI_ON else ""))
+        f"{len(STORE.secrets)} secrets, auth {AUTH}" + (", console /ui/" if UI_ON else "")
+        + (f", encryption {keyring.alg} (master key {keyring.current!r})" if keyring.alg else ", not encrypted"))
     if AUTH == "off":
         log("warning: SM_AUTH=off, anyone who reaches the port can read every secret")
+    if not keyring.alg:
+        log("warning: secrets are stored unencrypted; set SM_MASTER_KEY (openssl rand -base64 32) to encrypt them")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

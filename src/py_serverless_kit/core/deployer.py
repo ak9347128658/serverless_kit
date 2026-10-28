@@ -106,6 +106,8 @@ class Deployer:
         return self.runner.plan(destroy=destroy, out=None)
 
     def deploy(self, *, skip_deps: bool = False, auto_approve: bool = True, upgrade: bool = False) -> Dict[str, Any]:
+        if self.project.config.provider.name == "onprem":
+            self._onprem_services_follow()  # before packaging: the env file shipped has the new addresses
         result = self.package(skip_deps=skip_deps)
         self.run_hook("before_deploy")
         self.echo("Running terraform init")
@@ -132,6 +134,7 @@ class Deployer:
         if self.project.config.provider.name == "onprem":
             self._remember_onprem(record)
             self._onprem_balancers(record)
+            self._onprem_smtp()
         self.save_record(record)
         if self.project.config.provider.name == "onprem":
             from . import onprem_network as network
@@ -259,6 +262,36 @@ class Deployer:
         groups = (record.get("outputs") or {}).get("groups") if isinstance(record.get("outputs"), dict) else None
         if isinstance(groups, dict) and groups:
             record["groups"] = groups  # provider.options.placement: where each group of functions runs
+
+    def _onprem_raw(self) -> Dict[str, Any]:
+        cfg = self.project.config
+        return {"service": cfg.service,
+                "provider": {"name": "onprem", "stage": cfg.provider.stage, "options": cfg.provider.options}}
+
+    def _onprem_services_follow(self) -> None:
+        """Before an on-prem deploy: the services the functions use are reachable from where they will run."""
+        from . import onprem_follow
+
+        try:
+            onprem_follow.follow(self.project.root, self._onprem_raw(), list(self.project.config.resources),
+                                 self.echo)
+        except Exception as exc:  # noqa: BLE001 - only a check; the deploy goes on
+            self.echo(f"  WARNING: services not checked: {exc}")
+
+    def _onprem_smtp(self) -> None:
+        """After an on-prem deploy: the SMTP servers the functions have triggers on send mail to where they run now,
+        and the firewall rules the function servers need to reach every service they use."""
+        from . import onprem_follow, onprem_smtp
+
+        cfg = self.project.config
+        keys = [k for k in cfg.event_resources() if k in cfg.resources and cfg.resources[k].type == "smtp"]
+        try:
+            if keys:
+                onprem_smtp.retarget(self.project.root, self._onprem_raw(), keys, self.echo)
+            onprem_follow.firewall(self.project.root, list(cfg.resources), self.echo,
+                                   f"{cfg.service} ({cfg.provider.stage}): services the functions use")
+        except Exception as exc:  # noqa: BLE001 - the deploy itself succeeded
+            self.echo(f"  WARNING: services not updated: {exc}")
 
     def _onprem_balancers(self, record: Dict[str, Any]) -> None:
         """After an on-prem deploy: this deployment's routes on the load balancers in provider.options.balancer."""

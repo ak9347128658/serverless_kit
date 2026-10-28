@@ -166,3 +166,95 @@ def test_test_event_has_the_simple_fields_ses_records_and_raw_content():
     message = email.message_from_bytes(base64.b64decode(ev["content"]), policy=email.policy.default)
     assert message["Subject"] == "Order" and [p.get_filename() for p in message.iter_attachments()] == ["a.txt"]
     assert onprem_smtp.test_event(ev) is ev
+
+
+def _deployed(pskit, **data):
+    import json
+
+    (pskit / "onprem-dev").mkdir(exist_ok=True)
+    (pskit / "onprem-dev" / "onprem_deployed.json").write_text(json.dumps(data))
+
+
+def _url_in(call):
+    text = " ".join(call)
+    return next(p.split("=", 1)[1].strip("'") for p in text.split() if "PSKIT_FUNCTIONS_URL=" in p)
+
+
+def test_deploy_points_the_smtp_server_at_where_the_functions_run_now(tmp_path):
+    pskit = _cluster_project(tmp_path)
+    _deployed(pskit, server="vm1")
+    fake = FakeDocker()
+    target = {"server": "vm3"}
+    entry = svc.create(tmp_path, {"key": "inbound", "service": "smtp", "domains": "a.example.com", "target": target},
+                       _raw(), lambda _l: None, run=fake, wait_seconds=1)
+    assert entry["smtp"]["functions_url"] == "http://20.0.0.1:8080" and entry["smtp"]["functions_url_auto"]
+
+    # Same place: nothing to do.
+    fake.calls.clear()
+    assert onprem_smtp.retarget(tmp_path, _raw(), ["inbound"], lambda _l: None, run=fake) == []
+    assert fake.calls == []
+
+    # vm1 removed, the functions deployed to vm2: the container is started again with vm2's URL.
+    _deployed(pskit, server="vm2")
+    lines = []
+    assert onprem_smtp.retarget(tmp_path, _raw(), ["inbound"], lines.append, run=fake) == ["inbound"]
+    run = next(c for c in fake.calls if "'run'" in " ".join(c))
+    assert _url_in(run) == "http://20.0.0.2:8080"
+    assert any("'rm' '-f'" in " ".join(c) for c in fake.calls)
+    assert svc.load_state(tmp_path)["services"]["inbound"]["smtp"]["functions_url"] == "http://20.0.0.2:8080"
+    assert any("was http://20.0.0.1:8080" in line for line in lines)
+
+    # Then to a cluster the SMTP server's machine is not in: the master's host.
+    _deployed(pskit, cluster="prod", server="vm1")
+    assert onprem_smtp.retarget(tmp_path, _raw(), ["inbound"], lambda _l: None, run=fake) == ["inbound"]
+    assert svc.load_state(tmp_path)["services"]["inbound"]["smtp"]["functions_url"] == "http://20.0.0.1:8080"
+
+
+def test_deploy_keeps_a_functions_url_that_was_typed_in(tmp_path):
+    pskit = _cluster_project(tmp_path)
+    _deployed(pskit, server="vm1")
+    fake = FakeDocker()
+    svc.create(tmp_path, {"key": "inbound", "service": "smtp", "domains": "a.example.com", "target": {"server": "vm3"},
+                          "functions_url": "http://20.0.0.1:8080"}, _raw(), lambda _l: None, run=fake, wait_seconds=1)
+    _deployed(pskit, server="vm2")
+    fake.calls.clear()
+    assert onprem_smtp.retarget(tmp_path, _raw(), ["inbound", "missing"], lambda _l: None, run=fake) == []
+    assert fake.calls == []
+
+
+def test_smtp_servers_created_before_the_flag_follow_when_their_url_is_one_pskit_picks(tmp_path):
+    pskit = _cluster_project(tmp_path)
+    _deployed(pskit, server="vm2")
+    state = {"services": {
+        "old": {"key": "old", "service": "smtp", "target": svc.normalize_target({"server": "vm3"}, tmp_path),
+                "container": "pskit-old", "image": "node:22-alpine", "volume": "pskit-old-data", "port": 25,
+                "bind": "0.0.0.0", "smtp": {"domains": ["a.example.com"], "functions_url": "http://20.0.0.1:8080",
+                                            "hostname": "mail.a.example.com", "max_size_mb": 25, "network": "host"}},
+        "typed": {"key": "typed", "service": "smtp", "target": {"method": "ssh", "host": "20.0.0.3"},
+                  "container": "pskit-typed", "smtp": {"functions_url": "https://lb.example.com/fn"}},
+    }}
+    svc.save_state(tmp_path, state)
+    fake = FakeDocker()
+    assert onprem_smtp.retarget(tmp_path, _raw(), ["old", "typed"], lambda _l: None, run=fake) == ["old"]
+    saved = svc.load_state(tmp_path)["services"]
+    assert saved["old"]["smtp"]["functions_url"] == "http://20.0.0.2:8080" and saved["old"]["smtp"]["functions_url_auto"]
+    assert saved["typed"]["smtp"]["functions_url"] == "https://lb.example.com/fn"
+
+
+def test_deployer_retargets_only_the_smtp_servers_its_functions_use(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from py_serverless_kit.core.deployer import Deployer
+
+    raw = _raw()
+    raw["resources"] = {"inbound": {"type": "smtp"}, "jobs": {"type": "queue"}}
+    raw["functions"]["on-mail"]["events"] = [{"smtp": "inbound"}]
+    raw["functions"]["on-job"] = {"handler": "app.handlers.on_job", "events": [{"queue": {"resource": "jobs"}}]}
+    config = ServiceConfig.model_validate(raw)
+    seen = []
+    monkeypatch.setattr(onprem_smtp, "retarget", lambda root, r, keys, emit: seen.append((root, r, keys)))
+    deployer = object.__new__(Deployer)
+    deployer.project, deployer.echo = SimpleNamespace(root=tmp_path, config=config), lambda _l: None
+    deployer._onprem_smtp()
+    assert seen == [(tmp_path, {"service": config.service, "provider": {
+        "name": "onprem", "stage": config.provider.stage, "options": config.provider.options}}, ["inbound"])]

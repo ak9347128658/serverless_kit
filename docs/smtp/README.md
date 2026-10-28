@@ -36,6 +36,9 @@ sender's mail server ──SMTP:25──> SMTP server (Docker: Node.js smtp-serv
   `127.0.0.1`. On this machine (Docker Desktop) it publishes the port and reaches the host as `host.docker.internal`.
   When the functions run on another server, the SMTP server posts to `http://<that server>:8080`. Set *pskit host URL*
   (`functions_url`) to override this.
+- When the functions move (deployed to another server or cluster, or their old server was removed), `pskit deploy`
+  points the SMTP server at where they run now and restarts its container with the new URL. A *pskit host URL* you
+  typed in yourself is kept.
 
 ## Create it
 

@@ -499,6 +499,24 @@ functions use* (`--address`) when the functions reach the server by another name
 | on server A | on server B | published on `0.0.0.0` of B; open the port from A to B in the firewall |
 | in a container (`method: docker`) | on this machine | use *Address* `host.docker.internal` (Docker Desktop) or the host's LAN IP |
 
+### When the functions move
+
+Deploying the functions to another server or cluster (for example after their old server was removed) keeps their
+events working. Before each `pskit deploy`, pskit checks every service the functions use:
+
+- **Address**: a service on a cluster server is reached at its cluster address from that cluster and at the server's
+  own address from anywhere else. When the functions moved in or out of the cluster, pskit changes the address in the
+  env file, and the deploy ships the new one. An *Address* you typed in yourself is kept.
+- **SMTP server**: it sends each mail to the functions, so after the deploy pskit restarts its container with their
+  new URL (see [the SMTP guide](../../smtp/README.md)).
+- **Firewall**: the deploy prints the rules the new function servers need to reach each service.
+- **Cannot be fixed by pskit** (printed as a warning, the deploy goes on): the service's server was removed (create the
+  service again with the same key), the service runs on this machine or listens on `127.0.0.1` only while the
+  functions run elsewhere (create it again on a server, or with bind `0.0.0.0`), or its container has the address built in
+  (Kafka, Redpanda, fake-gcs: create it again with the same key; the data stays).
+
+With `placement`, the check uses the default group's server; the other groups reach a service the same way.
+
 A queue can also live in **another pskit host's built-in queue**, with no broker at all. On the host that consumes it:
 
 ```yaml

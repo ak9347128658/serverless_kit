@@ -14,9 +14,15 @@
 //   SM_AUTH                                   sigv4 (default) or off (development only)
 //   SM_PORT (4584), SM_BIND (0.0.0.0), SM_DATA_DIR (./data), SM_REGION (us-east-1), SM_ACCOUNT_ID (000000000000)
 //   SM_UI (on), SM_UI_PASSWORD                the web console and an optional console password
+//   SM_MASTER_KEY                             encrypts values at rest: 32 random bytes in base64, key id "default"
+//   SM_MASTER_KEYS, SM_MASTER_KEY_ID          more master keys (id1:key,id2:key; KmsKeyId picks one) and the id
+//                                             used for secrets without a KmsKeyId (changing it rewraps on start)
+//   SM_ENCRYPTION                             aes-256-gcm (default with a key), chacha20-poly1305, aes-256-cbc-hmac, off
 //
 // The data is one JSON file (secretsmanager.json, mode 600) written atomically, in the same format as the Python
-// server's. `node server.js --check` exits 0 when the server answers on /health (a container health check).
+// server's; with a master key every version's value is stored encrypted with its own data key (envelope
+// encryption). `node server.js --check` exits 0 when the server answers on /health (a container health check);
+// `node server.js --rewrap` encrypts, decrypts or rewraps the file for the current settings and exits.
 
 const crypto = require("crypto");
 const fs = require("fs");
@@ -80,22 +86,229 @@ const now = () => Math.round(Date.now()) / 1000;
 const today = () => Math.floor(Date.now() / 1000 / 86400) * 86400;
 const has = (obj, key) => obj[key] !== undefined && obj[key] !== null;
 
+// ----------------------------------------------------------------------------- encryption at rest
+//
+// Envelope encryption, the same format as the Python server: every secret version gets its own random 256-bit data
+// key (DEK) that encrypts the value; the DEK is stored wrapped (AES-256-GCM) by a master key. The value's associated
+// data is "ARN|VersionId", so a ciphertext can't be moved to another secret or version.
+
+class DecryptError extends Error {}
+
+function gcmEncrypt(name, key, iv, plain, aad) {
+  const c = crypto.createCipheriv(name, key, iv, { authTagLength: 16 });
+  c.setAAD(aad, { plaintextLength: plain.length });
+  const ct = Buffer.concat([c.update(plain), c.final()]);
+  return [ct, c.getAuthTag()];
+}
+
+function gcmDecrypt(name, key, iv, ct, tag, aad) {
+  try {
+    const d = crypto.createDecipheriv(name, key, iv, { authTagLength: 16 });
+    d.setAAD(aad, { plaintextLength: ct.length });
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(ct), d.final()]);
+  } catch (_err) {
+    throw new DecryptError(`${name} tag mismatch`);
+  }
+}
+
+function cbcKeys(dek) {
+  const hkdf = (info) => Buffer.from(crypto.hkdfSync("sha256", dek, Buffer.alloc(0), Buffer.from(info), 32));
+  return [hkdf("pskit-sm aes-256-cbc enc"), hkdf("pskit-sm hmac-sha256 mac")];
+}
+
+function cbcMac(macKey, aad, iv, ct) {
+  const len = Buffer.alloc(8);
+  len.writeBigUInt64BE(BigInt(aad.length));
+  return crypto.createHmac("sha256", macKey).update(Buffer.concat([len, aad, iv, ct])).digest();
+}
+
+// name -> [SM_ENCRYPTION value, nonce bytes, encrypt, decrypt]
+const ALGORITHMS = {
+  "AES-256-GCM": ["aes-256-gcm", 12, (k, iv, p, a) => gcmEncrypt("aes-256-gcm", k, iv, p, a),
+    (k, iv, c, t, a) => gcmDecrypt("aes-256-gcm", k, iv, c, t, a)],
+  "ChaCha20-Poly1305": ["chacha20-poly1305", 12, (k, iv, p, a) => gcmEncrypt("chacha20-poly1305", k, iv, p, a),
+    (k, iv, c, t, a) => gcmDecrypt("chacha20-poly1305", k, iv, c, t, a)],
+  "AES-256-CBC-HMAC-SHA256": ["aes-256-cbc-hmac", 16, (dek, iv, plain, aad) => {
+    const [encKey, macKey] = cbcKeys(dek);
+    const c = crypto.createCipheriv("aes-256-cbc", encKey, iv);
+    const ct = Buffer.concat([c.update(plain), c.final()]);
+    return [ct, cbcMac(macKey, aad, iv, ct)];
+  }, (dek, iv, ct, tag, aad) => {
+    const [encKey, macKey] = cbcKeys(dek);
+    const want = cbcMac(macKey, aad, iv, ct);
+    if (tag.length !== want.length || !crypto.timingSafeEqual(want, tag)) throw new DecryptError("AES-CBC HMAC-SHA256 tag mismatch");
+    try {
+      const d = crypto.createDecipheriv("aes-256-cbc", encKey, iv);
+      return Buffer.concat([d.update(ct), d.final()]);
+    } catch (_err) {
+      throw new DecryptError("AES-CBC padding is not valid");
+    }
+  }],
+};
+const b64 = (buf) => Buffer.from(buf).toString("base64");
+
+// The master keys (SM_MASTER_KEY is key id "default", SM_MASTER_KEYS=id:key,... adds more), the algorithm new
+// versions are encrypted with (SM_ENCRYPTION) and the key id they are wrapped with (SM_MASTER_KEY_ID).
+class Keyring {
+  constructor(e) {
+    const masterKey = (name, value) => {
+      const text = String(value).trim();
+      const raw = /^[A-Za-z0-9+/]*={0,2}$/.test(text) && text.length % 4 === 0 ? Buffer.from(text, "base64") : Buffer.alloc(0);
+      if (raw.length !== 32) throw new Error(`${name} must be 32 random bytes in base64 (openssl rand -base64 32)`);
+      return raw;
+    };
+    this.keys = {};
+    if (e.SM_MASTER_KEY) this.keys.default = masterKey("SM_MASTER_KEY", e.SM_MASTER_KEY);
+    for (const pair of (e.SM_MASTER_KEYS || "").split(",")) {
+      if (!pair.trim()) continue;
+      const at = pair.indexOf(":");
+      const kid = pair.slice(0, at).trim();
+      const value = pair.slice(at + 1).trim();
+      if (at < 0 || !kid || !value) throw new Error("SM_MASTER_KEYS must be id1:base64key,id2:base64key");
+      this.keys[kid] = masterKey(`SM_MASTER_KEYS (${kid})`, value);
+    }
+    const ids = Object.keys(this.keys).sort();
+    this.current = (e.SM_MASTER_KEY_ID || "").trim() || (this.keys.default ? "default" : ids[0] || "default");
+    const mode = (e.SM_ENCRYPTION || "").trim().toLowerCase();
+    const names = {};
+    for (const [alg, spec] of Object.entries(ALGORITHMS)) names[spec[0]] = alg;
+    if (mode && mode !== "off" && !names[mode]) throw new Error(`SM_ENCRYPTION must be one of ${Object.keys(names).join(", ")} or off`);
+    this.alg = mode === "off" || (!mode && !ids.length) ? "" : names[mode || "aes-256-gcm"];
+    if (this.alg && !ids.length) throw new Error(`SM_ENCRYPTION=${mode} needs a master key: set SM_MASTER_KEY (32 bytes, base64)`);
+    if (this.alg && !this.keys[this.current]) throw new Error(`SM_MASTER_KEY_ID '${this.current}' is not in SM_MASTER_KEY / SM_MASTER_KEYS`);
+  }
+
+  // The master key id a secret's KmsKeyId names (an id, alias/<id>, or a KMS ARN ending in one).
+  keyId(kmsKeyId, strict = false) {
+    if (!kmsKeyId) return this.current;
+    let name = String(kmsKeyId).split(":").pop();
+    for (const prefix of ["alias/", "key/"]) if (name.startsWith(prefix)) name = name.slice(prefix.length);
+    if (name === "aws/secretsmanager") return this.current;
+    if (Object.prototype.hasOwnProperty.call(this.keys, name)) return name;
+    if (strict && this.alg) {
+      throw badRequest(`KmsKeyId ${kmsKeyId} is not a master key of this server (known: ${Object.keys(this.keys).sort().join(", ")}).`);
+    }
+    return this.current;
+  }
+
+  wrap(dek, kid, aad) {
+    const iv = crypto.randomBytes(12);
+    const [ct, tag] = gcmEncrypt("aes-256-gcm", this.keys[kid], iv, dek, Buffer.concat([aad, Buffer.from(`|${kid}`)]));
+    return { kid, dek: b64(Buffer.concat([ct, tag])), dek_iv: b64(iv) };
+  }
+
+  unwrap(rec, aad) {
+    const kid = String(rec.kid);
+    if (!Object.prototype.hasOwnProperty.call(this.keys, kid)) throw new DecryptError(`master key '${kid}' is not set (SM_MASTER_KEY / SM_MASTER_KEYS)`);
+    const blob = Buffer.from(rec.dek, "base64");
+    try {
+      return gcmDecrypt("aes-256-gcm", this.keys[kid], Buffer.from(rec.dek_iv, "base64"), blob.subarray(0, -16),
+        blob.subarray(-16), Buffer.concat([aad, Buffer.from(`|${kid}`)]));
+    } catch (_err) {
+      throw new DecryptError(`master key '${kid}' does not open the data key (wrong key?)`);
+    }
+  }
+
+  seal(field, plain, aad, kid) {
+    const [, size, encrypt] = ALGORITHMS[this.alg];
+    const dek = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(size);
+    const [ct, tag] = encrypt(dek, iv, plain, aad);
+    return { alg: this.alg, field, iv: b64(iv), ct: b64(ct), tag: b64(tag), ...this.wrap(dek, kid, aad) };
+  }
+
+  open(rec, aad) {
+    if (!ALGORITHMS[rec.alg]) throw new DecryptError(`unknown algorithm '${rec.alg}'`);
+    const dek = this.unwrap(rec, aad);
+    try {
+      return ALGORITHMS[rec.alg][3](dek, Buffer.from(rec.iv, "base64"), Buffer.from(rec.ct, "base64"),
+        Buffer.from(rec.tag, "base64"), aad);
+    } catch (_err) {
+      throw new DecryptError("the value's tag does not match (the data was changed)");
+    }
+  }
+
+  // The same ciphertext with its data key wrapped by master key `kid`.
+  rewrap(rec, aad, kid) {
+    return { ...rec, ...this.wrap(this.unwrap(rec, aad), kid, aad) };
+  }
+}
+
+const aadOf = (secret, vid) => Buffer.from(`${secret.ARN}|${vid}`, "utf8");
+
 // ----------------------------------------------------------------------------- store
 
 const store = {
   secrets: {},
-  load() {
+  keyring: null,
+  // "ARN\nVersionId" -> the version's Encrypted record. Versions never change, so each is sealed once.
+  sealed: new Map(),
+  load(keyring) {
+    this.keyring = keyring;
     if (fs.existsSync(STORE_FILE)) {
       const text = fs.readFileSync(STORE_FILE, "utf8");
       const data = text.trim() ? JSON.parse(text) : {};
       for (const s of data.secrets || []) this.secrets[s.Name] = s;
+      for (const secret of Object.values(this.secrets)) {
+        for (const [vid, version] of Object.entries(secret.Versions)) {
+          const rec = version.Encrypted;
+          if (!rec) continue;
+          delete version.Encrypted;
+          let plain;
+          try {
+            plain = keyring.open(rec, aadOf(secret, vid));
+          } catch (err) {
+            throw new DecryptError(`can't decrypt secret '${secret.Name}' version ${vid}: ${err.message}`);
+          }
+          version[rec.field] = rec.field === "SecretString" ? plain.toString("utf8") : plain.toString("base64");
+          this.sealed.set(`${secret.ARN}\n${vid}`, rec);
+        }
+      }
     }
+  },
+  // The file doesn't match the settings: plain values to encrypt (or the reverse), or data keys to rewrap.
+  stale() {
+    for (const secret of Object.values(this.secrets)) {
+      const kid = this.keyring.keyId(secret.KmsKeyId);
+      for (const vid of Object.keys(secret.Versions)) {
+        const rec = this.sealed.get(`${secret.ARN}\n${vid}`);
+        if (Boolean(rec) !== Boolean(this.keyring.alg) || (rec && rec.kid !== kid)) return true;
+      }
+    }
+    return false;
+  },
+  onDisk(secret) {
+    if (!this.keyring.alg) return secret;
+    const kid = this.keyring.keyId(secret.KmsKeyId);
+    const versions = {};
+    for (const [vid, version] of Object.entries(secret.Versions)) {
+      const key = `${secret.ARN}\n${vid}`;
+      const aad = aadOf(secret, vid);
+      let rec = this.sealed.get(key);
+      if (!rec) {
+        const field = has(version, "SecretString") ? "SecretString" : "SecretBinary";
+        const plain = field === "SecretString" ? Buffer.from(version[field], "utf8") : Buffer.from(version[field], "base64");
+        rec = this.keyring.seal(field, plain, aad, kid);
+      } else if (rec.kid !== kid) {
+        rec = this.keyring.rewrap(rec, aad, kid);
+      }
+      this.sealed.set(key, rec);
+      const rest = {};
+      for (const [k, v] of Object.entries(version)) if (k !== "SecretString" && k !== "SecretBinary") rest[k] = v;
+      versions[vid] = { ...rest, Encrypted: rec };
+    }
+    return { ...secret, Versions: versions };
   },
   save() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const tmp = `${STORE_FILE}.tmp`;
     const names = Object.keys(this.secrets).sort();
-    const payload = { format: 1, secrets: names.map((n) => sortKeys(this.secrets[n])) };
+    const written = names.map((n) => sortKeys(this.onDisk(this.secrets[n])));
+    const live = new Set();
+    for (const s of Object.values(this.secrets)) for (const vid of Object.keys(s.Versions)) live.add(`${s.ARN}\n${vid}`);
+    for (const key of [...this.sealed.keys()]) if (!live.has(key) || !this.keyring.alg) this.sealed.delete(key);
+    const payload = { format: this.keyring.alg ? 2 : 1, secrets: written };
     const fd = fs.openSync(tmp, "w", 0o600);
     try {
       fs.writeSync(fd, JSON.stringify(sortKeys(payload), null, 1));
@@ -360,7 +573,10 @@ const OPERATIONS = {
       Versions: {},
     };
     if (has(p, "Description")) secret.Description = String(p.Description);
-    if (p.KmsKeyId) secret.KmsKeyId = String(p.KmsKeyId);
+    if (p.KmsKeyId) {
+      store.keyring.keyId(p.KmsKeyId, true);
+      secret.KmsKeyId = String(p.KmsKeyId);
+    }
     const out = { ARN: secret.ARN, Name: name };
     if (value) {
       addVersion(secret, token, value, null);
@@ -420,6 +636,7 @@ const OPERATIONS = {
   UpdateSecret(p) {
     const secret = store.live(p.SecretId);
     const value = secretValue(p);
+    if (p.KmsKeyId) store.keyring.keyId(p.KmsKeyId, true);
     const out = { ARN: secret.ARN, Name: secret.Name };
     if (has(p, "Description")) secret.Description = String(p.Description);
     if (p.KmsKeyId) secret.KmsKeyId = String(p.KmsKeyId);
@@ -907,17 +1124,31 @@ function main() {
     console.error("SM_AUTH must be sigv4 or off");
     process.exit(2);
   }
-  if (AUTH !== "off" && !Object.keys(CREDENTIALS).length) {
+  const rewrapOnly = process.argv.includes("--rewrap");
+  if (AUTH !== "off" && !Object.keys(CREDENTIALS).length && !rewrapOnly) {
     console.error("set SM_SECRET_ACCESS_KEY (and SM_ACCESS_KEY_ID), or SM_CREDENTIALS=id:secret, or SM_AUTH=off");
     process.exit(2);
   }
-  store.load();
+  try {
+    store.load(new Keyring(env));
+  } catch (err) {
+    console.error(`secretsmanager: ${err.message}`);
+    process.exit(2);
+  }
+  // Encrypt a plain file, decrypt it with SM_ENCRYPTION=off, or rewrap the data keys to the current master key.
+  if (store.stale()) store.save();
+  const keyring = store.keyring;
+  if (rewrapOnly) {
+    log(keyring.alg ? `rewrapped ${STORE_FILE} to master key '${keyring.current}'` : `wrote ${STORE_FILE} unencrypted`);
+    return;
+  }
   const server = http.createServer((req, res) => {
     handle(req, res);
   });
   server.listen(PORT, BIND, () => {
-    log(`Secrets Manager compatible server ${VERSION} (Node.js) on ${BIND}:${PORT}, data ${STORE_FILE}, ${Object.keys(store.secrets).length} secrets, auth ${AUTH}${UI_ON ? ", console /ui/" : ""}`);
+    log(`Secrets Manager compatible server ${VERSION} (Node.js) on ${BIND}:${PORT}, data ${STORE_FILE}, ${Object.keys(store.secrets).length} secrets, auth ${AUTH}${UI_ON ? ", console /ui/" : ""}${keyring.alg ? `, encryption ${keyring.alg} (master key '${keyring.current}')` : ", not encrypted"}`);
     if (AUTH === "off") log("warning: SM_AUTH=off, anyone who reaches the port can read every secret");
+    if (!keyring.alg) log("warning: secrets are stored unencrypted; set SM_MASTER_KEY (openssl rand -base64 32) to encrypt them");
   });
   const stop = () => server.close(() => process.exit(0));
   process.on("SIGTERM", stop);

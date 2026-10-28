@@ -535,10 +535,13 @@ for _name, _sm in onprem_secretsmanager.SERVICES.items():
         health=onprem_secretsmanager.health(_name),
         backup="tar czf - -C /data .",
         backup_ext="tar.gz",
+        # The master key the values are encrypted with at rest (kept in the env file, reused on re-create).
+        generate={"master_key": "b64_32"},
         notes=f"pskit's own Secrets Manager server ({_sm['lang']}, code in aws/secretsmanager): the Secrets Manager "
         "API with SigV4 authentication (user = access key ID, password = secret access key). boto3, the AWS SDKs, "
         "the AWS CLI and get_secret() work with its endpoint. Versions and stages, tags, delete with a recovery "
-        "window, restore. Its own web console (/ui/) signs in with the same user and password.",
+        "window, restore. Values are encrypted at rest (AES-256-GCM, a data key per version wrapped by a generated "
+        "master key). Its own web console (/ui/) signs in with the same user and password.",
         gui=({"port": onprem_secretsmanager.PORT, "path": "/ui/", "label": "Secrets console", "login": "user"},),
     )
 
@@ -1243,6 +1246,7 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
         "port": port,
         "image": image,
         "address": address,
+        "address_auto": not body.get("address"),
         "bind": bind,
         "attach": list(attach),
         "container": _container_name(project, key),
@@ -1711,6 +1715,7 @@ def create(
         **({"data_dir": req["data_dir"]} if req.get("data_dir") else {}),
         "port": req["port"],
         "address": req["address"],
+        "address_auto": req["address_auto"],
         "bind": req["bind"],
         "user": req["user"] if req["service"] not in NO_CREDENTIALS else "",
         "attach": req["attach"],

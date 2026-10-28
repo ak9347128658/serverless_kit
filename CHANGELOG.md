@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-28
+
+### Fixed
+- On premises, events stopped once the functions moved: after their server was removed, or they were deployed to
+  another server or cluster, the services kept the address of the old place. Now every `pskit deploy` (CLI and
+  studio) makes the services the functions use follow them:
+  - **SMTP**: an `smtp` service sends each mail to the functions at the URL it was created with, so mail still
+    arrived but no function ran (senders got `451` and kept retrying). After the deploy, every SMTP server the
+    deployed functions have `smtp` triggers on is pointed at where they run now: its container starts again with
+    the new URL (the installed packages stay in the volume), and mail the senders retry is delivered.
+  - **Queues, streams, topics, buckets, databases, caches, secret stores**: a service on a cluster server was reached
+    at its cluster address, which only works from that cluster. Before the deploy, pskit switches the address in the
+    env file (and the services state) to the server's own address when the functions left the cluster, or back to
+    the cluster address when they run on it, so the deploy ships the right one.
+  - The deploy warns, naming the fix, when a service cannot be reached from the functions' new place: its server
+    was removed, it runs on this machine or listens on `127.0.0.1` only, or its container has the address built in
+    (Kafka, Redpanda, fake-gcs: create it again with the same key). It also prints the firewall rules the new
+    function servers need to reach each service.
+  - An address or `functions_url` typed in when creating a service is never changed. Services created before this
+    release follow the functions when their address is one pskit picks. Run `pskit deploy` again to fix an existing
+    project.
+
+## [2.4.0] - 2026-10-28
+
+### Added
+- The AWS Secrets Manager compatible servers (`aws/secretsmanager`, Python and Node.js) encrypt secret values at
+  rest with envelope encryption: each version gets its own data key, wrapped by a master key (`SM_MASTER_KEY`,
+  more with `SM_MASTER_KEYS`, picked per secret by `KmsKeyId`). `SM_ENCRYPTION` chooses AES-256-GCM (default),
+  ChaCha20-Poly1305 or AES-256-CBC + HMAC-SHA256. Clients (boto3, the AWS SDKs, the CLI, `get_secret()`) don't
+  change. A plain data file is encrypted on the first start with a key; `SM_MASTER_KEY_ID` rotates the master key
+  (rewraps the data keys on start, or with `--rewrap`). The Python server stays standard-library only.
+- On premises, the `secretsmanager` / `secretsmanager-node` services generate a master key when created, keep it in
+  the env file as `<PREFIX>_MASTER_KEY` and reuse it on re-create. Re-create an existing service to encrypt its data.
+
 ## [2.3.6] - 2026-10-28
 
 ### Fixed

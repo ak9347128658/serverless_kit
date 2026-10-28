@@ -68,7 +68,7 @@ def admin_token(raw: Optional[Dict[str, Any]], root: Path, env_file: str) -> str
 
 def check(body: Dict[str, Any], raw: Optional[Dict[str, Any]], root: Path, target: Dict[str, Any]) -> Dict[str, Any]:
     """Validated smtp settings of a create request: domains, functions_url, hostname, max_size_mb, network."""
-    from .onprem_services import ServiceError, functions_target
+    from .onprem_services import ServiceError
 
     domains = body.get("domains") or []
     if isinstance(domains, str):
@@ -92,35 +92,94 @@ def check(body: Dict[str, Any], raw: Optional[Dict[str, Any]], root: Path, targe
     url = str(body.get("functions_url") or "").strip().rstrip("/")
     if url and not _URL.match(url):
         raise ServiceError("functions_url must be the pskit host's URL, e.g. http://10.0.0.5:8080")
-    if not url:
-        port = int(_onprem_options(raw).get("port") or 8080)
+    # A URL pskit picked follows the functions: `pskit deploy` points the server at where they run now.
+    auto = not url
+    if auto:
+        url = auto_url(raw, root, target)
+    return {"domains": domains, "functions_url": url, "functions_url_auto": auto, "hostname": hostname,
+            "max_size_mb": max_mb, "network": network}
+
+
+def auto_url(raw: Optional[Dict[str, Any]], root: Path, target: Dict[str, Any]) -> str:
+    """The URL an SMTP server on ``target`` reaches the functions' host at, from where they run now."""
+    from .onprem_services import ServiceError, functions_target
+
+    port = int(_onprem_options(raw).get("port") or 8080)
+    try:
+        functions = functions_target(raw, root)
+    except ServiceError as exc:
+        raise ServiceError(f"{exc} Or set functions_url to the pskit host's URL (e.g. http://10.0.0.5:8080) "
+                           "so the SMTP server knows where to send mail events") from None
+    if functions["method"] == "local" and target["method"] == "ssh":
+        functions = _cluster_of(root, target) or functions  # not deployed yet: they go to this server's cluster
+    if target["method"] == "local":
+        if functions["method"] != "local":
+            raise ServiceError("the functions run on an SSH server: create the SMTP server there, or set "
+                               "functions_url to the pskit host's URL")
+        return f"http://host.docker.internal:{port}"
+    if functions["method"] == "ssh" and functions.get("host") == target.get("host"):
+        return f"http://127.0.0.1:{port}"  # same server, host network: reaches a host bound to 127.0.0.1
+    if functions.get("cluster") and _in_cluster(root, str(functions["cluster"]), target):
+        # Swarm publishes the port on every node (routing mesh); k3s and Nomad: the master's cluster address.
+        here = functions.get("orchestrator") == "swarm"
+        return f"http://{'127.0.0.1' if here else functions['address']}:{port}"
+    if functions["method"] == "ssh":
+        return f"http://{functions['host']}:{port}"
+    raise ServiceError("the functions are not deployed to a server yet (they run on this machine, which the "
+                       "SMTP server cannot reach): deploy them first (pskit deploy --server NAME or "
+                       "--cluster NAME), create the SMTP server on a server of a scaling cluster, or set "
+                       "functions_url to a URL of the pskit host it can reach")
+
+
+def _follows_functions(smtp: Dict[str, Any], port: int) -> bool:
+    """Whether pskit picked the server's functions URL (so it moves with them). Servers created before this was
+    recorded: a plain ``http://<host>:<host port>`` is what pskit picks; a path or another port was typed in."""
+    if "functions_url_auto" in smtp:
+        return bool(smtp["functions_url_auto"])
+    return bool(re.fullmatch(rf"http://[A-Za-z0-9_.\[\]:-]+:{port}", str(smtp.get("functions_url") or "")))
+
+
+def retarget(root: Path, raw: Dict[str, Any], keys: List[str], emit: Any, *, run: Any = None) -> List[str]:
+    """After a deploy: point the SMTP servers ``keys`` (the ones the deployed functions have ``smtp`` triggers on) at
+    where the functions run now. A server whose URL pskit picked and that now differs (the functions moved to another
+    server or cluster, or the old one was removed) is started again with the new URL; its data and installed
+    packages stay in the volume. Only warns. Returns the keys that were changed."""
+    from .onprem_services import ServiceError, _Runner, docker_argv, env_file_of, load_state, save_state
+
+    state = load_state(root)
+    port = int(_onprem_options(raw).get("port") or 8080)
+    changed: List[str] = []
+    for key in sorted(set(keys)):
+        entry = (state.get("services") or {}).get(key)
+        if not isinstance(entry, dict) or entry.get("service") != "smtp" or not isinstance(entry.get("smtp"), dict):
+            continue
+        smtp = dict(entry["smtp"])
+        old = str(smtp.get("functions_url") or "")
+        if not _follows_functions(smtp, port):
+            continue
+        target = entry.get("target") or {"method": "local"}
         try:
-            functions = functions_target(raw, root)
+            new = auto_url(raw, root, target)
         except ServiceError as exc:
-            raise ServiceError(f"{exc} Or set functions_url to the pskit host's URL (e.g. http://10.0.0.5:8080) "
-                               "so the SMTP server knows where to send mail events") from None
-        if functions["method"] == "local" and target["method"] == "ssh":
-            functions = _cluster_of(root, target) or functions  # not deployed yet: they go to this server's cluster
-        if target["method"] == "local":
-            if functions["method"] != "local":
-                raise ServiceError("the functions run on an SSH server: create the SMTP server there, or set "
-                                   "functions_url to the pskit host's URL")
-            url = f"http://host.docker.internal:{port}"
-        elif functions["method"] == "ssh" and functions.get("host") == target.get("host"):
-            url = f"http://127.0.0.1:{port}"  # same server, host network: reaches a host bound to 127.0.0.1
-        elif functions.get("cluster") and _in_cluster(root, str(functions["cluster"]), target):
-            # Swarm publishes the port on every node (routing mesh); k3s and Nomad: the master's cluster address.
-            here = functions.get("orchestrator") == "swarm"
-            url = f"http://{'127.0.0.1' if here else functions['address']}:{port}"
-        elif functions["method"] == "ssh":
-            url = f"http://{functions['host']}:{port}"
-        else:
-            raise ServiceError("the functions are not deployed to a server yet (they run on this machine, which the "
-                               "SMTP server cannot reach): deploy them first (pskit deploy --server NAME or "
-                               "--cluster NAME), create the SMTP server on a server of a scaling cluster, or set "
-                               "functions_url to a URL of the pskit host it can reach")
-    return {"domains": domains, "functions_url": url, "hostname": hostname, "max_size_mb": max_mb,
-            "network": network}
+            emit(f"  WARNING: SMTP server {key!r} still sends mail to {old}: {exc}")
+            continue
+        if new == old:
+            continue
+        emit(f"SMTP server {key!r}: the functions moved, sending mail to {new} (was {old})")
+        smtp.update(functions_url=new, functions_url_auto=True)
+        req = {**entry, "smtp": smtp}
+        sh = _Runner(emit, run)
+        try:
+            token = admin_token(raw, root, str(entry.get("env_file") or env_file_of(raw)))
+            sh(docker_argv(target, ["rm", "-f", str(entry["container"])]), check=False, show=False)
+            sh(docker_argv(target, run_args(req, token)))
+        except (ServiceError, KeyError) as exc:
+            emit(f"  WARNING: SMTP server {key!r} was not restarted: {exc}. Re-create it with the same key.")
+            continue
+        state["services"][key] = {**entry, "smtp": smtp}
+        save_state(root, state)
+        changed.append(key)
+    return changed
 
 
 def _in_cluster(root: Path, name: str, target: Dict[str, Any]) -> bool:
@@ -310,6 +369,8 @@ def usage_markdown(entry: Dict[str, Any]) -> str:
     md.append(
         "## Settings\n\n"
         f"- Change domains, port or the functions' URL: remove `{key}` and create it again with the same key.\n"
+        "- Functions moved to another server or cluster (or the old one was removed)? `pskit deploy` points this "
+        "server at where they run now (unless you typed the functions' URL when creating it).\n"
         "- Attach another function: add `- smtp: {resource: " + key + "}` to its `events` (or *Trigger functions* "
         "when creating) and deploy; the SMTP server needs no change.\n"
         "- The host's `admin_token` changed? Recreate the service so it sends the new one.\n"

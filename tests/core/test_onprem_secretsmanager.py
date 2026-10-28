@@ -6,8 +6,10 @@ own SigV4 client (``get_secret`` / ``put_secret``), raw API calls, the web conso
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.cookiejar
+import importlib.util
 import json
 import os
 import shutil
@@ -273,6 +275,167 @@ def test_refuses_to_start_without_credentials(tmp_path):
     assert out.returncode == 2 and "SM_SECRET_ACCESS_KEY" in out.stderr
 
 
+# ----------------------------------------------------------------------------- encryption at rest
+
+KEY_A = base64.b64encode(bytes(range(32))).decode()
+KEY_B = base64.b64encode(bytes(range(100, 132))).decode()
+ALGS = {"aes-256-gcm": "AES-256-GCM", "chacha20-poly1305": "ChaCha20-Poly1305",
+        "aes-256-cbc-hmac": "AES-256-CBC-HMAC-SHA256"}
+
+
+def _impls():
+    return [p.values[0] for p in IMPLS if p.values[0][0] != "node" or NODE]
+
+
+def _stored(data: Path):
+    return json.loads((data / "secretsmanager.json").read_text())
+
+
+def _versions(data: Path):
+    return [v for s in _stored(data)["secrets"] for v in s["Versions"].values()]
+
+
+def _run(argv, data: Path, *extra, **env):
+    full = {**{k: v for k, v in os.environ.items() if not k.startswith("SM_")}, "SM_DATA_DIR": str(data),
+            "SM_ACCESS_KEY_ID": ACCESS, "SM_SECRET_ACCESS_KEY": SECRET, "SM_PORT": str(_free_port()), **env}
+    return subprocess.run([*argv, *extra], env=full, capture_output=True, text=True, timeout=30)
+
+
+def _crypto():
+    spec = importlib.util.spec_from_file_location("sm_server", SOURCE / "python" / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_ciphers_match_the_published_test_vectors():
+    sm, h = _crypto(), bytes.fromhex
+    aes = sm._AES256(h("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"))  # FIPS-197 C.3
+    block = h("00112233445566778899aabbccddeeff")
+    assert aes.encrypt_block(block).hex() == "8ea2b7ca516745bfeafc49904b496089"
+    assert aes.decrypt_block(aes.encrypt_block(block)) == block
+    key, iv = h("feffe9928665731c6d6a8f9467308308" * 2), h("cafebabefacedbaddecaf888")  # GCM spec, test case 16
+    plain = h("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525"
+              "b16aedf5aa0de657ba637b39")
+    aad = h("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+    ct, tag = sm.aes_gcm_encrypt(key, iv, plain, aad)
+    assert ct.hex() == ("522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838"
+                        "c5f61e6393ba7a0abcc9f662")
+    assert tag.hex() == "76fc6ece0f4e1768cddf8853bb2d551b"
+    assert sm.aes_gcm_decrypt(key, iv, ct, tag, aad) == plain
+    with pytest.raises(sm.DecryptError):
+        sm.aes_gcm_decrypt(key, iv, ct, tag, aad + b"x")
+    key, nonce = bytes(range(0x80, 0xA0)), h("070000004041424344454647")  # RFC 8439 2.8.2
+    plain = (b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, "
+             b"sunscreen would be it.")
+    ct, tag = sm.chacha20_poly1305_encrypt(key, nonce, plain, h("50515253c0c1c2c3c4c5c6c7"))
+    assert ct.hex().startswith("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6")
+    assert tag.hex() == "1ae10b594f09e26a7e902ecbd0600691"
+    okm = sm.hkdf_sha256(h("0b" * 22), h("f0f1f2f3f4f5f6f7f8f9"), 42, h("000102030405060708090a0b0c"))  # RFC 5869
+    assert okm.hex() == ("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+    for size in (0, 15, 16, 17, 100):
+        ct, tag = sm.aes_cbc_hmac_encrypt(key, bytes(16), b"v" * size, b"a")
+        assert len(ct) % 16 == 0 and sm.aes_cbc_hmac_decrypt(key, bytes(16), ct, tag, b"a") == b"v" * size
+        with pytest.raises(sm.DecryptError):
+            sm.aes_cbc_hmac_decrypt(key, bytes(16), ct, tag[:-1] + bytes([tag[-1] ^ 1]), b"a")
+
+
+@pytest.mark.parametrize("alg", list(ALGS))
+@pytest.mark.parametrize("impl", IMPLS)
+def test_values_are_encrypted_at_rest_and_both_servers_read_them(impl, alg, tmp_path):
+    data = tmp_path / "data"
+    writer = Server(impl, data, SM_MASTER_KEY=KEY_A, SM_ENCRYPTION=alg)
+    try:
+        _ok(writer, "CreateSecret", {"Name": "db", "SecretString": '{"password":"hunter2-plaintext"}'})
+        _ok(writer, "PutSecretValue", {"SecretId": "db", "SecretString": "second-plaintext-ü"})
+        _ok(writer, "CreateSecret", {"Name": "blob", "SecretBinary": base64.b64encode(b"\0raw-bytes\xff").decode()})
+    finally:
+        writer.stop()
+    text = (data / "secretsmanager.json").read_text()
+    assert "plaintext" not in text and "raw-bytes" not in text and "SecretString" in text  # only as a field name
+    assert _stored(data)["format"] == 2
+    for version in _versions(data):
+        assert "SecretString" not in version and "SecretBinary" not in version
+        assert version["Encrypted"]["alg"] == ALGS[alg] and version["Encrypted"]["kid"] == "default"
+    for argv in _impls():  # the Python and the Node.js server read what either wrote
+        reader = Server(argv, data, SM_MASTER_KEY=KEY_A)
+        try:
+            assert _ok(reader, "GetSecretValue", {"SecretId": "db"})["SecretString"] == "second-plaintext-ü"
+            previous = _ok(reader, "GetSecretValue", {"SecretId": "db", "VersionStage": "AWSPREVIOUS"})
+            assert json.loads(previous["SecretString"]) == {"password": "hunter2-plaintext"}
+            blob = _ok(reader, "GetSecretValue", {"SecretId": "blob"})["SecretBinary"]
+            assert base64.b64decode(blob) == b"\0raw-bytes\xff"
+        finally:
+            reader.stop()
+
+
+@pytest.mark.parametrize("impl", IMPLS)
+def test_a_wrong_missing_or_tampered_key_refuses_to_start(impl, tmp_path):
+    data = tmp_path / "data"
+    srv = Server(impl, data, SM_MASTER_KEY=KEY_A)
+    _ok(srv, "CreateSecret", {"Name": "db", "SecretString": "s3cret"})
+    srv.stop()
+    wrong = _run(impl, data, SM_MASTER_KEY=KEY_B)
+    assert wrong.returncode == 2 and "does not open the data key" in wrong.stderr
+    missing = _run(impl, data)
+    assert missing.returncode == 2 and "'default' is not set" in missing.stderr
+    stored = _stored(data)
+    version = next(iter(stored["secrets"][0]["Versions"].values()))
+    ct = bytearray(base64.b64decode(version["Encrypted"]["ct"]))
+    ct[0] ^= 1
+    version["Encrypted"]["ct"] = base64.b64encode(bytes(ct)).decode()
+    (data / "secretsmanager.json").write_text(json.dumps(stored))
+    tampered = _run(impl, data, SM_MASTER_KEY=KEY_A)
+    assert tampered.returncode == 2 and "the data was changed" in tampered.stderr
+    for bad in ({"SM_MASTER_KEY": "short"}, {"SM_ENCRYPTION": "aes-256-gcm"}, {"SM_MASTER_KEY": KEY_A,
+                                                                               "SM_ENCRYPTION": "rot13"}):
+        out = _run(impl, tmp_path / "other", **bad)
+        assert out.returncode == 2 and "secretsmanager:" in out.stderr, bad
+
+
+@pytest.mark.parametrize("impl", IMPLS)
+def test_a_plain_file_is_encrypted_on_start_and_off_decrypts_it(impl, tmp_path):
+    data = tmp_path / "data"
+    plain = Server(impl, data)
+    _ok(plain, "CreateSecret", {"Name": "old", "SecretString": "was-plain"})
+    plain.stop()
+    assert _stored(data)["format"] == 1 and _versions(data)[0]["SecretString"] == "was-plain"
+    enc = Server(impl, data, SM_MASTER_KEY=KEY_A)
+    try:
+        assert "was-plain" not in (data / "secretsmanager.json").read_text()   # migrated before serving
+        assert _ok(enc, "GetSecretValue", {"SecretId": "old"})["SecretString"] == "was-plain"
+    finally:
+        enc.stop()
+    out = _run(impl, data, "--rewrap", SM_MASTER_KEY=KEY_A, SM_ENCRYPTION="off")
+    assert out.returncode == 0, out.stderr
+    assert _stored(data)["format"] == 1 and _versions(data)[0]["SecretString"] == "was-plain"
+
+
+@pytest.mark.parametrize("impl", IMPLS)
+def test_kms_key_id_picks_a_master_key_and_rewrap_rotates(impl, tmp_path):
+    data = tmp_path / "data"
+    srv = Server(impl, data, SM_MASTER_KEYS=f"a:{KEY_A},b:{KEY_B}")
+    try:
+        _ok(srv, "CreateSecret", {"Name": "plain", "SecretString": "p"})
+        _ok(srv, "CreateSecret", {"Name": "onb", "SecretString": "b", "KmsKeyId": "alias/b"})
+        status, out = srv.call("CreateSecret", {"Name": "bad", "SecretString": "x", "KmsKeyId": "alias/nope"})
+        assert status == 400 and out["__type"] == "InvalidRequestException" and "nope" in out["message"]
+        assert _ok(srv, "DescribeSecret", {"SecretId": "onb"})["KmsKeyId"] == "alias/b"
+    finally:
+        srv.stop()
+    kids = {s["Name"]: next(iter(s["Versions"].values()))["Encrypted"]["kid"] for s in _stored(data)["secrets"]}
+    assert kids == {"plain": "a", "onb": "b"}
+    out = _run(impl, data, "--rewrap", SM_MASTER_KEYS=f"a:{KEY_A},b:{KEY_B}", SM_MASTER_KEY_ID="b")
+    assert out.returncode == 0, out.stderr
+    assert {v["Encrypted"]["kid"] for v in _versions(data)} == {"b"}
+    rotated = Server(impl, data, SM_MASTER_KEYS=f"b:{KEY_B}")   # key a is gone
+    try:
+        assert _ok(rotated, "GetSecretValue", {"SecretId": "plain"})["SecretString"] == "p"
+        assert _ok(rotated, "GetSecretValue", {"SecretId": "onb"})["SecretString"] == "b"
+    finally:
+        rotated.stop()
+
+
 # ----------------------------------------------------------------------------- the on-prem service
 
 
@@ -301,9 +464,15 @@ def test_create_copies_the_server_into_a_stock_image(tmp_path):
     cp = next(c for c in calls if c[:2] == ["docker", "cp"])
     assert cp[-1].endswith(":/app") and cp[2].endswith(".")
     assert calls.index(create) < calls.index(cp) < calls.index(["docker", "start", entry["container"]])
+    master = env["SM_MASTER_KEY"]
+    assert len(base64.b64decode(master)) == 32
     assert entry["env"] == {"PSKIT_SECRETS_DRIVER": "aws", "PSKIT_SECRETS_URL": "http://127.0.0.1:4584",
                             "PSKIT_SECRETS_REGION": "us-east-1", "PSKIT_SECRETS_ACCESS_KEY": "AKIDLOCAL",
-                            "PSKIT_SECRETS_SECRET_KEY": "Sup3r-secret-pw"}
+                            "PSKIT_SECRETS_SECRET_KEY": "Sup3r-secret-pw", "PSKIT_SECRETS_MASTER_KEY": master}
+    # Re-creating the service keeps the master key: the encrypted data stays readable.
+    _again, calls = _create(tmp_path, user="AKIDLOCAL", replace=True)
+    create = next(c for c in calls if c[:2] == ["docker", "create"])
+    assert f"SM_MASTER_KEY={master}" in create
     assert entry["resource"]["type"] == "custom" and entry["resource"]["connection"]["driver"] == "aws"
     assert "PSKIT_SECRETS_SECRET_KEY=Sup3r-secret-pw" in (tmp_path / ".env.onprem").read_text()
     links = svc.gui_links(entry)

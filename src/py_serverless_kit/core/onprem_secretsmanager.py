@@ -52,8 +52,9 @@ def health(service: str) -> str:
 
 
 def env(req: Dict[str, Any], password: str) -> Dict[str, str]:
-    """The container's environment."""
-    return {
+    """The container's environment. ``SM_MASTER_KEY`` (generated once, kept in the env file) encrypts the values at
+    rest; without it the data could not be read back after the service is re-created."""
+    out = {
         "SM_PORT": str(PORT),
         "SM_BIND": "0.0.0.0",  # noqa: S104 - inside the container; the published port decides who reaches it
         "SM_DATA_DIR": "/data",
@@ -62,6 +63,10 @@ def env(req: Dict[str, Any], password: str) -> Dict[str, str]:
         "SM_SECRET_ACCESS_KEY": password,
         "PYTHONUNBUFFERED": "1",
     }
+    master = (req.get("generated") or {}).get("master_key")
+    if master:
+        out["SM_MASTER_KEY"] = str(master)
+    return out
 
 
 def create_args(req: Dict[str, Any], password: str) -> List[str]:
@@ -169,7 +174,16 @@ def usage_markdown(entry: Dict[str, Any], prefix: str) -> str:
         f"aws --endpoint-url {url} secretsmanager create-secret --name api-key --secret-string abc123\n"
         f"aws --endpoint-url {url} secretsmanager get-secret-value --secret-id api-key\n"
         f"aws --endpoint-url {url} secretsmanager list-secrets\n```\n\n"
-        "Code written for AWS runs unchanged: on AWS, leave out `endpoint_url` and the keys. The data is one JSON "
-        "file in the service's volume (mode 600, not encrypted at rest): back it up with *Backup* and protect the "
-        "server's disk like the secrets themselves.\n"
+        "Code written for AWS runs unchanged: on AWS, leave out `endpoint_url` and the keys.\n\n"
+        "### Encryption at rest\n\n"
+        "The data is one JSON file in the service's volume (mode 600). Every secret version is encrypted with its "
+        "own random data key (AES-256-GCM); the data key is stored wrapped by the master key "
+        f"`{prefix}_MASTER_KEY` in `{env_file}`, as AWS does with KMS. The disk and the *Backup* archives hold only "
+        "ciphertext; signed callers (the clients above, the console) get the values decrypted, so nothing changes "
+        f"for them. **Keep `{prefix}_MASTER_KEY` safe and back it up apart from the data: without it the secrets "
+        "can't be read.** Re-creating the service reuses it.\n\n"
+        "Set `SM_ENCRYPTION` to `chacha20-poly1305` or `aes-256-cbc-hmac` for another algorithm. With "
+        "`SM_MASTER_KEYS=id1:key1,id2:key2`, `KmsKeyId` picks a key per secret "
+        "(`sm.create_secret(Name=\"prod/db\", KmsKeyId=\"alias/id1\", ...)`); set `SM_MASTER_KEY_ID` to another id "
+        "and restart to rewrap every data key to it.\n"
     )
