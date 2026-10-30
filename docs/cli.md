@@ -216,12 +216,12 @@ Scale on-prem functions over a master plus joined servers (Docker Swarm, Kuberne
 ## `pskit settings`
 
 `.pskit` is kept out of git, so a fresh clone on another machine has no saved servers, clusters or SSH logins.
-`settings` moves them in one passphrase-encrypted file. In the studio: *Setup & credentials → Move settings to
-another machine*.
+`settings` moves them in one passphrase-encrypted file, with `pskit.yml` too when asked. In the studio: the
+**⇅ Settings** button in the header (also *Setup & credentials → Move settings to another machine*).
 
 | Command | |
 |---|---|
-| `settings export [-o FILE]` | write `<service>.pskit-settings` (asks for a passphrase twice) |
+| `settings export [-o FILE] [--with-config]` | write `<service>.pskit-settings` (asks for a passphrase twice); `--with-config` adds `pskit.yml` |
 | `settings import FILE [--dry-run] [--replace] [--yes]` | show what changes, back up the current settings to `.pskit/backups/settings-<time>.json`, then write them |
 
 What the file holds:

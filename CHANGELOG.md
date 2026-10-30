@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-10-30
+
+### Added
+- On-prem **live monitoring**: a service's *Details* has a *Live monitoring* switch. While it is on, the studio shows
+  every 5 seconds each container's CPU, memory and the disk holding its data (primary, replicas and load balancer of
+  a replicated database), the open connections, the data size and each replica's lag. Nothing is measured while it
+  is off. CLI: `pskit resources onprem monitor KEY [--watch N]`.
+- **Alerts** for on-prem services (optional when creating a database, editable in *Details*): CPU, memory and disk
+  percent, replica lag, a container down. They run a function of the project through the deployed host and / or
+  POST a webhook (Slack, Teams, any URL), at most once per cooldown. *Create a new function* adds `<key>-alert` to
+  `pskit.yml` with a handler stub. The studio checks every minute while it runs; `pskit resources onprem alerts KEY
+  --check` does it from cron, `--test` sends a test alert, and the history is kept per service.
+- **Import data** when creating a database: a `.sql`, `.sql.gz`, `.dump` (PostgreSQL) or `.archive` (MongoDB) file
+  from this machine is loaded once it is up (into the primary before the replicas copy it). CLI `--import FILE`.
+- **Servers**: a check mark per saved server (its SSH port is probed in parallel when the list opens, *Re-check*
+  again) and a **Live** switch with CPU, RAM and disk use. CLI `pskit resources onprem servers check` and
+  `servers top NAME [--watch N]`.
+- **Backup** asks where to save: `.pskit/backups` or any folder picked on this machine (remembered). CLI `--dir`.
+- A **⇅ Settings** button in the studio header imports and exports the project's `.pskit` settings, now optionally
+  with `pskit.yml` (on by default there; CLI `pskit settings export --with-config`). An import that brings
+  `pskit.yml` reloads the studio.
+
+### Fixed
+- `runtime_js/package.json` still said 2.7.0 in the 2.8.0 release; both version files now agree again.
+
 ## [2.8.0] - 2026-10-30
 
 ### Added

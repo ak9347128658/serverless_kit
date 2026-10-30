@@ -348,6 +348,70 @@ export interface OnPremCatalogItem {
   browsers?: string[];
   /** Set for databases that can run as a primary with read replicas (null: single server only). */
   replication?: OnPremReplicationInfo | null;
+  /** Dump files a new database can start from (.sql, .dump, .archive ...); empty when import is not offered. */
+  import_types?: string[];
+}
+
+/** Alert settings of a service (thresholds in percent / seconds). */
+export interface OnPremAlert {
+  enabled: boolean;
+  function: string;
+  stage: string;
+  webhook: string;
+  cooldown_minutes: number;
+  interval_seconds: number;
+  cpu: number;
+  memory: number;
+  disk: number;
+  lag_seconds: number;
+  down: boolean;
+}
+
+export interface OnPremAlertRecord {
+  at: string;
+  test: boolean;
+  message: string;
+  sent: string[];
+  errors: string[];
+}
+
+export interface OnPremMonitorContainer {
+  name: string;
+  role: "primary" | "replica" | "balancer" | "server";
+  server: string;
+  container: string;
+  state: string;
+  cpu?: number | null;
+  memory?: number | null;
+  memory_usage?: string;
+  net_io?: string;
+  block_io?: string;
+  disk?: number | null;
+  disk_total_gb?: number;
+}
+
+export interface OnPremMonitorSample {
+  key: string;
+  service: string;
+  at: string;
+  containers: OnPremMonitorContainer[];
+  database: { connections?: number; size_mb?: number };
+  /** Replica name -> seconds behind the primary (null: replication stopped). */
+  lag: Record<string, number | null>;
+}
+
+export interface ServerMetrics {
+  reachable: boolean;
+  error?: string;
+  cpu?: number | null;
+  memory?: number | null;
+  memory_mb?: number;
+  disk?: number | null;
+  disk_gb?: number;
+  cpus?: number | null;
+  load?: string;
+  hostname?: string;
+  at?: string;
 }
 
 export interface OnPremReplicationInfo {

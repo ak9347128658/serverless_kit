@@ -171,13 +171,14 @@ export function SetupView() {
 const MIN_PASSPHRASE = 8;
 
 /** Export / import the settings `.pskit` keeps out of git (servers, clusters, services, SSH logins) as one encrypted file. */
-function SettingsTransfer() {
+export function SettingsTransfer() {
   const toast = useToast();
   const confirm = useConfirm();
   const [passphrase, setPassphrase] = useState("");
   const [again, setAgain] = useState("");
   const [exporting, setExporting] = useState(false);
   const [exported, setExported] = useState<SettingsSummary | null>(null);
+  const [includeConfig, setIncludeConfig] = useState(true);
   const [file, setFile] = useState<{ name: string; content: string } | null>(null);
   const [importPass, setImportPass] = useState("");
   const [replace, setReplace] = useState(false);
@@ -188,7 +189,7 @@ function SettingsTransfer() {
   const doExport = async () => {
     setExporting(true);
     try {
-      const r = await api.settingsExport(passphrase);
+      const r = await api.settingsExport(passphrase, includeConfig);
       const url = URL.createObjectURL(new Blob([r.content], { type: "application/json" }));
       const link = document.createElement("a");
       link.href = url;
@@ -246,6 +247,8 @@ function SettingsTransfer() {
     try {
       const r = await api.settingsImport(file.content, importPass, replace);
       toast(`Imported ${r.written.length} file(s)${r.backup ? `; previous settings in ${r.backup}` : ""}`, "ok");
+      // pskit.yml came with it: show the imported project, not the old draft.
+      if (r.written.some((w) => /^pskit\.ya?ml$/.test(w))) window.setTimeout(() => window.location.reload(), 1200);
       setPlan(null);
       setFile(null);
       setImportPass("");
@@ -275,6 +278,7 @@ function SettingsTransfer() {
         <FormRow label="Again" error={mismatch ? "does not match" : null}>
           <TextInput type="password" value={again} onChange={setAgain} invalid={mismatch} />
         </FormRow>
+        <Toggle checked={includeConfig} onChange={setIncludeConfig} label="Include pskit.yml (functions, resources, providers)" />
         <button
           type="button"
           className="btn btn-primary"

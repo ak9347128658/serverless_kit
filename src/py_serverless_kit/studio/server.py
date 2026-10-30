@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,6 +49,16 @@ class Studio:
         self.vscode = VSCode(self.root, image=vscode_image)
         self._meta: Optional[Dict[str, Any]] = None
         self._cluster_watch: Any = None
+        self._service_watch: Any = None
+
+    def service_watch(self) -> Any:
+        """Checks on-prem services whose alerts are on (database CPU / memory / disk / lag) while the studio runs."""
+        if self._service_watch is None:
+            from ..core.onprem_monitor import Watcher as ServiceWatcher
+
+            self._service_watch = ServiceWatcher(self.root)
+            self._service_watch.start()
+        return self._service_watch
 
     def cluster_watch(self) -> Any:
         """Checks scaling clusters that have `watch` on (capacity alerts) while the studio runs."""
@@ -481,9 +492,11 @@ def make_handler(app: Studio) -> type:
 
         def _onprem_services(self, method: str, rest: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
             """Docker services for on-prem functions: create, inspect, back up, remove (long steps as jobs)."""
+            from ..core import onprem_monitor as mon
             from ..core import onprem_services as svc
 
             root = app.root
+            watcher = app.service_watch()
             try:
                 if not rest and method == "GET":
                     raw = app.raw_config()
@@ -561,6 +574,28 @@ def make_handler(app: Studio) -> type:
                             return 200, con.run_line(root, rest[0], str(body.get("line") or ""), shell=bool(body.get("shell")))
                         except con.ConsoleError as exc:
                             raise StudioError(400, str(exc)) from None
+                if len(rest) == 2 and rest[1] == "monitor" and method == "GET":
+                    return 200, mon.sample(root, rest[0])
+                if len(rest) == 2 and rest[1] == "alert":
+                    key = rest[0]
+                    if method == "PUT":
+                        mon.set_alert(root, key, _obj(self._body()))
+                    entry = svc._entry(root, key)
+                    return 200, {"alert": mon.alert_settings(entry), "history": list(entry.get("alerts") or [])[-20:],
+                                 "last": watcher.last.get(key)}
+                if len(rest) == 2 and rest[1] in ("alert-test", "alert-check") and method == "POST":
+                    key = rest[0]
+                    if rest[1] == "alert-test":
+                        return 200, mon.send_alert(root, key, mon.sample(root, key), [], test=True)
+                    result = mon.check(root, key)
+                    watcher.last[key] = {"checked_at": result["checked_at"], "reasons": result["reasons"],
+                                         "alert": result.get("alert")}
+                    return 200, result
+                if rest == ["alert-function"] and method == "POST":
+                    body = _obj(self._body())
+                    from .project import ensure_handler
+
+                    return 200, ensure_handler(root, str(body.get("handler") or ""), ["invoke"])
                 if len(rest) == 2 and rest[1] in ("replicas", "replicas-remove") and method == "POST":
                     from ..core import onprem_replication as rep
 
@@ -584,9 +619,19 @@ def make_handler(app: Studio) -> type:
                     body = _obj(self._body())
                     svc.public_entry(svc._entry(root, key))  # 400 for an unknown key before starting a job
 
+                    folder = str(body.get("folder") or "").strip()
+                    if action == "backup" and folder and not Path(folder).expanduser().is_dir():
+                        raise StudioError(400, f"no folder {folder}")
+
                     def run(job: Any) -> int:
                         if action == "backup":
-                            svc.backup(root, key, job.emit)
+                            entry = svc._entry(root, key)
+                            spec = svc.SERVICES.get(str(entry.get("service"))) or {}
+                            dest = None
+                            if folder:
+                                stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                                dest = Path(folder).expanduser() / f"{key}-{stamp}.{spec.get('backup_ext') or 'dump'}"
+                            svc.backup(root, key, job.emit, dest=dest)
                         else:
                             svc.remove(root, key, job.emit, delete_data=bool(body.get("delete_data")))
                         return 0
@@ -607,7 +652,8 @@ def make_handler(app: Studio) -> type:
                 if rest == ["export"]:
                     raw = app.raw_config()
                     text, summary = bundle.export_settings(root, passphrase, env_files=bundle.env_files_of(raw),
-                                                           pskit_version=__version__)
+                                                           pskit_version=__version__,
+                                                           config=bool(body.get("include_config")))
                     name = f"{raw.get('service') or 'pskit'}{bundle.SUFFIX}"
                     return 200, {"filename": name, "content": text, "summary": summary}
                 if rest in (["preview"], ["import"]):
@@ -828,6 +874,10 @@ def make_handler(app: Studio) -> type:
                     if stage:
                         out["deployed"] = _deployed_on(root, stage)
                     return 200, out
+                if parts == ["onprem-servers", "reachability"] and method == "GET":
+                    return 200, {"servers": srv.reachability(root)}
+                if len(parts) == 3 and parts[0] == "onprem-servers" and parts[2] == "metrics" and method == "GET":
+                    return 200, srv.server_metrics(root, parts[1])
                 if parts == ["onprem-servers"] and method == "POST":
                     body = _obj(self._body())
                     name = str(body.get("name") or "")

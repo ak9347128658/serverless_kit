@@ -3,12 +3,13 @@ import { Drawer } from "../../components/Drawer";
 import { api, errorMessage } from "../api";
 import { useJob } from "../jobs";
 import { useStudio } from "../store";
-import type { JsonObject, OnPremCatalogItem, OnPremCluster, OnPremServer, OnPremService, OnPremServicesState, OnPremTarget } from "../types";
+import type { JsonObject, OnPremAlert, OnPremCatalogItem, OnPremCluster, OnPremServer, OnPremService, OnPremServicesState, OnPremTarget } from "../types";
 import { asObject, NAME_RE, uniqueName } from "../util";
 import { JobConsole } from "./Console";
 import { Markdown } from "./Markdown";
 import { useConfirm, useToast } from "./Feedback";
-import { EnumSelect, FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
+import { EnumSelect, FilePathInput, FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
+import { AlertFields, AlertsPanel, EMPTY_ALERT, NEW_FUNCTION, ServiceMonitor, alertBody, alertError, alertHandler, type AlertDraft } from "./Monitoring";
 import { ServersPanel, ServiceConsole, TerminalDrawer } from "./OnPremMachines";
 import { ServiceBrowser } from "./ServiceBrowser";
 import { ReplicasPanel, ReplicationForm } from "./Replication";
@@ -91,9 +92,11 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
     }
   };
 
-  const backup = async (svc: OnPremService) => {
+  const [backupFor, setBackupFor] = useState<OnPremService | null>(null);
+  const backup = async (svc: OnPremService, folder: string) => {
     try {
-      setJobId((await api.onpremBackup(svc.key)).job_id);
+      setJobId((await api.onpremBackup(svc.key, folder || undefined)).job_id);
+      setBackupFor(null);
     } catch (exc) {
       toast(errorMessage(exc), "err");
     }
@@ -206,7 +209,7 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
                       </button>
                     )}
                     {state.catalog.find((c) => c.id === svc.service)?.backup && (
-                      <button type="button" className="btn btn-sm" onClick={() => void backup(svc)}>
+                      <button type="button" className="btn btn-sm" onClick={() => setBackupFor(svc)}>
                         Backup
                       </button>
                     )}
@@ -238,6 +241,7 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
         />
       )}
       {details && <DetailsDrawer serviceKey={details} onClose={() => setDetails(null)} />}
+      {backupFor && <BackupDialog svc={backupFor} onClose={() => setBackupFor(null)} onStart={(folder) => void backup(backupFor, folder)} />}
       {usage && <ServiceUsageDrawer serviceKey={usage} onClose={() => setUsage(null)} />}
       {browse && <ServiceBrowser serviceKey={browse.key} kinds={browse.kinds} onClose={() => setBrowse(null)} />}
       {consoleKey && <ServiceConsole serviceKey={consoleKey} onClose={() => setConsoleKey(null)} />}
@@ -334,6 +338,9 @@ export function CreateDrawer({
   const [lbServer, setLbServer] = useState("");
   const [lbLocal, setLbLocal] = useState(true);
   const [lbPort, setLbPort] = useState<number | undefined>(undefined);
+  // Optional for databases: a dump to start from, and alerts.
+  const [dataImport, setDataImport] = useState("");
+  const [alert, setAlert] = useState<AlertDraft>(EMPTY_ALERT);
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const job = useJob(jobId);
@@ -364,6 +371,8 @@ export function CreateDrawer({
     );
     setVersion("");
     setScale("single");
+    setDataImport("");
+    setAlert(EMPTY_ALERT);
     setRepOn("servers");
     setLbPort(undefined);
     if (c.kind === "runtime") {
@@ -381,6 +390,13 @@ export function CreateDrawer({
       .onpremServices()
       .then((s) => {
         const svc = s.services.find((x) => x.key === key);
+        if (svc && svc.kind === "service" && alert.on && alert.function === NEW_FUNCTION) {
+          // pskit.yml gets the function with the resource; its handler stub is written here.
+          api.onpremAlertFunction(alertHandler(key)).then(
+            (r) => toast(`Alert function ${key}-alert: handler in ${r.path}`, "ok"),
+            (exc: unknown) => toast(errorMessage(exc), "err"),
+          );
+        }
         if (svc && svc.kind === "service") onCreated(svc, TRIGGER_ROLES.includes(role) ? attach : []);
         else toast(`${item.label} is installed`, "ok");
       })
@@ -392,6 +408,10 @@ export function CreateDrawer({
   const loginError = login && !/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(login) ? "3-64 characters, starting with a letter" : null;
   const keyError = !NAME_RE.test(key) ? "letters, digits, - and _; start with a letter" : taken.includes(key) ? "already used" : null;
   const repInfo = item?.kind === "service" && role === "database" ? item.replication || null : null;
+  const importTypes = item?.kind === "service" ? item.import_types || [] : [];
+  const importError =
+    dataImport.trim() && importTypes.length && !importTypes.some((t) => dataImport.trim().toLowerCase().endsWith(t)) ? `a ${importTypes.join(", ")} file` : null;
+  const alertProblem = item?.kind === "service" && role === "database" ? alertError(alert) : null;
   const replicated = !!repInfo && scale === "replicated";
   const repLocal = replicated && repOn === "local";
   const topologyError = !replicated
@@ -438,7 +458,7 @@ export function CreateDrawer({
   const functionsUrlError = isSmtp && functionsUrl.trim() && !/^https?:\/\/\S+$/.test(functionsUrl.trim()) ? "http://host:port of the pskit host" : null;
 
   const submit = async () => {
-    if (!item || keyError || sshError || topologyError || passwordError || loginError || guiPasswordError || domainsError || functionsUrlError) return;
+    if (!item || keyError || sshError || topologyError || importError || alertProblem || passwordError || loginError || guiPasswordError || domainsError || functionsUrlError) return;
     setSubmitError(null);
     const sshTarget: OnPremTarget = { ...ssh, method: "ssh", auth: sshAuth };
     if (sshAuth !== "key") delete sshTarget.identity_file;
@@ -461,6 +481,11 @@ export function CreateDrawer({
     if (login.trim()) body.user = login.trim();
     if (password) body.password = password;
     if (bind && !replicated) body.bind = bind;
+    if (dataImport.trim() && importTypes.length) body.import = { path: dataImport.trim() };
+    if (role === "database") {
+      const a = alertBody(alert, key);
+      if (a) body.alert = a as JsonObject;
+    }
     if (replicated && repInfo) {
       delete body.target;
       const topology: JsonObject = {
@@ -506,6 +531,8 @@ export function CreateDrawer({
               !!keyError ||
               !!sshError ||
               !!topologyError ||
+              !!importError ||
+              !!alertProblem ||
               !!passwordError ||
               !!loginError ||
               !!guiPasswordError ||
@@ -824,6 +851,22 @@ export function CreateDrawer({
                 </FormRow>
                 )}
               </div>
+              {importTypes.length > 0 && (
+                <FormRow
+                  label="Import data"
+                  error={importError}
+                  help={`Optional. A dump on this machine (${importTypes.join(", ")}), loaded once it is up${replicated ? ", into the primary before the replicas copy it" : ""}. A pskit backup works too.`}
+                >
+                  <FilePathInput value={dataImport} onChange={setDataImport} startAt="~" placeholder="none: start empty" title="Pick a dump to import" />
+                </FormRow>
+              )}
+              {role === "database" && (
+                <div className="driver-box card card-pad">
+                  <h3>Alerts</h3>
+                  <AlertFields value={alert} onChange={setAlert} functions={functions} serviceKey={key} replicated={replicated} />
+                  {alertProblem && <div className="form-error small">{alertProblem}</div>}
+                </div>
+              )}
               {(item.companion || (item.gui && item.gui.length > 0)) && (
                 <FormRow
                   label="Web UI"
@@ -930,6 +973,43 @@ export function CreateDrawer({
   );
 }
 
+const BACKUP_FOLDER = "pskit.studio.backup-folder";
+
+/** Where a backup goes: .pskit/backups (default) or a folder picked on this machine (remembered). */
+function BackupDialog({ svc, onClose, onStart }: { svc: OnPremService; onClose: () => void; onStart: (folder: string) => void }) {
+  const [folder, setFolder] = useState(() => window.localStorage.getItem(BACKUP_FOLDER) || "");
+  return (
+    <Drawer
+      open
+      title={`Back up ${svc.key}`}
+      onClose={onClose}
+      actions={
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => {
+            window.localStorage.setItem(BACKUP_FOLDER, folder.trim());
+            onStart(folder.trim());
+          }}
+        >
+          Back up now
+        </button>
+      }
+    >
+      <div className="form">
+        <p className="muted small">
+          Streams a dump out of {svc.service} on {svc.target_label}
+          {svc.topology ? " (from the primary)" : ""} into a file named <code className="mono">{svc.key}-&lt;time&gt;</code>. Import it into a new database
+          later with <b>Import data</b> when you create one.
+        </p>
+        <FormRow label="Save to folder" help="Empty: .pskit/backups in the project. Browse… opens any folder on this machine.">
+          <FilePathInput folder value={folder} onChange={setFolder} placeholder=".pskit/backups" title="Folder for the backup" />
+        </FormRow>
+      </div>
+    </Drawer>
+  );
+}
+
 function generatePassword(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789_-.";
   const bytes = new Uint32Array(24);
@@ -977,6 +1057,9 @@ export function ServiceUsageDrawer({ serviceKey, onClose }: { serviceKey: string
 
 function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: () => void }) {
   const [info, setInfo] = useState<OnPremService | null>(null);
+  const [alertSettings, setAlertSettings] = useState<OnPremAlert | null>(null);
+  const { draft } = useStudio();
+  const projectFunctions = Object.keys(asObject(draft.functions));
   const [reveal, setReveal] = useState(false);
   const [logs, setLogs] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1038,6 +1121,10 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
             </FormRow>
           )}
           {info.topology && <ReplicasPanel info={info} onChanged={() => setAttempt((a) => a + 1)} />}
+          {info.kind === "service" && info.container && <ServiceMonitor serviceKey={serviceKey} alert={alertSettings} />}
+          {info.kind === "service" && info.container && (
+            <AlertsPanel serviceKey={serviceKey} functions={projectFunctions} replicated={!!info.topology} onLoaded={setAlertSettings} />
+          )}
           {(links.length > 0 || info.companion) && (
             <FormRow label="Web UI" help="Does not open? Check web UI tests the container, the port, the server and this machine, and names the fix (firewall / NSG, bind, tunnel).">
               <div className="stack-xs">

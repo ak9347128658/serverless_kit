@@ -334,6 +334,8 @@ pskit resources onprem servers add db-box --ssh azureuser@13.72.87.80           
 pskit resources onprem servers add lab --ssh root@192.168.1.20 --ssh-password-env LAB_PW --sudo
 pskit resources onprem servers list
 pskit resources onprem servers test edge1        # OS, CPU, memory, disk, Docker access, sudo, Python / Node / nginx
+pskit resources onprem servers check             # ✓ / ✗: which servers answer on their SSH port (no login)
+pskit resources onprem servers top edge1 --watch 5   # live CPU, memory and disk use
 pskit resources onprem create cache --service redis --server edge1 --save
 pskit resources onprem servers remove lab        # services there keep running
 ```
@@ -647,9 +649,49 @@ only**, **Stop service, keep data** (the volume stays; creating the service agai
 **Delete service and data**. For a built-in on-prem queue, bucket or topic it offers **Delete, keep data** or
 **Delete with its data** (`pskit resources clear`).
 
+## Monitoring and alerts
+
+The **Servers** list shows a check mark per server: ✓ when its SSH port answers (all probed at once when the list
+opens, **Re-check** to probe again), ✗ with the reason otherwise; *Test* replaces it with the result of a full login
+check. **Live** on a server shows its CPU, RAM and disk use, refreshed every few seconds, until you switch it off.
+
+A service's **Details** has **Live monitoring**: switch it on to see, every 5 seconds, each container's CPU, memory and
+the disk holding its data (for a replicated database: the primary, every replica and the load balancer), the open
+connections, the data size and how far each replica is behind. Nothing is measured while it is off.
+
+**Alerts** (optional, in the create form or in Details) send a message when a limit is crossed: CPU, memory or disk
+percent of a container, replica lag in seconds, or a container that is down. They go to
+
+- a **function** of the project, run through the deployed host with the alert as `event.data`
+  (`{kind: "pskit.database.alert", key, service, reasons, message, sample}`). *Create a new function* adds
+  `<key>-alert` to `pskit.yml` with a handler stub; deploy the project to run it;
+- a **webhook**: Slack, Teams or Google Chat incoming webhooks show the message; any other URL gets the JSON.
+
+An alert goes out at most once per cooldown (30 minutes by default). The studio checks every minute while it runs;
+without it, run the check from cron on any machine with the project:
+
+```bash
+pskit resources onprem alerts orders-db --webhook https://hooks.slack.com/services/... --disk 80 --lag 30
+pskit resources onprem alerts orders-db --test         # send a test alert
+pskit resources onprem alerts orders-db --check        # measure now; alert when over a limit (cron: every minute)
+pskit resources onprem monitor orders-db --watch 5     # the live numbers in a terminal
+```
+
+## Start a database with data
+
+**Import data** (optional, create form) loads a dump from this machine once the database is up: `.sql`, `.sql.gz`
+or `.dump` (`pg_restore`) for PostgreSQL, `.sql` / `.sql.gz` for MySQL and MariaDB, `.archive` (`mongodump
+--archive`, optionally gzipped) for MongoDB. A pskit backup works as is. On a server the file goes there over SSH
+first; for a replicated database it goes into the primary before the replicas start, so they copy it.
+
+```bash
+pskit resources onprem create orders-db --service postgres --server db1 --import ./backups/orders.sql
+```
+
 ## Backups
 
-`Backup` streams a dump out of the container into `.pskit/backups/` on this machine, also from an SSH server:
+`Backup` streams a dump out of the container into `.pskit/backups/` on this machine, or a folder you choose
+(**Backup → Save to folder → Browse…**, remembered; CLI `--dir` / `-o`), also from an SSH server:
 
 | Service | File | Restore |
 |---|---|---|

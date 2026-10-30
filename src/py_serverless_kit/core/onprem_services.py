@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
+from . import onprem_monitor as monitor
 from . import onprem_replication as replication
 from . import onprem_s3, onprem_secretsmanager, onprem_smtp
 from .onprem_apps import DEFAULT_USERS, NO_AUTH_APPS, SELF_LOGIN, apps
@@ -701,6 +702,7 @@ def catalog() -> List[Dict[str, Any]]:
                 "default_user": DEFAULT_USER.get(name, "pskit"),
                 "browsers": browsers_for(name),
                 "replication": replication.catalog_info(name),
+                "import_types": list(monitor.IMPORT_TYPES.get(name, ())),
                 "group": svc.get("group") or _group_of(svc),
                 "notes": svc["notes"],
             }
@@ -1235,6 +1237,12 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
                                "(and only with gui_login: password)")
     project = str((raw or {}).get("service") or "")
     extra: Dict[str, Any] = {}
+    # Optional: alert settings, and a dump to load once it is up (before any replica copies it).
+    if body.get("alert") and (not isinstance(body["alert"], dict) or body["alert"].get("enabled", True)):
+        extra["alert"] = monitor.check_alert(body["alert"])
+    data_import = monitor.check_import(service, body.get("import"))
+    if data_import:
+        extra["import"] = data_import
     if service == "smtp":
         extra["smtp"] = onprem_smtp.check(body, raw, root, target)
         extra["token"] = onprem_smtp.admin_token(raw, root, env_file_of(raw))
@@ -1703,6 +1711,8 @@ def create(
     init = spec["init"].get(req["role"], "") if isinstance(spec["init"], dict) else spec["init"]
     if init:
         sh(docker_argv(target, ["exec", req["container"], "sh", "-c", _fill(init, _values(req, password))]))
+    if req.get("import"):
+        monitor.import_data(target, req["container"], req["service"], req["import"], emit, run=run)
     if req["service"] == "elasticmq":
         _elasticmq_queue(req, emit, sh)
     resource, env_values, notes = _connection(req, password)
@@ -1742,6 +1752,8 @@ def create(
         entry["sidecars"] = [f"{req['container']}-{side['name']}" for side in spec["sidecars"]]
     if req.get("smtp"):
         entry["smtp"] = req["smtp"]
+    if req.get("alert"):
+        entry["alert"] = req["alert"]
     state = load_state(root)
     state["services"][req["key"]] = entry
     save_state(root, state)
@@ -2249,6 +2261,14 @@ def apply_to_raw(raw: Dict[str, Any], entry: Dict[str, Any], attach: Optional[Li
                 events = override["events"]
             if not any(isinstance(e, dict) and (e.get(kind) or {}).get("resource") == key for e in events):
                 events.append({kind: {"resource": key}})
+    # An alert function made for this service (create form: "Create a new function"): added once, never replaced.
+    alert: Dict[str, Any] = entry["alert"] if isinstance(entry.get("alert"), dict) else {}
+    if alert.get("function") and alert.get("function_handler"):
+        functions = out.setdefault("functions", {})
+        if alert["function"] not in functions:
+            functions[alert["function"]] = {"handler": alert["function_handler"],
+                                            "description": f"Alerts of {entry.get('service')} {key} (CPU, memory, "
+                                                           "disk, replica lag, down)"}
     return out
 
 

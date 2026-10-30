@@ -315,6 +315,8 @@ export function FilePathInput({
   onChange,
   placeholder,
   keysOnly,
+  folder,
+  startAt,
   title,
 }: {
   id?: string;
@@ -322,6 +324,10 @@ export function FilePathInput({
   onChange: (v: string) => void;
   placeholder?: string;
   keysOnly?: boolean;
+  /** Choose a folder instead of a file. */
+  folder?: boolean;
+  /** Where the picker opens while the value is empty (default: ~/.ssh, for keys). */
+  startAt?: string;
   title?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -336,7 +342,7 @@ export function FilePathInput({
           ✕
         </button>
       )}
-      <FilePickerModal open={open} title={title} start={value || undefined} keysOnly={keysOnly} onClose={() => setOpen(false)} onPick={onChange} />
+      <FilePickerModal open={open} title={title} start={value || startAt || undefined} keysOnly={keysOnly} folder={folder} onClose={() => setOpen(false)} onPick={onChange} />
     </div>
   );
 }

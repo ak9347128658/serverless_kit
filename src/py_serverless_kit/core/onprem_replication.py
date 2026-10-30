@@ -882,6 +882,11 @@ def create(root: Path, req: Dict[str, Any], body: Dict[str, Any], raw: Optional[
     options, script = _primary_setup(service, topo)
     _exec(ctx, primary["target"], primary["container"], options, script,
           {"PSKIT_REPL_PASSWORD": secret["replication_password"]})
+    if req.get("import"):
+        # Into the primary before the replicas start: each replica copies it with the rest.
+        from .onprem_monitor import import_data
+
+        import_data(primary["target"], primary["container"], service, req["import"], emit, run=run)
     for member in members[1:]:
         _start_member(ctx, req, topo, member, password, secret, wait)
         _join(ctx, req, topo, member, secret, wait)
@@ -920,6 +925,7 @@ def create(root: Path, req: Dict[str, Any], body: Dict[str, Any], raw: Optional[
         "notes": notes,
         "created_at": svc._now(),
         "topology": {**topo, "secrets": secret},
+        **({"alert": req["alert"]} if req.get("alert") else {}),
     }
     state = svc.load_state(root)
     state["services"][req["key"]] = entry

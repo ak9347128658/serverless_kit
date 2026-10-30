@@ -49,6 +49,10 @@ def fail(msg: str) -> None:
     click.secho(msg, fg="red", err=True)
 
 
+def warn(msg: str) -> None:
+    click.secho(msg, fg="yellow")
+
+
 def project_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Options shared by every command that loads the project."""
 
@@ -857,6 +861,10 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--balancer-port", type=int, default=None, help="With --balancer: its port (6432 / 6033).")
 @click.option("--sync", "sync", type=click.Choice(["async", "sync"]), default=None,
               help="With --replica: async (default, fastest) or sync (a commit waits for a replica).")
+@click.option("--import", "import_file", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Database: load this dump once it is up (.sql, .sql.gz, .dump; MongoDB .archive).")
+@click.option("--alert-webhook", default=None, help="Alerts (CPU, memory, disk, replica lag, down) to this URL.")
+@click.option("--alert-function", default=None, help="Alerts run this function of the project (deployed host).")
 @click.option("--save", is_flag=True, help="Write the resource (and triggers) into pskit.yml.")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
 @click.option("--json", "as_json", is_flag=True, help="Print the created entry as JSON.")
@@ -893,6 +901,9 @@ def resources_onprem_create(  # noqa: PLR0913
     balancer: Optional[str],
     balancer_port: Optional[int],
     sync: Optional[str],
+    import_file: Optional[str],
+    alert_webhook: Optional[str],
+    alert_function: Optional[str],
     save: bool,
     config_path: Optional[str],
     as_json: bool,
@@ -962,6 +973,9 @@ def resources_onprem_create(  # noqa: PLR0913
         "functions_url": functions_url,
         "max_size_mb": max_size_mb,
         "topology": topology,
+        "import": {"path": import_file} if import_file else None,
+        "alert": {"webhook": alert_webhook or "", "function": alert_function or ""}
+        if alert_webhook or alert_function else None,
     }
     entry = _service_call(svc.create, root, {k: v for k, v in body.items() if v is not None}, raw, echo)
     if as_json:
@@ -988,6 +1002,88 @@ def resources_onprem_create(  # noqa: PLR0913
 @resources_onprem.group("replicas", short_help="Read replicas of a replicated database: list, add, remove.")
 def resources_onprem_replicas() -> None:
     """Read replicas of a database created with --replica. The load balancer and the env file follow."""
+
+
+@resources_onprem.command("monitor", short_help="Live CPU, memory, disk, connections and replica lag of a service.")
+@click.argument("key")
+@click.option("--watch", "every", type=int, default=0, help="Repeat every N seconds until Ctrl+C.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_monitor(key: str, every: int, as_json: bool, config_path: Optional[str]) -> None:
+    import time
+
+    from ..core.onprem_monitor import sample
+
+    root, _path, _raw = _raw_project(config_path)
+    while True:
+        data = _service_call(sample, root, key)
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+        else:
+            echo(f"{key} ({data['service']}) at {data['at']}")
+            for c in data["containers"]:
+                where = c.get("server") or "this machine"
+                usage = "  ".join(f"{label} {c[k]:g}%" for k, label in (("cpu", "CPU"), ("memory", "mem"),
+                                                                         ("disk", "disk")) if c.get(k) is not None)
+                echo(f"  {c['name']:<10}{c['role']:<9}{where:<18}{c['state']:<10}{usage}")
+            db = data.get("database") or {}
+            if db:
+                echo(f"  connections {db.get('connections', '?')}, data {db.get('size_mb', '?')} MB")
+            for name, lag in (data.get("lag") or {}).items():
+                echo(f"  replica {name}: " + ("replication stopped" if lag is None else f"{lag} s behind"))
+        if not every:
+            return
+        time.sleep(max(2, every))
+
+
+@resources_onprem.command("alerts", short_help="Alerts of a service: show, set, test or check now.")
+@click.argument("key")
+@click.option("--on/--off", "enabled", default=None, help="Turn the alerts on or off (settings are kept).")
+@click.option("--webhook", default=None, help="POST alerts to this URL (Slack / Teams incoming webhook, any URL).")
+@click.option("--function", "function", default=None, help="Run this function of the project with each alert.")
+@click.option("--stage", default=None, help="The deployed on-prem stage that runs the function (default: any).")
+@click.option("--cpu", type=int, default=None, help="Alert at this CPU percent of a container (default 90).")
+@click.option("--memory", type=int, default=None, help="... memory percent (default 90).")
+@click.option("--disk", type=int, default=None, help="... percent of the data disk used (default 85).")
+@click.option("--lag", "lag_seconds", type=int, default=None, help="... seconds a replica is behind (default 60).")
+@click.option("--cooldown", "cooldown_minutes", type=int, default=None, help="Minutes between alerts (default 30).")
+@click.option("--test", "test", is_flag=True, help="Send a test alert now.")
+@click.option("--check", "check_now", is_flag=True, help="Measure now and alert when over a limit (for cron).")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_alerts(key: str, enabled: Optional[bool], webhook: Optional[str], function: Optional[str],
+                            stage: Optional[str], cpu: Optional[int], memory: Optional[int], disk: Optional[int],
+                            lag_seconds: Optional[int], cooldown_minutes: Optional[int], test: bool, check_now: bool,
+                            config_path: Optional[str]) -> None:
+    """The studio checks services with alerts on while it runs; `--check` from cron does the same without it."""
+    from ..core import onprem_monitor as mon
+    from ..core.onprem_services import _entry
+
+    root, _path, _raw = _raw_project(config_path)
+    changes = {k: v for k, v in {"enabled": enabled, "webhook": webhook, "function": function, "stage": stage,
+                                 "cpu": cpu, "memory": memory, "disk": disk, "lag_seconds": lag_seconds,
+                                 "cooldown_minutes": cooldown_minutes}.items() if v is not None}
+    if changes:
+        if "enabled" not in changes and not mon.alert_settings(_service_call(_entry, root, key))["enabled"]:
+            changes["enabled"] = True
+        _service_call(mon.set_alert, root, key, changes)
+    settings = mon.alert_settings(_service_call(_entry, root, key))
+    echo(f"{key}: alerts {'on' if settings['enabled'] else 'off'}; CPU {settings['cpu']}%, memory "
+         f"{settings['memory']}%, disk {settings['disk']}%, replica lag {settings['lag_seconds']} s, down "
+         f"{'yes' if settings['down'] else 'no'}; every {settings['interval_seconds']} s, cooldown "
+         f"{settings['cooldown_minutes']} min")
+    echo(f"  to: {', '.join(x for x in (settings['function'] and 'function ' + settings['function'], settings['webhook']) if x) or 'nowhere yet'}")
+    if test:
+        record = _service_call(mon.send_alert, root, key, _service_call(mon.sample, root, key), [], test=True)
+        (ok if record["sent"] else warn)(f"test alert: sent to {', '.join(record['sent']) or 'nothing'}"
+                                         + (f"; {'; '.join(record['errors'])}" if record["errors"] else ""))
+    if check_now:
+        result = _service_call(mon.check, root, key)
+        if not result["reasons"]:
+            ok("all within the limits")
+        for reason in result["reasons"]:
+            warn(reason)
+        if result.get("alert"):
+            echo(f"  alert: {result['alert']}")
 
 
 @resources_onprem_replicas.command("list", short_help="Members, their state and replication lag.")
@@ -1273,6 +1369,40 @@ def _print_server_test(result: dict) -> None:
     ok(f"{result['name']} answers over SSH")
 
 
+@resources_onprem_servers.command("check", short_help="Which saved servers answer on their SSH port (no login).")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_servers_check(config_path: Optional[str]) -> None:
+    from ..core.onprem_servers import reachability
+
+    root, _path, _raw = _raw_project(config_path)
+    for name, item in sorted(reachability(root).items()):
+        (ok if item["ok"] else warn)(f"{name}: " + (f"{item['ms']} ms" if item["ok"] else item["error"]))
+
+
+@resources_onprem_servers.command("top", short_help="Live CPU, memory and disk use of a saved server.")
+@click.argument("name")
+@click.option("--watch", "every", type=int, default=0, help="Repeat every N seconds until Ctrl+C.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_servers_top(name: str, every: int, config_path: Optional[str]) -> None:
+    import time
+
+    from ..core.onprem_servers import ServerError, server_metrics
+
+    root, _path, _raw = _raw_project(config_path)
+    while True:
+        try:
+            m = server_metrics(root, name)
+        except ServerError as exc:
+            raise click.ClickException(str(exc)) from None
+        if not m.get("reachable"):
+            raise click.ClickException(f"{name}: {m.get('error')}")
+        echo(f"{name}: CPU {m.get('cpu')}% of {m.get('cpus')}, memory {m.get('memory')}% of {m.get('memory_mb')} MB, "
+             f"disk {m.get('disk')}% of {m.get('disk_gb')} GB, load {m.get('load')}")
+        if not every:
+            return
+        time.sleep(max(1, every - 1))
+
+
 @resources_onprem_servers.command("test")
 @click.argument("name")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
@@ -1451,12 +1581,21 @@ def resources_onprem_logs(key: str, tail: int, config_path: Optional[str]) -> No
 @resources_onprem.command("backup", short_help="Dump a service's data to .pskit/backups.")
 @click.argument("key")
 @click.option("-o", "--output", default=None, help="File to write (default: .pskit/backups/<key>-<time>.<ext>).")
+@click.option("-d", "--dir", "folder", default=None, type=click.Path(file_okay=False),
+              help="Folder to write <key>-<time>.<ext> into (created when missing).")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
-def resources_onprem_backup(key: str, output: Optional[str], config_path: Optional[str]) -> None:
-    from ..core.onprem_services import backup
+def resources_onprem_backup(key: str, output: Optional[str], folder: Optional[str], config_path: Optional[str]) -> None:
+    import time
+
+    from ..core.onprem_services import SERVICES, _entry, backup
 
     root, _path, _raw = _raw_project(config_path)
     dest = Path(output).resolve() if output else None
+    if folder and not output:
+        spec = SERVICES.get(str(_service_call(_entry, root, key).get("service"))) or {}
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        dest = Path(folder).resolve() / f"{key}-{stamp}.{spec.get('backup_ext') or 'dump'}"
     saved = _service_call(backup, root, key, echo, dest=dest)
     ok(f"Backup written to {saved}")
 
@@ -2288,15 +2427,17 @@ def _passphrase(confirm: bool) -> str:
 
 @settings.command("export")
 @click.option("-o", "--output", default=None, help="File to write (default: <service>.pskit-settings).")
+@click.option("--with-config", is_flag=True, help="Also include pskit.yml (the functions, resources and providers).")
 @_CONFIG_OPTION
-def settings_export(output: Optional[str], config_path: Optional[str]) -> None:
+def settings_export(output: Optional[str], with_config: bool, config_path: Optional[str]) -> None:
     """Write every local setting and secret of this project to one encrypted file."""
     from ..core.settings_bundle import SettingsError, env_files_of, export_settings
 
     root, _path, raw = _raw_project(config_path)
     target = Path(output or f"{raw.get('service') or 'pskit'}.pskit-settings")
     try:
-        text, summary = export_settings(root, _passphrase(True), env_files=env_files_of(raw), pskit_version=__version__)
+        text, summary = export_settings(root, _passphrase(True), env_files=env_files_of(raw), pskit_version=__version__,
+                                        config=with_config)
     except SettingsError as exc:
         raise click.ClickException(str(exc)) from None
     target.write_bytes(text.encode("utf-8"))

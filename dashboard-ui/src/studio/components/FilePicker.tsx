@@ -14,6 +14,7 @@ export function FilePickerModal({
   title = "Choose a file",
   start,
   keysOnly = false,
+  folder = false,
   onClose,
   onPick,
 }: {
@@ -21,6 +22,8 @@ export function FilePickerModal({
   title?: string;
   start?: string;
   keysOnly?: boolean;
+  /** Pick a folder (the one shown, with "Use this folder") instead of a file. */
+  folder?: boolean;
   onClose: () => void;
   onPick: (path: string) => void;
 }) {
@@ -32,8 +35,8 @@ export function FilePickerModal({
   const [onlyKeys, setOnlyKeys] = useState(keysOnly);
 
   useEffect(() => {
-    if (open) setPath(start || undefined);
-  }, [open, start]);
+    if (open) setPath(start || (folder ? "~" : undefined));
+  }, [open, start, folder]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -54,7 +57,7 @@ export function FilePickerModal({
     };
   }, [open, path]);
 
-  const entries = (listing?.entries || []).filter((e) => e.type === "dir" || !onlyKeys || e.key);
+  const entries = (listing?.entries || []).filter((e) => e.type === "dir" || (!folder && (!onlyKeys || e.key)));
   const sep = listing?.path.includes("\\") ? "\\" : "/";
   return (
     <Modal open={open} title={title} onClose={onClose}>
@@ -80,7 +83,22 @@ export function FilePickerModal({
             </>
           )}
           <span className="grow" />
-          <Toggle checked={onlyKeys} onChange={setOnlyKeys} label="Key files only" />
+          {folder ? (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={!listing}
+              onClick={() => {
+                if (!listing) return;
+                onPick(listing.path);
+                onClose();
+              }}
+            >
+              Use this folder
+            </button>
+          ) : (
+            <Toggle checked={onlyKeys} onChange={setOnlyKeys} label="Key files only" />
+          )}
         </div>
         <form
           className="row-gap"
@@ -99,7 +117,7 @@ export function FilePickerModal({
         {listing && !loading && !error && (
           <>
             {!entries.length ? (
-              <EmptyState title="Nothing here">{onlyKeys ? "No key files in this folder. Turn off “Key files only” to see everything." : "This folder is empty."}</EmptyState>
+              <EmptyState title="Nothing here">{folder ? "No folders inside. Use this folder, or go up." : onlyKeys ? "No key files in this folder. Turn off “Key files only” to see everything." : "This folder is empty."}</EmptyState>
             ) : (
               <ul className="pick-list file-list" role="listbox" aria-label="Files">
                 {entries.map((e) => (

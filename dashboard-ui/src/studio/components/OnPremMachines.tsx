@@ -4,6 +4,7 @@ import { api, errorMessage } from "../api";
 import type { JsonObject, OnPremConsoleInfo, OnPremConsoleResult, OnPremServer, OnPremServerTest, OnPremTerminal } from "../types";
 import { useConfirm, useToast } from "./Feedback";
 import { FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
+import { ServerLive } from "./Monitoring";
 
 const SERVER_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,62}$/;
 
@@ -15,8 +16,19 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
   const [tests, setTests] = useState<Record<string, OnPremServerTest | "running">>({});
   const [shell, setShell] = useState<string | null>(null);
   const [terminal, setTerminal] = useState<{ server?: string; key?: string; shell?: boolean } | null>(null);
+  const [reach, setReach] = useState<Record<string, { ok: boolean; ms?: number; error?: string }> | null>(null);
+  const [live, setLive] = useState<Record<string, boolean>>({});
   const confirm = useConfirm();
   const toast = useToast();
+  // Check marks: every server's SSH port, probed in parallel (no login) when the list loads.
+  const checkAll = useCallback(() => {
+    setReach(null);
+    api.onpremServersReachability().then(
+      (r) => setReach(r.servers),
+      () => setReach({}),
+    );
+  }, []);
+  useEffect(checkAll, [checkAll]);
 
   const load = useCallback(() => {
     api
@@ -62,9 +74,14 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
             (<code className="mono">pskit deploy --server NAME</code> or <b>Deploy → Machine</b>).
           </p>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => setEditing("new")}>
-          + Add server
-        </button>
+        <span className="row-gap">
+          <button type="button" className="btn" onClick={checkAll} disabled={!servers?.length || reach === null} title="Probe every server's SSH port again">
+            {reach === null && servers?.length ? "Checking…" : "Re-check"}
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => setEditing("new")}>
+            + Add server
+          </button>
+        </span>
       </div>
       {error && <div className="form-error">{error}</div>}
       {servers && !servers.length && <p className="muted">No saved servers yet.</p>}
@@ -72,6 +89,7 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
         <table className="table">
           <thead>
             <tr>
+              <th aria-label="Reachable" />
               <th>Name</th>
               <th>Connection</th>
               <th>Login</th>
@@ -83,6 +101,19 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
               const t = tests[s.name];
               return (
                 <tr key={s.name}>
+                  <td>
+                    {(() => {
+                      const r = reach?.[s.name];
+                      const tested = t && t !== "running" ? t.ok : undefined;
+                      const ok = tested ?? r?.ok;
+                      const title = tested !== undefined ? (tested ? "Test passed (SSH login, Docker, sudo)" : "Test failed") : r ? (r.ok ? `SSH port answers (${r.ms} ms)` : r.error) : "checking…";
+                      return (
+                        <span className={`status-mark ${ok === undefined ? "unknown" : ok ? "ok" : "bad"}`} title={title} aria-label={title}>
+                          {ok === undefined ? "…" : ok ? "✓" : "✗"}
+                        </span>
+                      );
+                    })()}
+                  </td>
                   <td>
                     <b className="mono">{s.name}</b>
                     {s.description && <div className="muted small">{s.description}</div>}
@@ -102,6 +133,15 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
                       <button type="button" className="btn btn-sm" disabled={t === "running"} onClick={() => void test(s.name)}>
                         {t === "running" ? "Testing…" : "Test"}
                       </button>
+                      <button
+                        type="button"
+                        className={`btn btn-sm${live[s.name] ? " btn-primary" : ""}`}
+                        onClick={() => setLive((l) => ({ ...l, [s.name]: !l[s.name] }))}
+                        title="Live CPU, RAM and disk use (every 4 s while on)"
+                        aria-pressed={!!live[s.name]}
+                      >
+                        {live[s.name] ? "Live ●" : "Live"}
+                      </button>
                       <button type="button" className="btn btn-sm" onClick={() => setShell(s.name)} title="Run commands on the server">
                         Shell
                       </button>
@@ -119,6 +159,7 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
                       </button>
                     </span>
                     {t && t !== "running" && <ServerFacts result={t} />}
+                    {live[s.name] && <ServerLive name={s.name} />}
                   </td>
                 </tr>
               );

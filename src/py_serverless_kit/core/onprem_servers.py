@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -234,6 +235,38 @@ def test_server(root: Path, name: str, *, run: Optional[RunFn] = None) -> Dict[s
     if code or "os" not in facts:
         return {"name": name, "ok": False, "error": text.strip()[-600:] or f"ssh exited with {code}"}
     return {"name": name, "ok": True, "facts": facts}
+
+
+def reachability(root: Path, *, timeout: float = 3.0) -> Dict[str, Dict[str, Any]]:
+    """Every saved server's SSH port, probed in parallel (no login): ``{name: {ok, ms, error}}``. The studio's
+    check marks; *Test* logs in and checks Docker, sudo and the runtimes."""
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+
+    def probe(item: Tuple[str, Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+        name, server = item
+        host, port = str(server.get("host") or ""), int(server.get("port") or 22)
+        started = time.monotonic()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return name, {"ok": True, "ms": round((time.monotonic() - started) * 1000)}
+        except OSError as exc:
+            return name, {"ok": False, "error": f"{host}:{port}: {exc.strerror or exc}"}
+
+    servers = load_servers(root)
+    if not servers:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(16, len(servers))) as pool:
+        return dict(pool.map(probe, servers.items()))
+
+
+def server_metrics(root: Path, name: str, *, run: Optional[RunFn] = None) -> Dict[str, Any]:
+    """Live CPU (over one second), memory and disk use in percent, load and size of a saved server."""
+    from .onprem_cluster import node_metrics
+
+    out = node_metrics(server_target(root, name), run=run)
+    out["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return out
 
 
 _LOGIN_KEYS = ("host", "user", "port", "ssh_port", "pem", "identity", "identity_file", "password_file", "auth",

@@ -59,10 +59,15 @@ def _pskit(root: Path) -> Path:
     return Path(root) / ".pskit"
 
 
-def _files(root: Path, env_files: Iterable[str] = ()) -> List[Path]:
-    """Every settings file of the project that exists, as paths under ``root``."""
+def _files(root: Path, env_files: Iterable[str] = (), *, config: bool = False) -> List[Path]:
+    """Every settings file of the project that exists, as paths under ``root``. ``config``: also the project's
+    configuration (``pskit.yml``), so the other machine gets the functions and resources too."""
     work = _pskit(root)
     found = [work / name for name in STORES]
+    if config:
+        from ..config.loader import DEFAULT_FILES
+
+        found += [Path(root) / name for name in DEFAULT_FILES]
     ssh = work / "ssh"
     if ssh.is_dir():
         found += [p for p in sorted(ssh.rglob("*")) if p.is_file()]
@@ -167,12 +172,13 @@ class _Packer:
         return f"{ROOT_MARK}/{KEYS_DIR.as_posix()}/{self.by_source[source]}"
 
 
-def collect(root: Path, *, env_files: Iterable[str] = (), pskit_version: str = "") -> Dict[str, Any]:
+def collect(root: Path, *, env_files: Iterable[str] = (), pskit_version: str = "",
+            config: bool = False) -> Dict[str, Any]:
     """The plain payload of an export (what :func:`encrypt` locks)."""
     packer = _Packer(root)
     base = Path(root).resolve()
     files: Dict[str, Dict[str, str]] = {}
-    for path in _files(root, env_files):
+    for path in _files(root, env_files, config=config):
         rel = path.resolve().relative_to(base).as_posix()
         if path.stat().st_size > _MAX_FILE:
             packer.warnings.append(f"{rel}: larger than {_MAX_FILE // 1024 // 1024} MB, left out")
@@ -275,10 +281,10 @@ def decrypt(text: str, passphrase: str) -> Dict[str, Any]:
 
 
 def export_settings(root: Path, passphrase: str, *, env_files: Iterable[str] = (),
-                    pskit_version: str = "") -> Tuple[str, Dict[str, Any]]:
-    """``(file text, summary)``. The summary lists what is inside (no secrets)."""
+                    pskit_version: str = "", config: bool = False) -> Tuple[str, Dict[str, Any]]:
+    """``(file text, summary)``. The summary lists what is inside (no secrets). ``config``: include pskit.yml."""
     check_passphrase(passphrase)
-    payload = collect(root, env_files=env_files, pskit_version=pskit_version)
+    payload = collect(root, env_files=env_files, pskit_version=pskit_version, config=config)
     return encrypt(payload, passphrase), summarize(payload)
 
 
@@ -369,7 +375,7 @@ def _write(path: Path, data: bytes, *, secret: bool) -> None:
 
 def backup(root: Path) -> Optional[Path]:
     """The current settings as an unencrypted payload in ``.pskit/backups/`` (they are on this disk already)."""
-    payload = collect(root)
+    payload = collect(root, config=True)  # an import may replace pskit.yml too
     if not payload["files"]:
         return None
     path = Path(root) / BACKUP_DIR / f"settings-{time.strftime('%Y%m%d-%H%M%S')}.json"

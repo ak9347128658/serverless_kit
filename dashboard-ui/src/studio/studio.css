@@ -687,3 +687,23 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .dfw-server > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .dfw-server[open] > summary { border-bottom: 1px solid var(--line); }
 .dfw-body { padding: 8px 10px; display: grid; gap: 10px; min-width: 0; }
+
+/* live usage meters (servers, database monitoring) */
+.usage-bar { display: grid; grid-template-columns: auto minmax(70px, 140px) 3.2em auto; align-items: center; gap: 6px; }
+.usage-bar.no-label { grid-template-columns: minmax(60px, 110px) 3.4em; min-width: 150px; }
+.usage-bar.no-label .usage-detail { grid-column: 1 / -1; }
+.usage-track { position: relative; height: 8px; border-radius: 4px; background: var(--off-soft); overflow: hidden; }
+.usage-fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; transition: width 0.4s ease; }
+.usage-limit { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--err); opacity: 0.6; }
+.usage-detail { white-space: nowrap; }
+.server-live { display: grid; gap: 4px; margin-top: 6px; }
+.server-live .row-gap { flex-wrap: nowrap; }
+.server-live .usage-bar { grid-template-columns: 2.8em 140px 3.6em 13em; }
+.sparkline { display: block; }
+.status-mark { font-weight: 700; }
+.status-mark.ok { color: var(--ok); }
+.status-mark.bad { color: var(--err); }
+.status-mark.unknown { color: var(--muted); }
+.service-monitor, .alerts-panel, .replicas-panel { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
+.alert-history { margin: 0; padding-left: 18px; }
+.settings-drawer .section, .settings-drawer section { margin-top: 0; }

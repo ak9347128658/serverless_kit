@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Modal } from "../components/Drawer";
+import { Drawer, Modal } from "../components/Drawer";
 import { ErrorBanner, Spinner } from "../components/Feedback";
 import { api, ApiError, errorMessage, MOCK } from "./api";
 import { ConfirmProvider, ToastProvider, useToast } from "./components/Feedback";
@@ -18,7 +18,7 @@ import { FunctionsView } from "./views/Functions";
 import { NewProject } from "./views/NewProject";
 import { OverviewView } from "./views/Overview";
 import { ResourcesView } from "./views/Resources";
-import { SetupView } from "./views/Setup";
+import { SettingsTransfer, SetupView } from "./views/Setup";
 import { TestView } from "./views/Test";
 import { WorkflowsView } from "./views/Workflows";
 import { YamlView } from "./views/Yaml";
@@ -156,6 +156,7 @@ function Shell() {
   const toast = useToast();
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const doSave = useCallback(
     async (force = false) => {
@@ -319,9 +320,19 @@ function Shell() {
             {dirty && <span className="dirty-dot" aria-label="unsaved changes" />}
             {state.saving ? "Saving…" : dirty ? "Save" : "Saved"}
           </button>
+          <button type="button" className="btn" onClick={() => setSettingsOpen(true)} title="Import / export the project's settings (.pskit) and pskit.yml">
+            ⇅ Settings
+          </button>
           <ThemeToggle />
         </div>
       </header>
+      {settingsOpen && (
+        <Drawer open title="Import / export settings and config" onClose={() => setSettingsOpen(false)}>
+          <div className="settings-drawer">
+            <SettingsTransfer />
+          </div>
+        </Drawer>
+      )}
       <nav className="studio-nav" aria-label="Sections">
         {NAV.map((n) => {
           const count = countFor(n.view);

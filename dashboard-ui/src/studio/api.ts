@@ -5,7 +5,11 @@ import type {
   ClusterAlertEntry,
   ClusterRequests,
   ClusterStatus,
+  OnPremAlert,
+  OnPremAlertRecord,
   OnPremCluster,
+  OnPremMonitorSample,
+  ServerMetrics,
   OnPremClustersState,
   SettingsImportResult,
   SettingsPreview,
@@ -203,8 +207,11 @@ export const api = {
     request<Record<string, unknown>>("POST", "/api/setup/aws-profile", body),
   login: (action: string) => request<{ job_id: string }>("POST", "/api/setup/login", { action }),
   sshTest: (deploy: JsonObject) => request<{ job_id: string }>("POST", "/api/setup/ssh-test", { deploy }),
-  settingsExport: (passphrase: string) =>
-    request<{ filename: string; content: string; summary: SettingsSummary }>("POST", "/api/settings-bundle/export", { passphrase }),
+  settingsExport: (passphrase: string, includeConfig = false) =>
+    request<{ filename: string; content: string; summary: SettingsSummary }>("POST", "/api/settings-bundle/export", {
+      passphrase,
+      include_config: includeConfig,
+    }),
   settingsPreview: (content: string, passphrase: string, replace: boolean) =>
     request<SettingsPreview>("POST", "/api/settings-bundle/preview", { content, passphrase, replace }),
   settingsImport: (content: string, passphrase: string, replace: boolean) =>
@@ -235,7 +242,23 @@ export const api = {
   onpremGuiCheck: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui-check`, {}),
   onpremGuiRemove: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/gui-remove`, {}),
   onpremLogs: (key: string) => request<{ text: string }>("GET", `/api/onprem-services/${encodeURIComponent(key)}/logs`),
-  onpremBackup: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/backup`, {}),
+  onpremBackup: (key: string, folder?: string) =>
+    request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/backup`, folder ? { folder } : {}),
+  onpremMonitor: (key: string) => request<OnPremMonitorSample>("GET", `/api/onprem-services/${encodeURIComponent(key)}/monitor`),
+  onpremAlert: (key: string) =>
+    request<{ alert: OnPremAlert; history: OnPremAlertRecord[]; last?: { checked_at: string; reasons?: string[]; error?: string } | null }>(
+      "GET",
+      `/api/onprem-services/${encodeURIComponent(key)}/alert`,
+    ),
+  onpremAlertSave: (key: string, alert: Partial<OnPremAlert>) =>
+    request<{ alert: OnPremAlert; history: OnPremAlertRecord[] }>("PUT", `/api/onprem-services/${encodeURIComponent(key)}/alert`, alert as JsonObject),
+  onpremAlertTest: (key: string) => request<OnPremAlertRecord>("POST", `/api/onprem-services/${encodeURIComponent(key)}/alert-test`, {}),
+  onpremAlertCheck: (key: string) =>
+    request<{ reasons: string[]; checked_at: string; alert?: JsonObject }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/alert-check`, {}),
+  onpremAlertFunction: (handler: string) =>
+    request<{ path: string; created: boolean }>("POST", "/api/onprem-services/alert-function", { handler }),
+  onpremServersReachability: () => request<{ servers: Record<string, { ok: boolean; ms?: number; error?: string }> }>("GET", "/api/onprem-servers/reachability"),
+  onpremServerMetrics: (name: string) => request<ServerMetrics>("GET", `/api/onprem-servers/${encodeURIComponent(name)}/metrics`),
   onpremRemove: (key: string, deleteData: boolean) =>
     request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/remove`, { delete_data: deleteData }),
   onpremReplicaAdd: (key: string, server: string) =>
