@@ -19,6 +19,8 @@ import type {
   OnPremConsoleResult,
   OnPremDeployed, OnPremServer,
   OnPremFirewall,
+  OnPremUsage,
+  ResourceBinding,
   OnPremServerTest,
   OnPremTerminal,
   FileContent,
@@ -282,6 +284,8 @@ export const api = {
   onpremTerminalStart: (body: { server?: string; key?: string; shell?: boolean }) => request<OnPremTerminal>("POST", "/api/onprem-terminals", body),
   onpremTerminalStop: (name: string) => request<{ stopped: string }>("POST", `/api/onprem-terminals/${encodeURIComponent(name)}/stop`, {}),
   firewall: () => request<OnPremFirewall>("GET", "/api/onprem-firewall"),
+  onpremServerUsage: () => request<OnPremUsage>("GET", "/api/onprem-usage"),
+  resourceBindings: () => request<{ resources: Record<string, ResourceBinding> }>("GET", "/api/resource-bindings"),
   clusters: () => request<OnPremClustersState>("GET", "/api/onprem-clusters"),
   clusterCreate: (body: { name: string; orchestrator: string; master: string; advertise?: string; master_serves?: boolean }) =>
     request<{ job_id: string }>("POST", "/api/onprem-clusters", body),

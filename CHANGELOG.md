@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-10-30
+
+### Added
+- On-prem **server usage**: the *Servers* list has a **Used in** column. For each saved server it lists every place
+  that names it, with the functions behind each: the deploy target in `pskit.yml`, the stage last deployed there, a
+  function group (`placement`), a cluster (master / joined server) and the cluster's load balancer, a named load
+  balancer, a service or a replicated database member (primary, read replica, its load balancer), and installed
+  software. Servers nothing names say *not used anywhere*. **Forget** shows the list before asking (and says when a
+  cluster still holds the server). CLI: `pskit resources onprem servers usage [NAME] [--json]`.
+- A **Network map** page in the studio sidebar: an SVG diagram of every server and the connections it accepts
+  (inbound) and opens (outbound), with the port, why it is needed and whether it is required, needed for a feature
+  or optional. Click a server for its inbound / outbound table and where it is used; filter by level and hide
+  unused servers. Built from the same rules as `pskit firewall`, from local files only (no SSH).
+- `GET /api/onprem-usage` and `GET /api/resource-bindings` in the studio API; new module `core/onprem_usage.py`.
+
+### Fixed
+- *Resources → Bound to* always said "all functions" for a resource without a `functions:` list. It now shows the
+  functions that really use it: a trigger on it (⚡) or handler code that calls `resource("key")` / reads
+  `PSKIT_RESOURCE_<KEY>_*`, plus how many functions get its variables. With `functions:` the listed ones show, the
+  ones that use it highlighted.
+
 ## [2.9.0] - 2026-10-30
 
 ### Added

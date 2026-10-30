@@ -707,3 +707,21 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .service-monitor, .alerts-panel, .replicas-panel { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
 .alert-history { margin: 0; padding-left: 18px; }
 .settings-drawer .section, .settings-drawer section { margin-top: 0; }
+
+/* Network map (views/Network.tsx) and where a server is used (components/ServerUsage.tsx) */
+.net-toolbar { margin-bottom: 12px; gap: 12px; }
+.net-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; align-items: start; }
+@media (max-width: 1300px) { .net-layout { grid-template-columns: 1fr; } }
+.net-canvas { padding: 8px; overflow: auto; }
+.net-canvas svg { display: block; min-width: 640px; }
+.net-node { cursor: pointer; }
+.net-node:hover rect:first-child { stroke-width: 2.4; }
+.net-side { max-height: 80vh; overflow: auto; }
+.net-side h4 { margin: 14px 0 6px; }
+.net-list { list-style: none; margin: 0; padding: 0; }
+.net-list li { margin: 2px 0; }
+.net-pick { width: 100%; justify-content: flex-start; text-align: left; gap: 6px; }
+.net-key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: middle; }
+.usage-table td { vertical-align: top; }
+.net-conn { list-style: none; margin: 0; padding: 0; }
+.net-conn li { padding: 6px 0; border-bottom: 1px solid var(--line); }

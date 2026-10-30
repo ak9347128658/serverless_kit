@@ -972,3 +972,57 @@ export interface FirewallServer {
 export interface OnPremFirewall {
   servers: FirewallServer[];
 }
+
+/** One place that names a saved server (`core/onprem_usage.py`). */
+export type ServerUseKind = "deploy" | "deployed" | "placement" | "cluster" | "cluster-balancer" | "balancer" | "service" | "runtime";
+
+export interface ServerUse {
+  kind: ServerUseKind;
+  /** The cluster, load balancer, service key, function group or stage. */
+  name: string;
+  /** What the server is there: master, joined server, primary, read replica, load balancer, deploy target, ... */
+  role: string;
+  detail: string;
+  /** Functions that run there or use what runs there. */
+  functions: string[];
+  /** Studio page that manages it. */
+  view: string;
+}
+
+export interface NetworkNode {
+  id: string;
+  /** `server` (saved), `host` (an address pskit knows but not a saved server), or the sources `users`, `internet`, `admin`. */
+  kind: "server" | "host" | "users" | "internet" | "admin";
+  address: string;
+  saved: boolean;
+  roles: string[];
+  uses: number;
+}
+
+/** One connection that has to be allowed: `from` opens it, `to` accepts it on `port`. */
+export interface NetworkEdge {
+  from: string;
+  to: string;
+  port: string;
+  proto: "tcp" | "udp";
+  why: string;
+  level: FirewallLevel;
+}
+
+/** `GET /api/onprem-usage` */
+export interface OnPremUsage {
+  servers: Record<string, ServerUse[]>;
+  /** `error`: the connections could not be worked out (a damaged .pskit file); the servers still show. */
+  map: { nodes: NetworkNode[]; edges: NetworkEdge[]; error?: string };
+}
+
+/** `GET /api/resource-bindings`: which functions get a resource and which really use it. */
+export interface ResourceBinding {
+  /** `functions:` is set in pskit.yml. */
+  restricted: boolean;
+  bound: string[];
+  triggers: string[];
+  /** Handler files that call `resource("key")` or read `PSKIT_RESOURCE_<KEY>_*`. */
+  code: string[];
+  used_by: string[];
+}

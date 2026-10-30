@@ -398,6 +398,15 @@ def make_handler(app: Studio) -> type:
                 from ..core import onprem_network as network
 
                 return 200, {"servers": network.by_server(network.project(app.root))}
+            if parts == ["onprem-usage"] and method == "GET":
+                from ..core import onprem_usage as usage
+
+                raw = app.raw_config()
+                return 200, {"servers": usage.server_usage(app.root, raw), "map": usage.network_map(app.root, raw)}
+            if parts == ["resource-bindings"] and method == "GET":
+                from ..core import onprem_usage as usage
+
+                return 200, {"resources": usage.resource_bindings(app.root, app.raw_config())}
             if parts == ["fs"] and method == "GET":
                 return 200, system.browse(_param(params, "path"))
             if parts == ["setup"] and method == "GET":

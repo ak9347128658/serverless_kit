@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Chip } from "../../components/Badge";
 import { DataTable, type Column } from "../../components/DataTable";
 import { Drawer } from "../../components/Drawer";
 import { CloudResources } from "../components/CloudResources";
@@ -14,7 +13,7 @@ import { DiscoverModal, InlineIssues, PageHeader } from "../components/Misc";
 import { href, navigate } from "../route";
 import { api, errorMessage } from "../api";
 import { useStudio } from "../store";
-import type { Driver, Json, JsonObject, OnPremService, OnPremServicesState } from "../types";
+import type { Driver, Json, JsonObject, OnPremService, OnPremServicesState, ResourceBinding } from "../types";
 import { asArray, asObject, CLASS_RE, getIn, NAME_RE, setIn, str, uniqueName, type Path } from "../util";
 
 interface Row {
@@ -77,6 +76,16 @@ export function ResourcesView({ rest }: { rest: string[] }) {
     setTesting(key);
     window.setTimeout(() => document.getElementById("resource-test")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   };
+
+  // Which handler files call resource("key") (read from the saved code; triggers come from the draft below).
+  const [codeUse, setCodeUse] = useState<Record<string, ResourceBinding>>({});
+  useEffect(() => {
+    api.resourceBindings().then(
+      (r) => setCodeUse(r.resources),
+      () => setCodeUse({}),
+    );
+  }, [state.mtime]);
+  const functionNames = Object.keys(asObject(draft.functions)).sort();
 
   const usedBy = (name: string) =>
     Object.entries(asObject(draft.functions))
@@ -176,8 +185,42 @@ export function ResourcesView({ rest }: { rest: string[] }) {
       key: "fns",
       header: "Bound to",
       render: (r) => {
-        const fns = asArray(r.res.functions).map((f) => str(f));
-        return fns.length ? <span className="chips">{fns.map((f) => <Chip key={f}>{f}</Chip>)}</span> : <span className="muted">all functions</span>;
+        // `functions:` limits who gets the variables; without it every function could, so show who really uses it:
+        // a trigger on it, or code that calls resource("key") / reads PSKIT_RESOURCE_<KEY>_*.
+        const restricted = Array.isArray(r.res.functions);
+        const listed = asArray(r.res.functions).map((f) => str(f));
+        const triggers = usedBy(r.name);
+        const code = (codeUse[r.name]?.code || []).filter((f) => functionNames.includes(f));
+        const used = Array.from(new Set([...triggers, ...code])).sort();
+        const shown = restricted ? Array.from(new Set([...listed, ...used])).sort() : used;
+        const kind = (f: string) =>
+          [triggers.includes(f) && "trigger", code.includes(f) && "code", restricted && !listed.includes(f) && "not in functions:"].filter(Boolean).join(" + ");
+        return (
+          <div>
+            {shown.length > 0 ? (
+              <span className="chips">
+                {shown.map((f) => (
+                  <a
+                    key={f}
+                    href={href("functions", f)}
+                    className={used.includes(f) ? "chip chip-accent" : "chip"}
+                    title={kind(f) ? `${f}: ${kind(f)}` : `${f}: listed in functions:, not used in its trigger or handler code`}
+                  >
+                    {triggers.includes(f) ? "⚡ " : ""}
+                    {f}
+                  </a>
+                ))}
+              </span>
+            ) : (
+              <span className="muted small">{restricted ? "no functions" : "not used by any function yet"}</span>
+            )}
+            <div className="muted small">
+              {restricted
+                ? `functions: ${listed.length} of ${functionNames.length}`
+                : `variables available to all ${functionNames.length} function${functionNames.length === 1 ? "" : "s"}`}
+            </div>
+          </div>
+        );
       },
     },
     {

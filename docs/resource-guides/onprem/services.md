@@ -336,12 +336,28 @@ pskit resources onprem servers list
 pskit resources onprem servers test edge1        # OS, CPU, memory, disk, Docker access, sudo, Python / Node / nginx
 pskit resources onprem servers check             # ✓ / ✗: which servers answer on their SSH port (no login)
 pskit resources onprem servers top edge1 --watch 5   # live CPU, memory and disk use
+pskit resources onprem servers usage edge1       # where it is used: deploy, function groups, clusters, LBs, services
 pskit resources onprem create cache --service redis --server edge1 --save
 pskit resources onprem servers remove lab        # services there keep running
 ```
 
 They live in `.pskit/onprem-servers.json` (connection details only; a typed password goes to `.pskit/ssh/`,
 owner-only). Services created on a server keep a copy of its connection, so editing the server later does not move them.
+
+### Where a server is used, and how the servers connect
+
+The **Used in** column of *Servers* says, for each server, every place that names it, with the functions behind
+each: the deploy target in `pskit.yml`, the stage last deployed there, a function group
+(`provider.options.placement`), a cluster (master or joined server) and its load balancer, a named load balancer, a
+service or a member of a replicated database (primary, read replica, its load balancer), and software pskit
+installed. A server nothing names says *not used anywhere*; **Forget** shows the same list before it asks. CLI:
+`pskit resources onprem servers usage [NAME] [--json]`.
+
+The **Network map** page draws every server and the connections it has to accept (inbound) and open (outbound):
+this machine (SSH, logs, tests), the function callers, the cluster ports, load balancer → servers, replicas → primary,
+functions → services, downloads from the internet. Solid lines are required, dashed ones are needed for a feature,
+dotted ones are optional (pskit falls back to an SSH tunnel). Click a server for its inbound and outbound ports, why
+each is needed, and where it is used. It reads the same rules as `pskit firewall`, from local files only.
 
 ### Deploy the functions to a chosen machine
 

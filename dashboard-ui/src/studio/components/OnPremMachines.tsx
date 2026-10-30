@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Drawer } from "../../components/Drawer";
 import { api, errorMessage } from "../api";
-import type { JsonObject, OnPremConsoleInfo, OnPremConsoleResult, OnPremServer, OnPremServerTest, OnPremTerminal } from "../types";
+import type { JsonObject, OnPremConsoleInfo, OnPremConsoleResult, OnPremServer, OnPremServerTest, OnPremTerminal, ServerUse } from "../types";
 import { useConfirm, useToast } from "./Feedback";
 import { FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
 import { ServerLive } from "./Monitoring";
+import { ServerUsageDrawer, UsageList, UsageSummary } from "./ServerUsage";
 
 const SERVER_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,62}$/;
 
@@ -18,6 +19,15 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
   const [terminal, setTerminal] = useState<{ server?: string; key?: string; shell?: boolean } | null>(null);
   const [reach, setReach] = useState<Record<string, { ok: boolean; ms?: number; error?: string }> | null>(null);
   const [live, setLive] = useState<Record<string, boolean>>({});
+  // Where each server is used (pskit.yml and .pskit only, no SSH): the "Used in" column and the Forget warning.
+  const [usage, setUsage] = useState<Record<string, ServerUse[]> | null>(null);
+  const [usageOf, setUsageOf] = useState<string | null>(null);
+  const loadUsage = useCallback(() => {
+    api.onpremServerUsage().then(
+      (u) => setUsage(u.servers),
+      () => setUsage({}),
+    );
+  }, []);
   const confirm = useConfirm();
   const toast = useToast();
   // Check marks: every server's SSH port, probed in parallel (no login) when the list loads.
@@ -39,7 +49,8 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
         setError(null);
       })
       .catch((exc: unknown) => setError(errorMessage(exc)));
-  }, [onChanged]);
+    loadUsage();
+  }, [onChanged, loadUsage]);
   useEffect(load, [load]);
 
   const test = async (name: string) => {
@@ -53,7 +64,32 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
   };
 
   const remove = async (name: string) => {
-    const ok = await confirm({ title: `Forget server ${name}?`, body: "Services already created there keep running; pskit only forgets the connection.", confirmLabel: "Forget", danger: true });
+    const uses = await api.onpremServerUsage().then(
+      (u) => u.servers[name] || [],
+      () => null,
+    );
+    const inCluster = (uses || []).filter((u) => u.kind === "cluster");
+    const body = (
+      <div>
+        <p>Services already created there keep running; pskit only forgets the connection.</p>
+        {uses === null ? (
+          <p className="muted small">Could not read where it is used.</p>
+        ) : uses.length ? (
+          <>
+            <p>
+              <b>
+                {name} is still used in {uses.length} place{uses.length === 1 ? "" : "s"}
+              </b>
+              {inCluster.length ? ` — take it out of cluster ${inCluster.map((u) => u.name).join(", ")} first (forgetting is refused).` : " — point them at another server afterwards:"}
+            </p>
+            <UsageList uses={uses} compact />
+          </>
+        ) : (
+          <p className="muted">Not used anywhere in this project: safe to forget.</p>
+        )}
+      </div>
+    );
+    const ok = await confirm({ title: `Forget server ${name}?`, body, confirmLabel: "Forget", danger: true });
     if (ok !== "confirm") return;
     try {
       const result = await api.onpremServerRemove(name);
@@ -93,6 +129,7 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
               <th>Name</th>
               <th>Connection</th>
               <th>Login</th>
+              <th>Used in</th>
               <th />
             </tr>
           </thead>
@@ -127,6 +164,9 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
                   <td className="small">
                     {s.password_file ? "password" : s.identity_file ? `key ${s.identity_file.split(/[\\/]/).pop()}` : "agent / default key"}
                     {s.sudo ? " · sudo" : ""}
+                  </td>
+                  <td>
+                    <UsageSummary uses={usage ? usage[s.name] || [] : undefined} onOpen={() => setUsageOf(s.name)} />
                   </td>
                   <td>
                     <span className="row-gap wrap">
@@ -197,6 +237,7 @@ export function ServersPanel({ onInstall, onChanged }: { onInstall: (server: str
         />
       )}
       {terminal && <TerminalDrawer request={terminal} onClose={() => setTerminal(null)} />}
+      {usageOf && <ServerUsageDrawer name={usageOf} uses={usage?.[usageOf] || []} onClose={() => setUsageOf(null)} />}
     </div>
   );
 }

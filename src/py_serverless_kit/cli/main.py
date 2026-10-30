@@ -1403,6 +1403,35 @@ def resources_onprem_servers_top(name: str, every: int, config_path: Optional[st
         time.sleep(max(1, every - 1))
 
 
+@resources_onprem_servers.command("usage", short_help="Where each saved server is used (functions, clusters, ...).")
+@click.argument("name", required=False)
+@click.option("--json", "as_json", is_flag=True)
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_servers_usage(name: Optional[str], as_json: bool, config_path: Optional[str]) -> None:
+    """Where saved server NAME (or every server) is used: deploy target, function groups, clusters, load
+    balancers, services and installed software, with the functions behind each. Reads local files only."""
+    from ..core.onprem_usage import describe, server_usage
+
+    root, _path, raw = _raw_project(config_path)
+    usage = server_usage(root, raw)
+    if name:
+        if name not in usage:
+            raise click.ClickException(f"no saved server {name!r} (servers: {', '.join(usage) or 'none'})")
+        usage = {name: usage[name]}
+    if as_json:
+        click.echo(json.dumps(usage, indent=2))
+        return
+    if not usage:
+        info("No saved servers. Add one: pskit resources onprem servers add NAME --ssh user@host [--pem FILE]")
+    for server, uses in usage.items():
+        if not uses:
+            echo(f"  {server}: not used anywhere")
+            continue
+        echo(f"  {server}:")
+        for use in uses:
+            echo(f"    - {describe(use)}")
+
+
 @resources_onprem_servers.command("test")
 @click.argument("name")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
