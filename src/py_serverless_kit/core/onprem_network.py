@@ -175,6 +175,10 @@ def balancer(name: str, server: Who, ports: Iterable[int], backends: Sequence[Di
 
 def resource(entry: Dict[str, Any], clients: Sequence[Who]) -> List[Rule]:
     """An on-prem service (Redis, Postgres, SMTP, ...): the function hosts reach its port."""
+    if isinstance(entry.get("topology"), dict) and entry["topology"].get("mode") == "replicated":
+        from .onprem_replication import rules as replication_rules
+
+        return replication_rules(entry, clients)
     target = entry.get("target") or {}
     if str(target.get("method") or "") == "local" or not entry.get("port"):
         return []

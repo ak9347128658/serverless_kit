@@ -748,6 +748,8 @@ def resources_onprem() -> None:
       pskit resources onprem servers add edge1 --ssh ubuntu@10.0.0.5 --pem key.pem
       pskit resources onprem create node --service nodejs --version 22 --server edge1
       pskit resources onprem create cache --service redis --cluster prod   # the server with the most free memory
+      pskit resources onprem create orders-db --service postgres --primary db1 --replica db2 --replica db3 \\
+          --balancer lb1 --sync sync                                 # primary + 2 read replicas behind pgpool-II
       pskit resources onprem console cache "INFO server"
       pskit resources onprem terminal --server edge1
       pskit resources onprem status jobs
@@ -844,6 +846,16 @@ def resources_onprem_catalog(as_json: bool) -> None:
 @click.option("--gui-login", type=click.Choice(["password", "none"]), default=None,
               help="Web UI sign-in: password (default) or none (keep it on 127.0.0.1, a private network or a tunnel).")
 @click.option("--gui-password-env", default=None, help="Your own web UI password, from this environment variable.")
+@click.option("--replica", "replicas", multiple=True,
+              help="Database: a saved server for a read replica (repeatable). Makes it replicated: the primary is "
+                   "--primary. 'local' runs every member on this machine.")
+@click.option("--primary", "primary", default=None, help="With --replica: the saved server that takes the writes.")
+@click.option("--balancer", "balancer", default=None,
+              help="With --replica: the saved server for the load balancer (pgpool-II / ProxySQL) that gives the "
+                   "functions one address. Not for MongoDB (the driver routes).")
+@click.option("--balancer-port", type=int, default=None, help="With --balancer: its port (6432 / 6033).")
+@click.option("--sync", "sync", type=click.Choice(["async", "sync"]), default=None,
+              help="With --replica: async (default, fastest) or sync (a commit waits for a replica).")
 @click.option("--save", is_flag=True, help="Write the resource (and triggers) into pskit.yml.")
 @click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
 @click.option("--json", "as_json", is_flag=True, help="Print the created entry as JSON.")
@@ -875,11 +887,19 @@ def resources_onprem_create(  # noqa: PLR0913
     domains: Optional[str],
     functions_url: Optional[str],
     max_size_mb: Optional[float],
+    replicas: tuple,
+    primary: Optional[str],
+    balancer: Optional[str],
+    balancer_port: Optional[int],
+    sync: Optional[str],
     save: bool,
     config_path: Optional[str],
     as_json: bool,
 ) -> None:
-    """Create KEY: a Docker container on this machine or an SSH server, ready for the on-prem host."""
+    """Create KEY: a Docker container on this machine or an SSH server, ready for the on-prem host.
+
+    A database with --replica is replicated: --primary takes the writes, each --replica serves reads, and
+    --balancer gives the functions one address that splits them."""
     from ..core import onprem_services as svc
 
     root, path, raw = _raw_project(config_path)
@@ -909,6 +929,18 @@ def resources_onprem_create(  # noqa: PLR0913
     if password_env:
         password = _env_value(password_env)
     gui_password = _env_value(gui_password_env) if gui_password_env else None
+    topology: Optional[dict] = None
+    if replicas:
+        if local or cluster or ssh:
+            raise click.ClickException("a replicated database runs on --primary / --replica servers, not --local, "
+                                       "--cluster or --ssh")
+        topology = {"mode": "replicated", "sync": sync or "async", "primary": primary or server or "",
+                    "replicas": list(replicas), "balancer": balancer or ""}
+        if balancer_port:
+            topology["balancer_port"] = balancer_port
+        target = None
+    elif primary or balancer or balancer_port or sync:
+        raise click.ClickException("--primary, --balancer and --sync go with --replica SERVER")
     body = {
         "key": key,
         "service": service,
@@ -928,6 +960,7 @@ def resources_onprem_create(  # noqa: PLR0913
         "domains": domains,
         "functions_url": functions_url,
         "max_size_mb": max_size_mb,
+        "topology": topology,
     }
     entry = _service_call(svc.create, root, {k: v for k, v in body.items() if v is not None}, raw, echo)
     if as_json:
@@ -949,6 +982,59 @@ def resources_onprem_create(  # noqa: PLR0913
         info(f'Read secrets in a handler: get_secret("name"{store}); add some with put_secret or the console')
     else:
         info(f'Read it in a handler: resource("{key}"); the password is in ctx.env[res["password_env"]]')
+
+
+@resources_onprem.group("replicas", short_help="Read replicas of a replicated database: list, add, remove.")
+def resources_onprem_replicas() -> None:
+    """Read replicas of a database created with --replica. The load balancer and the env file follow."""
+
+
+@resources_onprem_replicas.command("list", short_help="Members, their state and replication lag.")
+@click.argument("key")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_replicas_list(key: str, config_path: Optional[str]) -> None:
+    from ..core.onprem_services import status
+
+    root, _path, _raw = _raw_project(config_path)
+    topo = _service_call(status, root, key).get("topology")
+    if not topo:
+        raise click.ClickException(f"{key!r} runs on a single server; it has no replicas")
+    lb = topo.get("balancer")
+    echo(f"{key}: {topo['sync']} replication" + (f", load balancer {lb['kind']}" if lb else ""))
+    for m in [*(topo.get("members") or []), *([lb] if lb else [])]:
+        where = m["server"] or "this machine"
+        echo(f"  {m['name']:<8}{m['role']:<10}{where:<22}{m['address'] + ':' + str(m['port']):<22}{m.get('state', '')}")
+        for line in str(m.get("replication") or "").splitlines():
+            echo(f"            {line.strip()}")
+    if topo.get("report"):
+        echo("")
+        echo(topo["report"])
+
+
+@resources_onprem_replicas.command("add", short_help="Start one more read replica on a saved server.")
+@click.argument("key")
+@click.argument("server", required=False)
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_replicas_add(key: str, server: Optional[str], config_path: Optional[str]) -> None:
+    """Add a replica of KEY on SERVER (a saved server; omit it when every member runs on this machine)."""
+    from ..core.onprem_replication import add_replica
+
+    root, _path, _raw = _raw_project(config_path)
+    entry = _service_call(add_replica, root, key, server or "", echo)
+    ok(f"{key} now has {len(entry['topology']['members']) - 1} replica(s)")
+
+
+@resources_onprem_replicas.command("remove", short_help="Stop one read replica (by name r2, or its server).")
+@click.argument("key")
+@click.argument("name")
+@click.option("--delete-data", is_flag=True, help="Also delete the replica's data volume.")
+@click.option("-c", "--config", "config_path", default=None, help="Config file (default: pskit.yml).")
+def resources_onprem_replicas_remove(key: str, name: str, delete_data: bool, config_path: Optional[str]) -> None:
+    from ..core.onprem_replication import remove_replica
+
+    root, _path, _raw = _raw_project(config_path)
+    entry = _service_call(remove_replica, root, key, name, echo, delete_data=delete_data)
+    ok(f"{key} now has {len(entry['topology']['members']) - 1} replica(s)")
 
 
 @resources_onprem.command("list", short_help="Services created from this project.")

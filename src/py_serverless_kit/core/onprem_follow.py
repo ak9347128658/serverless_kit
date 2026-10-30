@@ -139,6 +139,8 @@ def follow(root: Path, raw: Dict[str, Any], keys: List[str], emit: Emit) -> List
             continue
         if entry.get("service") == "smtp":
             continue  # it sends to the functions: onprem_smtp.retarget after the deploy
+        if isinstance(entry.get("topology"), dict):
+            continue  # a replicated database: its members are reached at their servers' own addresses
         if target.get("method", "local") == "local":
             if where.get("method") != "local":
                 emit(f"  WARNING: {label} runs on this machine (127.0.0.1), which the functions on {here} cannot "

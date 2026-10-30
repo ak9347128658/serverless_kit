@@ -248,6 +248,80 @@ Then open the printed links, for example:
 Local services listen on `127.0.0.1`, so only your machine can open them. `docker ps` lists them (named
 `pskit-<project>-<key>` and `...-ui`). Clean up with *Remove* (or `pskit resources onprem remove <key> --delete-data`).
 
+## Databases: one server, or a primary with read replicas
+
+A database (PostgreSQL, MySQL, MariaDB, MongoDB) is created in one of two shapes. The create form asks under
+**Scaling**:
+
+- **Single server**: one container on this machine or a server. To scale it up, give that server more CPU and
+  memory (vertical scaling). Nothing else changes.
+- **Primary + read replicas** (horizontal scaling): the **primary** takes every write, each **read replica** on
+  another server keeps a copy and answers reads, and an optional **load balancer** gives the functions one address
+  that sends writes to the primary and reads to the replicas. Add replicas later as reads grow.
+
+You only pick the servers: which one writes (the primary), which ones read (the replicas) and which one runs the load
+balancer. Save them first (**Servers**, below). pskit installs Docker where it is missing and sets up replication for
+each engine:
+
+| Engine | Replication | *Synchronous* means | Load balancer (one address) |
+|---|---|---|---|
+| PostgreSQL | streaming replication (WAL), each replica starts from `pg_basebackup` | `synchronous_standby_names = 'ANY 1 (*)'`: a commit waits until one replica has it on disk | pgpool-II, port 6432 |
+| MySQL | GTID replication; a replica copies the databases, then follows | semi-synchronous: a commit waits for one replica (async again after 10 s without one) | ProxySQL, port 6033 |
+| MariaDB | GTID replication, as MySQL | built-in semi-synchronous, as MySQL | ProxySQL, port 6033 |
+| MongoDB | replica set (`rs_<key>`), members share a generated key file | write concern `w: majority` | none: the driver routes from one replica set URL |
+
+**Asynchronous** (default) is the fastest: the primary commits at once and replicas follow a few milliseconds behind,
+so a crash of the primary can lose the last writes. **Synchronous** loses no committed write, at the cost of a
+round trip to a replica per commit. PostgreSQL waits while no replica is connected, so keep at least two replicas
+with *sync*.
+
+The load balancer sends writes, transactions and `SELECT ... FOR UPDATE` to the primary and plain reads to the
+replicas, and falls back to the primary only when no replica is up. Without a load balancer, the functions'
+`URL` is the primary and the replicas are listed in `READ_URLS`.
+
+The form draws the result as you pick (functions → load balancer → primary → replicas, solid lines for sync,
+moving dashes for async). **Details** shows the same picture with each member's state, every replica's lag, what the
+primary reports (`pg_stat_replication`, `SHOW REPLICAS`, `rs.status()`), and **+ Add read replica** / **Remove**.
+
+```bash
+# primary db1, replicas db2 + db3, pgpool-II on lb1, synchronous
+pskit resources onprem create orders-db --service postgres --primary db1 --replica db2 --replica db3 \
+    --balancer lb1 --sync sync --save
+pskit resources onprem create users-db --service mongodb --primary db1 --replica db2 --replica db3   # replica set
+pskit resources onprem create try-db --service mysql --primary local --replica local --replica local \
+    --balancer local                     # everything on this machine (ports 3306, 3307, 3308; ProxySQL 6033)
+
+pskit resources onprem replicas list orders-db     # members, state, lag
+pskit resources onprem replicas add orders-db db4  # copies the data, follows the primary, joins the load balancer
+pskit resources onprem replicas remove orders-db r1 --delete-data
+```
+
+Handlers do not change. In `.env.onprem`:
+
+| Variable | Points at |
+|---|---|
+| `PSKIT_<KEY>_URL` | the load balancer, else the primary (MongoDB: the replica set URL with `readPreference=secondaryPreferred`) |
+| `PSKIT_<KEY>_WRITE_URL` | the primary, directly |
+| `PSKIT_<KEY>_READ_URLS` | the replicas, comma separated |
+
+Good to know:
+
+- One member per server: a replica on the primary's server protects nothing. The load balancer may share a server
+  with a member (its port differs).
+- Replication uses its own user (`pskit_repl`) and generated password. The password and MongoDB's key file stay in
+  `.pskit/onprem-services.json` and are never shown in the studio or the job log.
+- The job prints the firewall rules: replicas → primary on the database port, the load balancer → every member,
+  your function servers → the load balancer (or every member without one). See
+  [network rules](../../onprem-network.md).
+- *This machine (try it)* runs every member here on its own port, on a private Docker network. Use it to see
+  replication work. MongoDB needs servers, because its members must be reached at the same address by the functions
+  and by each other.
+- pgpool-II knows the database user pskit created. Users you add later connect to the members directly, or are added
+  to pgpool (`PGPOOL_POSTGRES_CUSTOM_USERS`).
+- If the primary fails: MongoDB elects a new primary on its own. For PostgreSQL and MySQL / MariaDB, the replicas keep
+  serving reads. Promoting one is a manual step today (`pg_ctl promote` / `STOP REPLICA; SET GLOBAL read_only=OFF`).
+- Console, Terminal, Backup and the web UI work on the primary.
+
 ## Servers: several machines
 
 Save each machine once under **On-prem services → Servers → + Add server** (name, host, user, port, *Log in with*,

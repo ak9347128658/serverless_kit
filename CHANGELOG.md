@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-10-30
+
+### Added
+- On premises, a database is created on a **single server** or as a **primary with read replicas** (horizontal
+  scaling): pick the server that takes the writes, the servers that serve reads, *asynchronous* or *synchronous*
+  replication, and optionally a server for a load balancer that gives the functions one address. PostgreSQL uses
+  streaming replication behind pgpool-II, MySQL and MariaDB use GTID replication (semi-synchronous for *sync*) behind
+  ProxySQL, and MongoDB runs as a replica set (write concern `majority` for *sync*) that the driver routes itself.
+  The studio's create form draws the topology (an SVG) as you pick, and **Details** shows each member's state and
+  lag with **+ Add read replica** / **Remove**. CLI: `pskit resources onprem create KEY --service postgres
+  --primary db1 --replica db2 --replica db3 --balancer lb1 --sync sync` and `pskit resources onprem replicas
+  list | add | remove`. `.env.onprem` gets `PSKIT_<KEY>_WRITE_URL` and `PSKIT_<KEY>_READ_URLS` next to `URL`, and the
+  job prints the firewall rules between the members. `--primary local --replica local` runs every member on this
+  machine to try it out.
+
+### Changed
+- The studio no longer offers *Scaling cluster* as a place for a database; *Scaling → Primary + read replicas*
+  replaces it (databases created on a cluster server before keep working).
+
 ## [2.6.1] - 2026-10-30
 
 ### Fixed

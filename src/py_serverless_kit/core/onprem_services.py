@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote, urlsplit
 
+from . import onprem_replication as replication
 from . import onprem_s3, onprem_secretsmanager, onprem_smtp
 from .onprem_apps import DEFAULT_USERS, NO_AUTH_APPS, SELF_LOGIN, apps
 from .onprem_browser import browsers_for
@@ -699,6 +700,7 @@ def catalog() -> List[Dict[str, Any]]:
                 "gui_logins": gui_login_choices(name),
                 "default_user": DEFAULT_USER.get(name, "pskit"),
                 "browsers": browsers_for(name),
+                "replication": replication.catalog_info(name),
                 "group": svc.get("group") or _group_of(svc),
                 "notes": svc["notes"],
             }
@@ -1152,6 +1154,9 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
     if service not in SERVICES and service not in RUNTIMES:
         raise ServiceError(f"service must be one of {', '.join([*SERVICES, *RUNTIMES])}")
     wanted = body.get("target") or default_target(raw)
+    replicated = replication.is_replicated(body)
+    if replicated:
+        wanted = {"method": "local"}  # placeholder: the topology's members say where it runs
     cluster_address = ""
     if isinstance(wanted, dict) and wanted.get("cluster"):
         target, cluster_address = cluster_target(root, wanted, run=run, measure=place)
@@ -1233,7 +1238,7 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
     if service == "smtp":
         extra["smtp"] = onprem_smtp.check(body, raw, root, target)
         extra["token"] = onprem_smtp.admin_token(raw, root, env_file_of(raw))
-    return {
+    out = {
         **extra,
         "user": user or DEFAULT_USER.get(service, "pskit"),
         "password": password,
@@ -1253,6 +1258,8 @@ def check_request(body: Dict[str, Any], root: Path, raw: Optional[Dict[str, Any]
         "volume": data_mount(target, _container_name(project, key)) if spec["data"] else "",
         "data_dir": str(target.get("data_dir") or ""),
     }
+    # A replicated database: primary, replicas and load balancer on the servers the topology names.
+    return replication.check(body, out, root) if replicated else out
 
 
 def data_mount(target: Dict[str, Any], name: str) -> str:
@@ -1648,6 +1655,12 @@ def create(
 ) -> Dict[str, Any]:
     """Start the service (or install the runtime) and record it. Returns the state entry."""
     req = check_request(body, root, raw, run=run)
+    if req.get("topology"):
+        entry = replication.create(root, req, body, raw, emit, run=run, wait_seconds=wait_seconds)
+        if body.get("gui") and companion_for(req["service"]):
+            entry["gui"] = add_gui(root, req["key"], emit, run=run, login=str(body.get("gui_login") or "password"),
+                                   password=str(body.get("gui_password") or ""))
+        return entry
     sh = _Runner(emit, run)
     target = req["target"]
     if run is None:
@@ -2076,6 +2089,8 @@ def public_entry(entry: Dict[str, Any], reveal: bool = False) -> Dict[str, Any]:
     out = copy.deepcopy(entry)
     if not reveal and isinstance(out.get("env"), dict):
         out["env"] = {k: ("***" if any(s in k for s in ("PASSWORD", "SECRET", "URL")) else v) for k, v in out["env"].items()}
+    if isinstance(out.get("topology"), dict):
+        out["topology"] = replication.public(out["topology"])  # replication passwords and key file never leave
     out["target_label"] = describe_target(out.get("target") or {})
     return out
 
@@ -2114,6 +2129,8 @@ def status(root: Path, key: str, *, run: Optional[RunFn] = None, reveal: bool = 
         out["ready"] = code == 0
     elif parts[0] == "running":
         out["ready"] = _tcp_open(str(entry.get("address")), int(entry.get("port") or 0))
+    if replication.is_replicated(entry):
+        out["topology"].update(replication.status(entry, run=run))
     return out
 
 
@@ -2167,6 +2184,8 @@ def remove(
         gui = entry.get("gui")
         if isinstance(gui, dict):
             sh(docker_argv(entry["target"], ["rm", "-f", gui["container"]]), check=False)
+        # The load balancer and the replicas first: they hold the members' private network.
+        replication.remove_members(entry, emit, delete_data=delete_data, run=run)
         sh(docker_argv(entry["target"], ["rm", "-f", entry["container"]]), check=False)
         for side in entry.get("sidecars") or []:
             sh(docker_argv(entry["target"], ["rm", "-f", side]), check=False)

@@ -346,6 +346,48 @@ export interface OnPremCatalogItem {
   versions?: string[];
   /** pskit's own UIs for the service: s3, gcs, vault, aws-secrets. */
   browsers?: string[];
+  /** Set for databases that can run as a primary with read replicas (null: single server only). */
+  replication?: OnPremReplicationInfo | null;
+}
+
+export interface OnPremReplicationInfo {
+  /** "Streaming replication (WAL)", "GTID replication (binary log)", "Replica set". */
+  method: string;
+  /** pgpool-II, ProxySQL, or "" when the driver routes (MongoDB). */
+  balancer: string;
+  balancer_port: number;
+  /** What async and sync mean for this engine. */
+  async: string;
+  sync: string;
+  /** How reads and writes are routed. */
+  routing: string;
+  /** Every member can run on this machine to try it out. */
+  local: boolean;
+}
+
+export interface OnPremReplicaMember {
+  name: string;
+  role: "primary" | "replica" | "balancer";
+  /** Saved server name; "" on this machine. */
+  server: string;
+  address: string;
+  port: number;
+  container: string;
+  // status only
+  state?: string;
+  replication?: string;
+}
+
+export interface OnPremTopology {
+  mode: "replicated";
+  engine: string;
+  sync: "async" | "sync";
+  local: boolean;
+  replica_set?: string;
+  members: OnPremReplicaMember[];
+  balancer: (OnPremReplicaMember & { kind: string }) | null;
+  // status only: what the primary reports about its replicas
+  report?: string;
 }
 
 export interface OnPremConsoleInfo {
@@ -503,6 +545,8 @@ export interface OnPremService {
   gui?: { label: string; url: string; port: number; login: string; kind: string; container?: string }[] | Record<string, unknown>;
   companion?: string | null;
   gui_logins?: string[];
+  /** A replicated database: primary, read replicas and load balancer. */
+  topology?: OnPremTopology;
 }
 
 export interface OnPremServicesState {

@@ -238,6 +238,10 @@ export const api = {
   onpremBackup: (key: string) => request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/backup`, {}),
   onpremRemove: (key: string, deleteData: boolean) =>
     request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/remove`, { delete_data: deleteData }),
+  onpremReplicaAdd: (key: string, server: string) =>
+    request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/replicas`, { server }),
+  onpremReplicaRemove: (key: string, name: string, deleteData: boolean) =>
+    request<{ job_id: string }>("POST", `/api/onprem-services/${encodeURIComponent(key)}/replicas-remove`, { name, delete_data: deleteData }),
   onpremConsoleInfo: (key: string) => request<OnPremConsoleInfo>("GET", `/api/onprem-services/${encodeURIComponent(key)}/console`),
   onpremConsole: (key: string, line: string, shell = false) =>
     request<OnPremConsoleResult>("POST", `/api/onprem-services/${encodeURIComponent(key)}/console`, { line, shell }),

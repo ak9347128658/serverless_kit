@@ -165,6 +165,18 @@ With placement, they use the group-to-group rules of §4.
 | Mailpit | 1025 | 8025 |
 | Others (Grafana 3000, Prometheus 9090, Keycloak 8080, ...) | see `pskit resources onprem services` | |
 
+**Replicated database** (`--primary db1 --replica db2 --replica db3 [--balancer lb1]`, studio *Scaling → Primary +
+read replicas*):
+
+| | From | To | Port | Why |
+|---|---|---|---|---|
+| 🟥 | every replica | primary | the database port (5432 / 3306 / 27017) | replicas copy the primary's changes |
+| 🟥 | every MongoDB member | every other member | 27017 | replica set heartbeats and elections |
+| 🟥 | load balancer server | every member | the database port | pgpool-II / ProxySQL forward queries |
+| 🟥 | every function host | load balancer | 6432 (pgpool-II) / 6033 (ProxySQL) | the functions' single address |
+| 🟥 | every function host | every member (no load balancer, or MongoDB) | the database port | `WRITE_URL`, `READ_URLS`, the replica set URL |
+| 🟥 | Admin machine | every member and the load balancer | TCP *22* | create, add / remove replicas, status |
+
 **SMTP server** (`smtp` resource, receives mail and runs `smtp` triggers):
 
 | | From | To | Port | Why |

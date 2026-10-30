@@ -561,6 +561,24 @@ def make_handler(app: Studio) -> type:
                             return 200, con.run_line(root, rest[0], str(body.get("line") or ""), shell=bool(body.get("shell")))
                         except con.ConsoleError as exc:
                             raise StudioError(400, str(exc)) from None
+                if len(rest) == 2 and rest[1] in ("replicas", "replicas-remove") and method == "POST":
+                    from ..core import onprem_replication as rep
+
+                    key, action = rest
+                    body = _obj(self._body())
+                    if not rep.is_replicated(svc._entry(root, key)):
+                        raise StudioError(400, f"{key!r} runs on a single server; it has no replicas")
+
+                    def run_replica(job: Any) -> int:
+                        if action == "replicas":
+                            rep.add_replica(root, key, str(body.get("server") or ""), job.emit)
+                        else:
+                            rep.remove_replica(root, key, str(body.get("name") or ""), job.emit,
+                                               delete_data=bool(body.get("delete_data")))
+                        return 0
+
+                    what = f"Add a replica to {key}" if action == "replicas" else f"Remove replica {body.get('name')} of {key}"
+                    return 202, {"job_id": app.jobs.run_callable("onprem-service", run_replica, label=what).id}
                 if len(rest) == 2 and rest[1] in ("backup", "remove") and method == "POST":
                     key, action = rest
                     body = _obj(self._body())

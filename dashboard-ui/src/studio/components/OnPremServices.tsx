@@ -11,6 +11,7 @@ import { useConfirm, useToast } from "./Feedback";
 import { EnumSelect, FormRow, NumberInput, Segmented, TextInput, Toggle } from "./Forms";
 import { ServersPanel, ServiceConsole, TerminalDrawer } from "./OnPremMachines";
 import { ServiceBrowser } from "./ServiceBrowser";
+import { ReplicasPanel, ReplicationForm } from "./Replication";
 import type { GuideRef } from "./ResourceGuides";
 
 // Services by their catalog group (one group each), then software to install on a server.
@@ -160,7 +161,11 @@ export function OnPremServices({ onGuide }: { onGuide: (ref: GuideRef) => void }
                 </td>
                 <td>{state.catalog.find((c) => c.id === svc.service)?.label || svc.service}</td>
                 <td>{svc.role ? ROLE_LABEL[svc.role] || svc.role : "runtime"}</td>
-                <td className="small">{svc.target_label}</td>
+                <td className="small">
+                  {svc.topology
+                    ? `primary + ${svc.topology.members.length - 1} replica${svc.topology.members.length === 2 ? "" : "s"} (${svc.topology.sync}${svc.topology.local ? ", this machine" : ""})`
+                    : svc.target_label}
+                </td>
                 <td className="mono small">{svc.port ? `${svc.address}:${svc.port}` : "—"}</td>
                 <td>
                   <span className="row-gap">
@@ -319,6 +324,16 @@ export function CreateDrawer({
   const [domains, setDomains] = useState("");
   const [functionsUrl, setFunctionsUrl] = useState("");
   const [maxSize, setMaxSize] = useState<number | undefined>(undefined);
+  // Database scaling: one server, or a primary (writes) with read replicas and an optional load balancer.
+  const [scale, setScale] = useState<"single" | "replicated">("single");
+  const [repOn, setRepOn] = useState<"servers" | "local">("servers");
+  const [primaryServer, setPrimaryServer] = useState(server || state.default_target.server || "");
+  const [replicaServers, setReplicaServers] = useState<string[]>([]);
+  const [localReplicas, setLocalReplicas] = useState<number | undefined>(2);
+  const [sync, setSync] = useState<"async" | "sync">("async");
+  const [lbServer, setLbServer] = useState("");
+  const [lbLocal, setLbLocal] = useState(true);
+  const [lbPort, setLbPort] = useState<number | undefined>(undefined);
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const job = useJob(jobId);
@@ -348,6 +363,9 @@ export function CreateDrawer({
       ),
     );
     setVersion("");
+    setScale("single");
+    setRepOn("servers");
+    setLbPort(undefined);
     if (c.kind === "runtime") {
       setTarget(ssh);
       setWhere((w) => (w === "local" ? "ssh" : w));
@@ -373,8 +391,26 @@ export function CreateDrawer({
     password && !/^[A-Za-z0-9!#%*+,.:=?@^_~-]{8,128}$/.test(password) ? "8-128 characters: letters, digits and !#%*+,.:=?@^_~-" : null;
   const loginError = login && !/^[A-Za-z][A-Za-z0-9_.-]{2,63}$/.test(login) ? "3-64 characters, starting with a letter" : null;
   const keyError = !NAME_RE.test(key) ? "letters, digits, - and _; start with a letter" : taken.includes(key) ? "already used" : null;
+  const repInfo = item?.kind === "service" && role === "database" ? item.replication || null : null;
+  const replicated = !!repInfo && scale === "replicated";
+  const repLocal = replicated && repOn === "local";
+  const topologyError = !replicated
+    ? null
+    : repLocal
+      ? !localReplicas || localReplicas < 1 || localReplicas > 9
+        ? "1 to 9 replicas"
+        : null
+      : servers.length < 2
+        ? "save at least two servers first (Servers, below): one for the primary, one per replica"
+        : !primaryServer
+          ? "pick the server that takes the writes"
+          : !replicaServers.length
+            ? "pick at least one server for a read replica"
+            : null;
   const sshError =
-    where === "cluster"
+    replicated
+      ? null
+      : where === "cluster"
       ? clusterName
         ? null
         : "pick a cluster (Scaling cluster page)"
@@ -402,7 +438,7 @@ export function CreateDrawer({
   const functionsUrlError = isSmtp && functionsUrl.trim() && !/^https?:\/\/\S+$/.test(functionsUrl.trim()) ? "http://host:port of the pskit host" : null;
 
   const submit = async () => {
-    if (!item || keyError || sshError || passwordError || loginError || guiPasswordError || domainsError || functionsUrlError) return;
+    if (!item || keyError || sshError || topologyError || passwordError || loginError || guiPasswordError || domainsError || functionsUrlError) return;
     setSubmitError(null);
     const sshTarget: OnPremTarget = { ...ssh, method: "ssh", auth: sshAuth };
     if (sshAuth !== "key") delete sshTarget.identity_file;
@@ -420,11 +456,23 @@ export function CreateDrawer({
     if (item.kind === "runtime" && version) body.version = version;
     if (role) body.role = role;
     if (port) body.port = port;
-    if (address.trim()) body.address = address.trim();
+    if (address.trim() && !replicated) body.address = address.trim();
     if (image.trim()) body.image = image.trim();
     if (login.trim()) body.user = login.trim();
     if (password) body.password = password;
-    if (bind) body.bind = bind;
+    if (bind && !replicated) body.bind = bind;
+    if (replicated && repInfo) {
+      delete body.target;
+      const topology: JsonObject = {
+        mode: "replicated",
+        sync,
+        primary: repLocal ? "local" : primaryServer,
+        replicas: repLocal ? Array.from({ length: localReplicas || 1 }, () => "local") : replicaServers,
+        balancer: !repInfo.balancer ? "" : repLocal ? (lbLocal ? "local" : "") : lbServer,
+      };
+      if (topology.balancer && lbPort) topology.balancer_port = lbPort;
+      body.topology = topology;
+    }
     if (item.companion && withGui) {
       body.gui = true;
       body.gui_login = guiLogin;
@@ -455,7 +503,16 @@ export function CreateDrawer({
             type="button"
             className="btn btn-primary"
             disabled={
-              !!keyError || !!sshError || !!passwordError || !!loginError || !!guiPasswordError || !!domainsError || !!functionsUrlError || running || job.status === "succeeded"
+              !!keyError ||
+              !!sshError ||
+              !!topologyError ||
+              !!passwordError ||
+              !!loginError ||
+              !!guiPasswordError ||
+              !!domainsError ||
+              !!functionsUrlError ||
+              running ||
+              job.status === "succeeded"
             }
             onClick={() => void submit()}
           >
@@ -523,6 +580,57 @@ export function CreateDrawer({
               <Segmented label="Use as" value={role} onChange={setRole} options={item.roles.map((r) => ({ value: r, label: ROLE_LABEL[r] || r }))} />
             </FormRow>
           )}
+          {item.kind === "service" && role === "database" && (
+            <FormRow
+              label="Scaling"
+              help={
+                !repInfo
+                  ? `${item.label} runs on one server here.`
+                  : replicated
+                    ? "Horizontal: the primary takes every write, read replicas copy it and serve reads. Add replicas later as reads grow."
+                    : "One server holds the database. To scale it up, give that server more CPU and memory."
+              }
+            >
+              <Segmented
+                label="Scaling"
+                value={replicated ? "replicated" : "single"}
+                onChange={(v) => setScale(v as "single" | "replicated")}
+                options={[
+                  { value: "single", label: "Single server" },
+                  { value: "replicated", label: "Primary + read replicas", disabled: !repInfo },
+                ]}
+              />
+            </FormRow>
+          )}
+          {replicated && repInfo && (
+            <ReplicationForm
+              item={item}
+              info={repInfo}
+              servers={servers}
+              port={port || item.port || 0}
+              repOn={repOn}
+              setRepOn={setRepOn}
+              primary={primaryServer}
+              setPrimary={(v) => {
+                setPrimaryServer(v);
+                setReplicaServers((r) => r.filter((x) => x !== v));
+              }}
+              replicas={replicaServers}
+              setReplicas={setReplicaServers}
+              localReplicas={localReplicas}
+              setLocalReplicas={setLocalReplicas}
+              sync={sync}
+              setSync={setSync}
+              lbServer={lbServer}
+              setLbServer={setLbServer}
+              lbLocal={lbLocal}
+              setLbLocal={setLbLocal}
+              lbPort={lbPort}
+              setLbPort={setLbPort}
+              error={topologyError}
+            />
+          )}
+          {!replicated && (
           <FormRow
             label="Where"
             help={
@@ -544,11 +652,15 @@ export function CreateDrawer({
               options={[
                 { value: "local", label: "This machine", disabled: item.kind === "runtime" },
                 { value: "ssh", label: "One SSH server" },
-                { value: "cluster", label: "Scaling cluster", disabled: !clusters.length && !defaultCluster },
+                // A database scales with replicas (Scaling above), not by running on a function cluster.
+                ...(role === "database" && where !== "cluster"
+                  ? []
+                  : [{ value: "cluster", label: "Scaling cluster", disabled: !clusters.length && !defaultCluster }]),
               ]}
             />
           </FormRow>
-          {where === "cluster" && (
+          )}
+          {!replicated && where === "cluster" && (
             <>
               <FormRow label="Cluster" error={clusterName ? null : sshError} help={!clusters.length ? "Create one on the Scaling cluster page first." : undefined}>
                 <EnumSelect
@@ -579,7 +691,7 @@ export function CreateDrawer({
               </FormRow>
             </>
           )}
-          {where === "ssh" && (
+          {!replicated && where === "ssh" && (
             <FormRow label="Server" help="A saved server (Servers below), or a new connection typed here.">
               <EnumSelect
                 value={savedServer}
@@ -588,7 +700,7 @@ export function CreateDrawer({
               />
             </FormRow>
           )}
-          {where === "ssh" && state.default_target_problem && (
+          {!replicated && where === "ssh" && state.default_target_problem && (
             <div className="hint-box">{state.default_target_problem}</div>
           )}
           {item.kind === "runtime" && (item.versions || []).length > 0 && (
@@ -604,7 +716,7 @@ export function CreateDrawer({
               </div>
             </FormRow>
           )}
-          {where === "ssh" && !savedServer && (
+          {!replicated && where === "ssh" && !savedServer && (
             <div className="driver-box card card-pad">
               <FormRow label="Host" required error={sshError}>
                 <TextInput mono value={ssh.host || ""} placeholder="10.0.0.5" onChange={(v) => setSsh((s) => ({ ...s, host: v }))} />
@@ -656,7 +768,9 @@ export function CreateDrawer({
                 help={
                   isSmtp
                     ? "Other mail servers always connect to 25: keep 25 unless something else uses it (then forward 25 to this port; the DNS guide shows how)."
-                    : `Published on the server. Default ${item.port}${item.extra_ports?.length ? ` (also ${item.extra_ports.join(", ")})` : ""}.`
+                    : replicated
+                      ? `The database port on every member${repLocal ? " (on this machine: the primary's; each replica takes the next one)" : ""}. Default ${item.port}.`
+                      : `Published on the server. Default ${item.port}${item.extra_ports?.length ? ` (also ${item.extra_ports.join(", ")})` : ""}.`
                 }
               >
                 <NumberInput integer min={1} max={65535} value={port} placeholder={String(item.port || "")} onChange={setPort} />
@@ -689,6 +803,14 @@ export function CreateDrawer({
                     </FormRow>
                   </>
                 )}
+                {replicated ? (
+                  <p className="muted small">
+                    {repLocal
+                      ? "Members listen on 127.0.0.1 and talk to each other on a private Docker network."
+                      : "Members listen on the network (0.0.0.0) so replicas reach the primary; the job prints the firewall rules: replicas → primary, load balancer → members, functions → load balancer."}{" "}
+                    Replication uses its own user and password, generated and kept in .pskit/.
+                  </p>
+                ) : (
                 <FormRow label="Listen on" help="127.0.0.1: only programs on that machine can connect. 0.0.0.0: other servers too (limit it with the firewall).">
                   <Segmented
                     label="Listen on"
@@ -700,6 +822,7 @@ export function CreateDrawer({
                     ]}
                   />
                 </FormRow>
+                )}
               </div>
               {(item.companion || (item.gui && item.gui.length > 0)) && (
                 <FormRow
@@ -774,9 +897,11 @@ export function CreateDrawer({
               )}
               <details className="advanced">
                 <summary>Advanced</summary>
-                <FormRow label="Address functions use" help="Default: the SSH host, or 127.0.0.1 here. Set a private IP or DNS name if different.">
-                  <TextInput mono value={address} onChange={setAddress} placeholder={where === "cluster" ? "the server's cluster address" : target.method === "ssh" ? ssh.host || "" : "127.0.0.1"} />
-                </FormRow>
+                {!replicated && (
+                  <FormRow label="Address functions use" help="Default: the SSH host, or 127.0.0.1 here. Set a private IP or DNS name if different.">
+                    <TextInput mono value={address} onChange={setAddress} placeholder={where === "cluster" ? "the server's cluster address" : target.method === "ssh" ? ssh.host || "" : "127.0.0.1"} />
+                  </FormRow>
+                )}
                 <FormRow label="Docker image">
                   <TextInput mono value={image} onChange={setImage} placeholder={item.image || ""} />
                 </FormRow>
@@ -912,6 +1037,7 @@ function DetailsDrawer({ serviceKey, onClose }: { serviceKey: string; onClose: (
               </code>
             </FormRow>
           )}
+          {info.topology && <ReplicasPanel info={info} onChanged={() => setAttempt((a) => a + 1)} />}
           {(links.length > 0 || info.companion) && (
             <FormRow label="Web UI" help="Does not open? Check web UI tests the container, the port, the server and this machine, and names the fix (firewall / NSG, bind, tunnel).">
               <div className="stack-xs">
