@@ -359,6 +359,15 @@ same dialog), or `pskit cluster join prod edge3`. Then raise the replicas: the *
 or `options.cluster.replicas` so the next deploy keeps it. To retire a server, `pskit cluster leave prod edge2`
 drains it first, so its replicas move to the others.
 
+**Remove the whole cluster, master included.** The master cannot leave on its own, since the others depend on it.
+`pskit cluster remove prod --uninstall` (in the studio: *Remove* on the master's row) takes off everything pskit
+installed: the deployments stop, the cluster's load balancer is removed and named load balancers drop its routes,
+the agent is uninstalled from every joined server, then the orchestrator from the master (Swarm: `docker swarm
+leave`; k3s: its uninstall scripts, images included; Nomad: the agent, its binary, unit, config and data), with
+the deployments' images and the `pskit-cluster` folder. Docker itself and the saved servers stay. The main
+replicas' data stays on the master unless you add `--delete-data` (*Uninstall and delete data*). A server that
+does not answer is reported and skipped. Without `--uninstall`, `pskit cluster remove` only forgets the cluster.
+
 ### Alert DevOps (optional)
 
 When the cluster is full, pskit can call **one of your functions** and / or POST to a **webhook** (Slack, Teams,
@@ -447,6 +456,7 @@ Recent alerts are listed on the cluster page (and kept in `.pskit/onprem-cluster
 | `pskit cluster balancer set NAME SERVER [--port 80] [--address IP]` | nginx on a server outside the cluster: one URL for all of it |
 | `pskit cluster balancer sync NAME` / `logs NAME [-n 100]` / `remove NAME` | rewrite its config now / its access log / stop it |
 | `pskit cluster list` / `pskit cluster remove NAME` | list / forget a cluster |
+| `pskit cluster remove NAME --uninstall [--delete-data]` | uninstall the cluster from the master and every server, then forget it |
 | `pskit deploy --cluster NAME` / `pskit deploy --server NAME` | deploy the functions to the cluster / to one server |
 | `pskit resources onprem create KEY --service S --cluster NAME [--node SERVER]` | a resource on a server of the cluster |
 

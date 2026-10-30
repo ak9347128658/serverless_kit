@@ -373,7 +373,8 @@ def leave_server(root: Path, name: str, server: str, emit: Emit, *, run: Optiona
     if node is None:
         raise ClusterError(f"{server!r} is not in cluster {name}")
     if server == cluster["master"]:
-        raise ClusterError("the master cannot leave; remove the cluster instead")
+        raise ClusterError(f"the master cannot leave; remove the cluster instead (uninstalls it from every server):"
+                           f" pskit cluster remove {name} --uninstall")
     orch = cluster["orchestrator"]
     master = _target(root, cluster["master"])
     node_name = str(node.get("node") or "")
@@ -397,8 +398,14 @@ def leave_server(root: Path, name: str, server: str, emit: Emit, *, run: Optiona
     return public(name, get_cluster(root, name), root)
 
 
-def remove_cluster(root: Path, name: str, emit: Emit) -> None:
-    """Forget the cluster (servers keep their orchestrator; deployed functions keep running)."""
+def remove_cluster(root: Path, name: str, emit: Emit, *, uninstall: bool = False, delete_data: bool = False,
+                   run: Optional[RunFn] = None) -> None:
+    """Forget the cluster (servers keep their orchestrator; deployed functions keep running).
+
+    ``uninstall``: first take off everything pskit installed: the deployments, the load balancer, the agent on
+    every joined server and the orchestrator on the master (see :func:`uninstall_cluster`)."""
+    if uninstall:
+        uninstall_cluster(root, name, emit, delete_data=delete_data, run=run)
     with _LOCK:
         clusters = load_clusters(root)
         removed = clusters.pop(str(name), None)
@@ -406,11 +413,64 @@ def remove_cluster(root: Path, name: str, emit: Emit) -> None:
             raise ClusterError(_unknown(root, name))
         _save(root, clusters)
     _untag_resources(root, name, None, emit)
+    if uninstall:
+        emit(f"Removed cluster {name}. Docker and the saved servers stay. Each project that deployed to it still has"
+             " its Terraform state: run pskit remove there, or deploy it again without the cluster.")
+        return
     emit(f"Forgot cluster {name}. The servers keep running; remove deployments first with pskit remove.")
+    emit(f"  To also uninstall the orchestrator from every server: pskit cluster remove {name} --uninstall"
+         " (before forgetting it).")
     balancer = (removed.get("balancer") or {}).get("server")
     if balancer:
         emit(f"The load balancer on {balancer} keeps running too: pskit cluster balancer remove {name} first, or"
              f" docker rm -f {lb.container_name()} on {balancer}.")
+
+
+def uninstall_cluster(root: Path, name: str, emit: Emit, *, delete_data: bool = False,
+                      run: Optional[RunFn] = None) -> None:
+    """Take off what pskit installed for cluster ``name`` (the cluster itself stays saved; see
+    :func:`remove_cluster`): its load balancer, its routes on named load balancers, the deployments, the agent on
+    every joined server and then the orchestrator on the master. A server that does not answer only warns, so an
+    offline server never blocks the removal. ``delete_data``: also delete the main replicas' data on the master."""
+    cluster = get_cluster(root, name)
+    orch = str(cluster["orchestrator"])
+    master_server = str(cluster["master"])
+    stacks = sorted(cluster.get("deployments") or {})
+    if (cluster.get("balancer") or {}).get("server"):
+        remove_balancer(root, name, emit, run=run)
+    for lb_name in balancers.attached_to(root, name):
+        try:
+            balancers.detach_cluster(root, lb_name, name, emit, run=run)
+        except (ServiceError, ClusterError, ValueError) as exc:
+            emit(f"  could not take {name} off load balancer {lb_name}: {exc}")
+
+    def on(server: str, script: str, label: str) -> bool:
+        try:
+            _script(_target(root, server), script, emit, run, label=label, check=False)
+            return True
+        except (ServiceError, ClusterError) as exc:
+            emit(f"  WARNING: {server} did not answer ({exc}). Uninstall it there by hand later.")
+            return False
+
+    for stack in stacks:
+        emit(f"Removing deployment {stack} ...")
+        on(master_server, scripts.destroy_script(orch, stack), f"destroy-{stack}")
+    workers = sorted(s for s in (cluster.get("nodes") or {}) if s != master_server)
+    for server in workers:
+        emit(f"Uninstalling the {ORCHESTRATORS[orch]['label']} agent from {server} ...")
+        on(server, scripts.uninstall_script(orch, master=False, stacks=stacks), "uninstall")
+    try:
+        data_root = str(_target(root, master_server).get("data_dir") or "")
+    except ClusterError:
+        data_root = ""
+    emit(f"Uninstalling {ORCHESTRATORS[orch]['label']} from the master {master_server} ...")
+    on(master_server, scripts.uninstall_script(orch, master=True, stacks=stacks, data_root=data_root,
+                                               delete_data=delete_data), "uninstall")
+    if stacks and not delete_data:
+        where = data_root or scripts.DATA_ROOT
+        emit(f"  The main replicas' data stays on {master_server} ({where}/<stack>"
+             + (", or Docker volumes <stack>_data)" if orch == "swarm" else ")")
+             + "; remove the cluster with --delete-data to delete it too.")
 
 
 def _nomad_node_id(master: Dict[str, Any], node: str, emit: Emit, run: Optional[RunFn]) -> str:

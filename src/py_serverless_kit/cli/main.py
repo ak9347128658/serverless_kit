@@ -150,6 +150,7 @@ Operate
               pskit cluster requests prod --follow
               pskit cluster list
               pskit cluster remove prod --yes
+              pskit cluster remove prod --uninstall --yes
   firewall    Ports each on-prem server must open    pskit firewall --server edge2
   function    split: a function into its own folder  pskit function split get-item
   lb          algorithms | create | update | list | status | attach | detach | routes | sync | logs | remove | forget
@@ -1495,6 +1496,7 @@ def cluster() -> None:
       pskit cluster scale prod --replicas 6
       pskit cluster requests prod --follow          # which server handled each request, live
       pskit cluster leave prod edge2
+      pskit cluster remove prod --uninstall        # uninstall from the master and every server, then forget
       pskit cluster balancer set prod lb1          # one URL (OpenResty on lb1) for every server
       pskit lb attach edge --cluster prod          # or a shared load balancer: http://<edge>/<service>/
 
@@ -1840,15 +1842,28 @@ def cluster_scale(name: str, replicas: int, stack: Optional[str], stage: Optiona
 
 @cluster.command("remove")
 @click.argument("name")
+@click.option("--uninstall", is_flag=True,
+              help="Also take off what pskit installed: deployments, load balancer, the agent on every joined server"
+                   " and the orchestrator on the master.")
+@click.option("--delete-data", is_flag=True, help="With --uninstall: also delete the main replicas' data on the master.")
 @click.option("--yes", is_flag=True, help="Do not ask.")
 @_CONFIG_OPTION
-def cluster_remove(name: str, yes: bool, config_path: Optional[str]) -> None:
-    """Forget cluster NAME (the servers and anything running on them are left as they are)."""
+def cluster_remove(name: str, uninstall: bool, delete_data: bool, yes: bool, config_path: Optional[str]) -> None:
+    """Forget cluster NAME (the servers and anything running on them are left as they are).
+
+    With --uninstall the deployments stop and Docker Swarm / k3s / Nomad is removed from the master and every
+    joined server first. Docker itself and the saved servers stay.
+    """
     from ..core.onprem_cluster import remove_cluster
 
+    if delete_data and not uninstall:
+        raise click.UsageError("--delete-data needs --uninstall")
     if not yes:
-        click.confirm(f"Forget cluster {name}?", abort=True)
-    _cluster_call(remove_cluster, _cluster_root(config_path), name, echo)
+        question = (f"Uninstall cluster {name} from all its servers (its deployments stop"
+                    + (" and their data is deleted" if delete_data else "") + ")?") if uninstall else \
+            f"Forget cluster {name}?"
+        click.confirm(question, abort=True)
+    _cluster_call(remove_cluster, _cluster_root(config_path), name, echo, uninstall=uninstall, delete_data=delete_data)
 
 
 @cluster.group("balancer")

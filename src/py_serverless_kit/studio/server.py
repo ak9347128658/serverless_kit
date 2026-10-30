@@ -708,11 +708,13 @@ def make_handler(app: Studio) -> type:
                         elif action == "master-serves":
                             clu.set_master_serves(root, name, bool(body.get("enabled")), job.emit)
                         else:
-                            clu.remove_cluster(root, name, job.emit)
+                            clu.remove_cluster(root, name, job.emit, uninstall=bool(body.get("uninstall")),
+                                               delete_data=bool(body.get("delete_data")))
                         return 0
 
                     label = {"join": f"Join {server} to", "leave": f"Remove {server} from", "scale": "Scale",
-                             "remove": "Forget", "balancer-set": f"Load balancer {server} for",
+                             "remove": "Uninstall and remove" if body.get("uninstall") else "Forget",
+                             "balancer-set": f"Load balancer {server} for",
                              "balancer-remove": "Remove the load balancer of",
                              "balancer-sync": "Update the load balancer of",
                              "master-serves": "Requests to the master of"}[action] + f" cluster {name}"

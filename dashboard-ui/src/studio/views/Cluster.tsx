@@ -233,11 +233,29 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
   const forget = async () => {
     const ok = await confirm({
       title: `Forget cluster ${cluster.name}?`,
-      body: "pskit stops managing it. The servers and anything running on them are left as they are (remove the deployments first with Deploy → Remove).",
+      body: "pskit stops managing it. The servers and anything running on them are left as they are (remove the deployments first with Deploy → Remove). To uninstall it from the servers instead, use Remove on the master's row.",
       confirmLabel: "Forget",
       danger: true,
     });
     if (ok === "confirm") void startJob("remove");
+  };
+
+  const uninstall = async () => {
+    const ok = await confirm({
+      title: `Uninstall cluster ${cluster.name}?`,
+      body: (
+        <>
+          The master <b className="mono">{cluster.master}</b> cannot leave on its own, so this removes the whole cluster: its deployments stop, its load
+          balancer is removed, {cluster.orchestrator_label} is uninstalled from the master and every joined server, then pskit forgets the cluster.
+          Docker and the saved servers stay. The main replicas' data stays on the master unless you also delete it.
+        </>
+      ),
+      confirmLabel: "Uninstall",
+      danger: true,
+      typed: cluster.name,
+      extra: [{ label: "Uninstall and delete data", value: "delete-data", danger: true }],
+    });
+    if (ok === "confirm" || ok === "delete-data") void startJob("remove", { uninstall: true, delete_data: ok === "delete-data" });
   };
 
   const removeBalancer = async () => {
@@ -356,8 +374,17 @@ function ClusterPanel({ cluster, state, reload }: { cluster: OnPremCluster; stat
                   <Meter value={n.disk} limit={cluster.capacity.disk} suffix={n.disk_gb ? ` of ${n.disk_gb} GB` : ""} />
                 </td>
                 <td>
-                  {n.role !== "master" && (
+                  {n.role !== "master" ? (
                     <button type="button" className="btn btn-sm btn-danger" onClick={() => void leave(n.server)}>
+                      Remove
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger"
+                      onClick={() => void uninstall()}
+                      title="Uninstall the orchestrator from the master and every joined server, then forget the cluster"
+                    >
                       Remove
                     </button>
                   )}

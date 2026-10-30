@@ -207,6 +207,7 @@ Scale on-prem functions over a master plus joined servers (Docker Swarm, Kuberne
 | `cluster balancer set NAME SERVER [--port 80] [--address IP]` | run nginx on a saved server outside the cluster: one URL spread over its servers, updated by deploy / remove / join / leave |
 | `cluster balancer sync NAME` / `cluster balancer logs NAME [-n 100]` / `cluster balancer remove NAME [--yes]` | rewrite the load balancer's config now / its access log / stop it |
 | `cluster list [--json]` / `cluster remove NAME [--yes]` | list / forget clusters |
+| `cluster remove NAME --uninstall [--delete-data] [--yes]` | stop the deployments and the load balancer, uninstall the agent from every joined server and the orchestrator from the master, then forget the cluster |
 
 `pskit deploy | package | plan | remove | info --cluster NAME` runs the functions on that cluster instead of one server
 (`--server NAME` goes back to one server; the stage remembers either). `pskit resources onprem create KEY --service S

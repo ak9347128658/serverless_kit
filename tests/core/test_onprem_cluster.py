@@ -352,6 +352,66 @@ def test_nomad_leave_uses_the_node_id(servers):
     assert "/v1/node/'abc-123'/purge" in fake.script("/purge")
 
 
+@pytest.mark.parametrize("orchestrator, master_cmd, worker_cmd", [
+    ("swarm", "dk swarm leave --force", "dk swarm leave --force"),
+    ("kubernetes", "/usr/local/bin/k3s-uninstall.sh", "/usr/local/bin/k3s-agent-uninstall.sh"),
+    ("nomad", "/usr/local/bin/nomad", "/usr/local/bin/nomad"),
+])
+def test_remove_uninstall_takes_the_orchestrator_off_master_and_workers(servers, orchestrator, master_cmd, worker_cmd):
+    fake = FakeSSH()
+    clu.create_cluster(servers, "prod", orchestrator, "edge1", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge2", lambda _l: None, run=fake)
+    clu._update(servers, "prod", lambda c: c.setdefault("deployments", {}).__setitem__(
+        "pskit-shop-dev", {"service": "shop", "stage": "dev", "image": "pskit-shop-dev:abc", "port": 8080}))
+    fake.scripts.clear()
+    lines: List[str] = []
+    clu.remove_cluster(servers, "prod", lines.append, uninstall=True, run=fake)
+
+    assert "prod" not in clu.load_clusters(servers)
+    uninstalls = [(host, text) for host, text in fake.scripts if "rm -rf pskit-cluster" in text]
+    assert [host for host, _t in uninstalls] == ["10.0.0.6", "10.0.0.5"]  # joined servers first, the master last
+    (_w, worker), (_m, master) = uninstalls
+    assert worker_cmd in worker and master_cmd in master
+    destroy = next(text for _h, text in fake.scripts if "pskit-shop-dev" in text and text not in (worker, master))
+    assert destroy == scripts.destroy_script(orchestrator, "pskit-shop-dev")
+    assert "/var/lib/pskit/pskit-shop-dev" not in master  # data stays unless asked
+    assert any("--delete-data" in line for line in lines)
+    for _h, text in uninstalls:
+        _sh_ok(text)
+
+
+def test_remove_uninstall_can_delete_data_and_survives_an_offline_server(servers):
+    fake = FakeSSH()
+    clu.create_cluster(servers, "prod", "swarm", "edge1", lambda _l: None, run=fake)
+    clu.join_server(servers, "prod", "edge2", lambda _l: None, run=fake)
+    clu._update(servers, "prod", lambda c: c.setdefault("deployments", {}).__setitem__("pskit-shop-dev", {}))
+
+    def offline(argv: List[str], stdout: Optional[Path]) -> Tuple[int, str]:
+        if any("10.0.0.6" in a for a in argv):
+            return 255, "ssh: connect to host 10.0.0.6: Connection timed out"
+        return fake(argv, stdout)
+
+    fake.scripts.clear()
+    lines: List[str] = []
+    clu.remove_cluster(servers, "prod", lines.append, uninstall=True, delete_data=True, run=offline)
+    assert "prod" not in clu.load_clusters(servers)
+    assert any("edge2 did not answer" in line for line in lines)
+    master = fake.script("rm -rf pskit-cluster")
+    assert "as_root rm -rf '/var/lib/pskit/pskit-shop-dev'" in master
+    assert "dk volume rm 'pskit-shop-dev_data'" in master
+    assert "grep -E '^(pskit-shop-dev):'" in master
+
+
+def test_plain_remove_only_forgets(servers):
+    fake = FakeSSH()
+    clu.create_cluster(servers, "prod", "kubernetes", "edge1", lambda _l: None, run=fake)
+    fake.scripts.clear()
+    lines: List[str] = []
+    clu.remove_cluster(servers, "prod", lines.append, run=fake)
+    assert fake.scripts == [] and "prod" not in clu.load_clusters(servers)
+    assert any("--uninstall" in line for line in lines)
+
+
 def test_full_cluster_alerts_once_per_cooldown(servers):
     fake = FakeSSH({"10.0.0.5": (STAT_B, 100000)})  # 90 % cpu, 97.5 % memory
     clu.create_cluster(servers, "prod", "kubernetes", "edge1", lambda _l: None, run=fake)

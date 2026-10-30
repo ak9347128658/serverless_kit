@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-10-30
+
+### Added
+- On premises, a scaling cluster can be **removed together with what pskit installed**, master included:
+  `pskit cluster remove NAME --uninstall` (studio: **Remove** on the master's row, which used to have no button)
+  stops the deployments, removes the cluster's load balancer and its routes on named load balancers, uninstalls the
+  agent from every joined server and then Docker Swarm / k3s / Nomad from the master, deletes the deployments'
+  images and the `pskit-cluster` scripts folder, and forgets the cluster. Docker and the saved servers stay; the main
+  replicas' data stays too unless `--delete-data` (*Uninstall and delete data*) is given. An unreachable server only
+  warns. Plain `pskit cluster remove` still only forgets the cluster, and `pskit cluster leave` on the master now
+  points to `--uninstall`.
+
 ## [2.7.0] - 2026-10-30
 
 ### Added

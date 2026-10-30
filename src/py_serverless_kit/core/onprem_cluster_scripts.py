@@ -182,6 +182,46 @@ def leave_script(orchestrator: str) -> str:
     return _header() + "as_root systemctl disable --now nomad || true\n"
 
 
+def uninstall_script(orchestrator: str, *, master: bool, stacks: Sequence[str] = (), data_root: str = "",
+                     delete_data: bool = False) -> str:
+    """Runs on each server when a cluster is removed with ``--uninstall``: take off what pskit installed.
+
+    Swarm: leave the swarm. Kubernetes: the k3s (agent) uninstall script, which also drops its images. Nomad: stop
+    the agent and delete its binary, unit, config and data. The deployments' images (``stacks``: their repos) and
+    the ``pskit-cluster`` scripts folder go too. Docker itself stays: one-server deployments and resources use it.
+    ``delete_data`` (master only): also delete the main replicas' data (``<data_root>/<stack>``, Swarm volumes)."""
+    body = ""
+    if orchestrator == "swarm":
+        body += "if need docker; then dk swarm leave --force >/dev/null 2>&1 || true; fi\n"
+    elif orchestrator == "kubernetes":
+        tool = "/usr/local/bin/k3s-uninstall.sh" if master else "/usr/local/bin/k3s-agent-uninstall.sh"
+        body += f"if [ -x {tool} ]; then as_root {tool} || true; fi\n"
+    elif orchestrator == "nomad":
+        body += (
+            "as_root systemctl disable --now nomad >/dev/null 2>&1 || true\n"
+            # Nomad mounts secrets / alloc folders under its data dir: unmount them before deleting it.
+            "for m in $(awk '$2 ~ \"^/opt/nomad/\" {print $2}' /proc/mounts | sort -r); do as_root umount \"$m\" || true; done\n"
+            "as_root rm -rf /etc/nomad.d /opt/nomad /etc/systemd/system/nomad.service /usr/local/bin/nomad\n"
+            "as_root systemctl daemon-reload >/dev/null 2>&1 || true\n"
+        )
+    else:
+        raise ValueError(f"unknown orchestrator {orchestrator!r}")
+    if orchestrator != "kubernetes" and stacks:
+        repos = "|".join(sorted(stacks))  # stack_name(): only a-z, 0-9 and -
+        body += (
+            "if need docker; then\n"
+            f"  for ref in $(dk images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -E '^({repos}):'); do"
+            " dk rmi -f \"$ref\" >/dev/null 2>&1 || true; done\n"
+            "fi\n"
+        )
+    if master and delete_data:
+        for stack in sorted(stacks):
+            body += f"as_root rm -rf {_shq((data_root or DATA_ROOT).rstrip('/') + '/' + stack)}\n"
+            if orchestrator == "swarm":
+                body += f"if need docker; then dk volume rm {_shq(stack + '_data')} >/dev/null 2>&1 || true; fi\n"
+    return _header() + body + "rm -rf pskit-cluster\n"
+
+
 def drain_script(orchestrator: str, node: str, node_id: str = "") -> str:
     """Runs on the master: move every replica off ``node`` before it leaves."""
     n = _shq(node)
