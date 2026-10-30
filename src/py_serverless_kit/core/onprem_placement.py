@@ -136,24 +136,53 @@ def parse(raw: Any, functions: List[str], workflows: Optional[List[str]] = None)
             **({"gateway": raw["gateway"]} if raw.get("gateway") is not None else {})}
 
 
-def gateway(parsed: Dict[str, Any], options: Dict[str, Any], balanced: bool = False) -> bool:
-    """Whether every group answers every route, passing other groups' routes on (one URL for the project).
-    ``placement.gateway``; unset: on with a load balancer (``options.balancer``, or ``balanced``: a group's cluster
-    has one or is attached to one), since it sends a request to any group's servers; else off, so each server
-    answers only the routes of the functions it runs."""
+def gateway(parsed: Dict[str, Any], options: Dict[str, Any], balanced: Any = False) -> Any:
+    """Which other groups' routes a group answers, passing them on: ``True`` (every group: one URL for the
+    project), a list of group names, or ``False`` (each server answers only the routes of the functions it runs).
+    ``placement.gateway``; unset: on with ``options.balancer`` (it sends a request to any group's servers). Else
+    ``balanced``: ``True``, or the groups behind the same load balancer as this one (:func:`balanced_peers`), since
+    a load balancer attached to a cluster reaches only that cluster's servers."""
     if "gateway" in parsed:
         return bool(parsed["gateway"])
-    return balanced or options.get("balancer") not in (None, "", False)
+    if options.get("balancer") not in (None, "", False):
+        return True
+    if isinstance(balanced, (list, tuple, set)):
+        return sorted(str(g) for g in balanced) or False
+    return bool(balanced)
 
 
-def behind_balancer(root: Path, clusters: List[str]) -> bool:
-    """Whether one of ``clusters`` has its own load balancer or is attached to a named one."""
+def _balancer_keys(root: Path, cluster: str, saved: Dict[str, Any]) -> set:
+    """The load balancers in front of ``cluster``: its own, and every named one attached to it."""
     from .onprem_balancers import attached_to
+
+    if not cluster:
+        return set()
+    keys = {f"lb:{n}" for n in attached_to(root, cluster)}
+    if isinstance((saved.get(cluster) or {}).get("balancer"), dict):
+        keys.add(f"own:{cluster}")
+    return keys
+
+
+def balanced_peers(root: Path, group_clusters: Dict[str, str]) -> Dict[str, List[str]]:
+    """``{group: [other groups behind a load balancer this group is behind]}`` from each group's cluster (``""``
+    for a group on a server). A group not behind a load balancer gets ``[]``."""
     from .onprem_cluster import load_clusters
 
     try:
         saved = load_clusters(root)
-        return any(isinstance((saved.get(c) or {}).get("balancer"), dict) or attached_to(root, c) for c in clusters)
+        keys = {g: _balancer_keys(root, c, saved) for g, c in group_clusters.items()}
+    except Exception:  # noqa: BLE001 - unreadable saved state: no load balancer
+        return {g: [] for g in group_clusters}
+    return {g: sorted(o for o in group_clusters if o != g and keys[g] & keys[o]) for g in group_clusters}
+
+
+def behind_balancer(root: Path, clusters: List[str]) -> bool:
+    """Whether one of ``clusters`` has its own load balancer or is attached to a named one."""
+    from .onprem_cluster import load_clusters
+
+    try:
+        saved = load_clusters(root)
+        return any(_balancer_keys(root, c, saved) for c in clusters)
     except Exception:  # noqa: BLE001 - unreadable saved state: no load balancer
         return False
 

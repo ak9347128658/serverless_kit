@@ -1251,12 +1251,13 @@ class Host:
 
     def served_elsewhere(self, function: str) -> Optional[Tuple[str, str]]:
         """``(group, url)`` when an HTTP request for ``function`` reached a host that does not run it and does not
-        pass routes on (with ``placement.gateway`` every group does)."""
+        pass routes on (with ``placement.gateway`` every group does; a list: only those groups' routes)."""
         fns = self.spec.get("functions") or {}
-        if self.peers is None or function in fns or self.spec.get("gateway"):
+        passes = self.spec.get("gateway")
+        if self.peers is None or function in fns or passes is True:
             return None
         group = self.peers.remote(function)
-        if not group:
+        if not group or (isinstance(passes, list) and group in passes):
             return None
         url = str(((self.spec.get("groups") or {}).get(group) or {}).get("url") or "")
         return group, url

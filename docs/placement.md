@@ -94,7 +94,7 @@ with a shared secret (`.pskit/onprem-<stage>/peer-token`, out of git):
 | You do | What happens |
 |---|---|
 | `invoke("resize", data)` in a function on `api` | runs on `gpu`, the result (or the error, with its type) comes back |
-| an HTTP request to `api` for a route of `resize` | `404` with the URL on `gpu` (each server answers only its own routes); with `placement.gateway: true` (on by default behind a load balancer) `api` passes it to `gpu` |
+| an HTTP request to `api` for a route of `resize` | `404` with the URL on `gpu` (each server answers only its own routes); with `placement.gateway: true` (on by default behind a load balancer that reaches both groups) `api` passes it to `gpu` |
 | a **workflow** step that is a function on another server | runs there; `Retry` / `Catch` match its error type by name |
 | start a workflow on any group | it runs (and is recorded) on the default group; executions stay in one place |
 | send to a built-in queue whose consumer runs on `gpu` | the message is stored on `gpu` and its consumer runs there |
@@ -128,11 +128,15 @@ names the group and its URL. For one URL for the whole project, let every server
       gateway: true        # every group answers every route, passing other groups' routes on
 ```
 
-With a [load balancer](load-balancers.md) `gateway` is on unless you set it to `false`: `options.balancer: edge`,
-or a group on a cluster that has its own load balancer or is attached to a named one (`pskit lb attach edge
---cluster prod`). The load balancer gives the project one route (`/<service>/`) to the servers of **every** group
-it can reach; a request that lands on another group's server is passed on to the right group. So with groups on
-clusters `c1` and `c2`, both attached to `edge`, `http://edge/<service>/<route>` works for the functions of both.
+With `options.balancer: edge` `gateway` is on unless you set it to `false`: that load balancer gives the project
+one route (`/<service>/`) to the servers of **every** group, and a request that lands on another group's server is
+passed on to the right group.
+
+A load balancer attached to a cluster (`pskit lb attach edge --cluster prod`), or a cluster's own load balancer,
+reaches only the servers of the clusters it serves. Unless `gateway` is set, a group's servers then pass on only the
+routes of the groups behind the **same** load balancer. So with groups on clusters `c1` and `c2`, both attached to
+`edge`, `http://edge/<service>/<route>` works for the functions of both; with only `c1` attached, it serves only
+`c1`'s functions, and a route of a group on `c2` or on a server gets the `404` naming that group's URL.
 
 `--server NAME` / `--cluster NAME` move the default group only; the other groups always run where `pskit.yml`
 puts them.

@@ -224,6 +224,24 @@ def test_a_cluster_behind_a_load_balancer_turns_the_placement_gateway_on(root):
     assert pl.behind_balancer(root, ["c1"]) is True and pl.behind_balancer(root, ["other"]) is False
 
 
+def test_only_groups_behind_the_same_load_balancer_pass_each_others_routes_on(root):
+    from py_serverless_kit.core import onprem_placement as pl
+
+    fake = FakeServers()
+    node = {"role": "master", "node": "n1"}
+    clu._save(root, {"cluster01": {"orchestrator": "swarm", "master": "app1", "advertise": "10.0.0.5",
+                                   "nodes": {"app1": {**node, "address": "10.0.0.5"}}},
+                     "cluster02": {"orchestrator": "swarm", "master": "app2", "advertise": "10.0.0.6",
+                                   "nodes": {"app2": {**node, "address": "10.0.0.6"}}}})
+    bal.create_balancer(root, "common", "lb1", [].append, run=fake)
+    bal.attach_cluster(root, "common", "cluster01", [].append, run=fake)
+    groups = {"api": "cluster01", "more": "cluster01", "other": "cluster02", "vm": ""}
+    # The load balancer is attached to cluster01 only: cluster02 and the VM keep their own URLs.
+    assert pl.balanced_peers(root, groups) == {"api": ["more"], "more": ["api"], "other": [], "vm": []}
+    bal.attach_cluster(root, "common", "cluster02", [].append, run=fake)
+    assert pl.balanced_peers(root, groups)["other"] == ["api", "more"]
+
+
 def test_unreachable_balancer_only_warns_on_deploy(root):
     fake = FakeServers()
     bal.create_balancer(root, "edge", "lb1", lambda _l: None, run=fake)

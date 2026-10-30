@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-10-30
+
+### Fixed
+- On premises, a load balancer attached to one cluster also served the project's functions placed on other clusters
+  and servers: attaching it turned the placement gateway on for every group, so the attached cluster's servers passed
+  every other group's routes on. Now a group's servers pass on only the routes of groups behind the same load
+  balancer (`options.balancer` and an explicit `placement.gateway` keep their behaviour). Run `pskit deploy` again.
+
 ## [2.6.0] - 2026-10-28
 
 ### Added

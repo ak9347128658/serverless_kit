@@ -1049,7 +1049,7 @@ class OnPremProvider(Provider):
         """One host (Terraform ``terraform_data``) per placement group; core/onprem_placement.py."""
         from ..core.onprem_placement import (
             app_dir,
-            behind_balancer,
+            balanced_peers,
             gateway,
             group_stage,
             owners,
@@ -1092,9 +1092,11 @@ class OnPremProvider(Provider):
                            for f, g in parsed["function_group"].items() if f in cfg.functions}
         outputs: Dict[str, Any] = {}
         fn_out: Dict[str, Any] = {}
-        balanced = behind_balancer(ctx.root, [str((s.get("cluster") or {}).get("name") or "") for s in specs.values()])
+        # A group passes on only the routes of groups behind the same load balancer: one attached to a cluster
+        # reaches that cluster's servers only, so the others keep their own URLs.
+        peers = balanced_peers(ctx.root, {n: str((s.get("cluster") or {}).get("name") or "") for n, s in specs.items()})
         for name, spec in specs.items():
-            spec["gateway"] = gateway(parsed, cfg.provider.options, balanced)
+            spec["gateway"] = gateway(parsed, cfg.provider.options, peers.get(name) or [])
             spec.update({"group": name, "default_group": default, "groups": groups, "function_groups": function_groups,
                          "owners": found, "peer_token": token})
             if name != default:

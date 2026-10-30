@@ -388,6 +388,23 @@ def test_gateway_is_on_with_a_load_balancer():
     assert pl.gateway(pl.parse({"gateway": False, "groups": {"api": {}}}, []), {}, balanced=True) is False
     explicit = pl.parse({"gateway": True, "groups": {"api": {}}}, [])
     assert pl.gateway(explicit, {}) is True
+    # Behind a load balancer attached to some clusters: only the groups behind the same one.
+    assert pl.gateway(parsed, {}, ["gpu"]) == ["gpu"] and pl.gateway(parsed, {}, []) is False
+    assert pl.gateway(parsed, {"balancer": "edge"}, []) is True
+
+
+def test_a_group_passes_on_only_the_routes_of_groups_behind_its_load_balancer():
+    from py_serverless_kit.runtime.onprem_host import Host
+
+    peers = SimpleNamespace(remote=lambda fn: {"a": "c2", "b": "vm", "c": "c1b"}.get(fn))
+    groups = {g: {"url": f"http://{g}:8080"} for g in ("c2", "vm", "c1b")}
+    host = SimpleNamespace(peers=peers, spec={"functions": {"own": {}}, "gateway": ["c1b"], "groups": groups})
+    assert Host.served_elsewhere(host, "own") is None
+    assert Host.served_elsewhere(host, "c") is None  # behind the same load balancer: passed on
+    assert Host.served_elsewhere(host, "a") == ("c2", "http://c2:8080")
+    assert Host.served_elsewhere(host, "b") == ("vm", "http://vm:8080")
+    host.spec["gateway"] = True
+    assert Host.served_elsewhere(host, "a") is None
     with pytest.raises(pl.PlacementError, match="gateway is true or false"):
         pl.parse({"gateway": "yes", "groups": {"api": {}}}, [])
 
