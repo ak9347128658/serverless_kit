@@ -46,7 +46,7 @@ Names are what the model sees. "Backed by" is the existing code it calls.
 | Tool | Args | Backed by |
 |---|---|---|
 | `patch_config` | RFC 6902 JSON Patch on the raw `pskit.yml` structure | draft store + validation; rejects patches that write resolved `${...}` values |
-| `create_function` | name, handler, runtime?, memory?, timeout?, triggers[], env{}, resources[] | the same builder as the *Create function* wizard (writes the handler stub too) |
+| `create_function` | name, handler, memory?, timeout?, events[] (pskit.yml `events` entries), environment{}, description? | the same builder as the *Create function* wizard (writes the handler stub too) |
 | `add_trigger` / `remove_trigger` | function, trigger spec | wizard code |
 | `add_resource` | type, key, managed/external, driver, options | Resources form code |
 | `upsert_workflow` | name, states (ASL-like) | Workflows builder model |

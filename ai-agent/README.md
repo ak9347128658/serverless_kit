@@ -20,6 +20,9 @@ Status: **proposal** (written against pskit v2.10.0, 2026-10-31). Nothing here i
 | 7 | [07-evaluation.md](07-evaluation.md) | `pskit-bench`: how we measure answers, generation, fixes, agent tasks, safety; release gates |
 | 8 | [08-security.md](08-security.md) | Threat model: prompt injection, secrets, remote model endpoint, destructive actions |
 | 9 | [09-roadmap.md](09-roadmap.md) | Phases, milestones, team, cost, risks, open decisions |
+| 10 | [10-data-generation.md](10-data-generation.md) | Background: a teacher/judge pipeline with open-source Hugging Face models (record format, generator and judge prompts, cleaning) |
+| 11 | [11-knowledge-dataset-prompt.md](11-knowledge-dataset-prompt.md) | **Final, training stage 1:** prompt for your coding agent to build Hana's **knowledge** dataset: all CLI commands, studio pages and navigation, Terraform/Docker, code map, resources per cloud, on-prem servers/services/databases/replicas, clusters, scaling, load balancers, network map. Also Hana's system prompt |
+| 12 | [12-task-dataset-prompt.md](12-task-dataset-prompt.md) | **Final, training stage 2:** prompt for the **task** dataset (tools, plans, build, fix, debug, how-to steps in studio / terminal / code), and the two-stage training order |
 
 ## The decision in one paragraph
 
