@@ -4,60 +4,60 @@ pskit version 2.10.0. Built by `tools/build_dataset.py` (seed 2200, 5% validatio
 
 Providers: aws, azure, gcp, onprem only; left out 169 older records (alibaba 27, cloudflare 26, digitalocean 25, huawei 25, ibm 22, oracle 17, tencent 27).
 
-- train: 257
-- val: 14
+- train: 2985
+- val: 156
 
 ## Per category
 
 | category | count |
 |---|---|
-| a_qa | 72 |
-| b_build | 64 |
-| c_fix | 47 |
-| d_debug | 36 |
-| e_safety | 25 |
-| f_explain | 14 |
-| g_hana | 13 |
+| a_qa | 902 |
+| b_build | 684 |
+| c_fix | 707 |
+| d_debug | 386 |
+| e_safety | 205 |
+| f_explain | 154 |
+| g_hana | 103 |
 
 ## Per provider
 
 | provider | count |
 |---|---|
-| aws | 87 |
-| azure | 47 |
-| gcp | 59 |
-| onprem | 78 |
+| aws | 687 |
+| azure | 543 |
+| gcp | 605 |
+| onprem | 1306 |
 
 ## Per persona
 
 | persona | count |
 |---|---|
-| aws_migrator | 32 |
-| beginner | 61 |
-| detailed_spec | 52 |
-| informal_non_native | 47 |
-| pasted_error | 28 |
-| terse_expert | 51 |
+| aws_migrator | 309 |
+| beginner | 612 |
+| detailed_spec | 653 |
+| informal_non_native | 621 |
+| pasted_error | 411 |
+| terse_expert | 535 |
 
 ## Per mode
 
 | mode | count |
 |---|---|
-| ask | 201 |
-| auto | 70 |
+| ask | 2748 |
+| auto | 393 |
 
 ## Per validate result
 
 | result | count |
 |---|---|
-| fail | 2 |
-| n/a | 101 |
-| pass | 168 |
+| fail | 36 |
+| n/a | 1123 |
+| pass | 1982 |
 
 ## Per invoke result
 
 | result | count |
 |---|---|
-| fail | 2 |
-| n/a | 162 |
-| pass | 107 |
+| fail | 8 |
+| n/a | 2122 |
+| pass | 1011 |

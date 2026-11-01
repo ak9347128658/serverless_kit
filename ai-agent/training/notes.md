@@ -270,3 +270,27 @@ FIFO; queue.fifo is ignored`; azure timezone `Linux Consumption timers run in UT
 - handler function missing in an existing module: no warning at all; missing module is only a WARNING.
 - literal password in `environment`: validate passes. Category C "literal password" fixes must be framed as a
   security fix, not "validate fails".
+
+## Findings from the stage-2 agents (real runs, 2026-11-01)
+
+- Nested variables (`${self:custom.x.${opt:stage}}`) do not resolve; use `stages.<stage>` overrides.
+- `${env:X}` with X unset fails validate ("unresolved variables"); give a default `${env:X, not-set}` and say where to set it.
+- Env values are strings: `options.port: ${env:PORT, 8080}` fails ("options.port must be an integer"); use `${self:custom.port}`.
+- `resources.<r>.functions: [fn]` fails if fn doesn't exist yet; add the function first.
+- onprem: `deploy.server` / `cluster` / placement must name saved servers/clusters; seed `.pskit/onprem-servers.json`
+  and `.pskit/onprem-clusters.json` in the scratch project. Remote/Docker/cluster deploy with the default bind warns
+  "host binds to 127.0.0.1" (set `host: 0.0.0.0`). Two placement groups on one server need different ports.
+- Local invoke: `ctx.region` is "local", `ctx.memory_mb` and `ctx.remaining_time_ms()` are None, resource names are
+  unprefixed, repeated query params keep the last value, Set-Cookie is not shown, no CORS headers without Origin.
+  Function with schedule + http needs `type="http"`. Node.js handlers work (node installed).
+- `HttpError(status=500)` prints a traceback in invoke (checker fails): return `(body, 500)`.
+- Validate passes (not usable as category C): hour-25 cron, `0 minutes` rate, `/users/:id`, allow_credentials with `*`,
+  gcp topic.filter, `balancer: {name: x}` for a missing balancer. `extends:` to a missing file crashes (pskit bug).
+- Checker quirks: `>` in answer text trips the studio-path check; inline `KEY=value`, `token =`, `secret =`,
+  `password=`, `token_command:`, `password_file:` are flagged as secrets; bare `cors:` snippet is an unknown key.
+- D(): start/end inside a fenced block empties the excerpt; end strings must be one line.
+- Handlers must not make network calls during invoke_local.
+- onprem: `concurrency` is accepted but unused; `memory` only sets ctx.memory_mb; the Python host does not stop a
+  handler at `timeout` (it only sets a deadline). Don't claim onprem enforces any of these.
+- Checker: YAML snippets in answers must start at a top-level key (wrap `placement:` in `provider: options:`).
+- Local invoke: queue `attributes` can't be passed with `-d`; the {"body","attributes"} form arrives as the raw body.

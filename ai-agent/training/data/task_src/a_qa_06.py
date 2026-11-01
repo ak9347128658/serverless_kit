@@ -141,7 +141,7 @@ resources:
       token_env: HOST_B_TOKEN
 ```
 
-Then put the token where A's host runs, for example in the env file (`provider.options.env_file: .env.onprem`, line `HOST_B_TOKEN=...`), and deploy again:
+Then put the token where A's host runs, for example in the env file (`provider.options.env_file: .env.onprem`, line `HOST_B_TOKEN=<token>`), and deploy again:
 ```bash
 pskit deploy -s prod
 pskit logs -f --function worker
@@ -231,7 +231,7 @@ pskit logs -f --function ingest
       user="pskit resources send order-events -d '{\"message\": {\"id\": 3}, \"attributes\": {\"type\": \"Paid\"}}'\naudit got it, billing did not. billing has filter type: [paid]",
       steps=[S("search_docs", query="topic filter function does not receive message",
                docs=[D(OT, "troubleshooting"),
-                     D(OT, "built-in-topic", end="exact match on attributes, then JSON body fields")])],
+                     D(OT, "built-in-topic", start="  order-events:", end="exact match on attributes, then JSON body fields")])],
       final="""The filter is an **exact match**. Your attribute is `Paid`, and billing's filter allows only `paid`, so billing is skipped. `audit` has no filter, so it gets every message [docs/resource-guides/onprem/topic.md#troubleshooting].
 
 Send the value the filter expects:
@@ -389,8 +389,9 @@ def api(event, ctx):
     global _client
     if _client is None:
         c = resource("cache")
+        pw = ctx.env[c["password_env"]]
         _client = redis.Redis(host=c["host"], port=int(c["port"]), db=int(c["db"]),
-                              ssl=c.get("ssl") == "true", password=ctx.env[c["password_env"]])
+                              ssl=c.get("ssl") == "true", password=pw)
     return {"hits": _client.incr("hits")}
 ```
 Connection values arrive as strings, so `ssl` is `"true"`/`"false"` and the port needs `int(...)`.
@@ -412,7 +413,7 @@ Connection values arrive as strings, so `ssl` is `"true"`/`"false"` and the port
 ```bash
 ORDERS_DB_PASSWORD=... pskit invoke -f api
 ```
-- **Deployed host**: put `ORDERS_DB_PASSWORD=...` in the env file named by `provider.options.env_file` (for example `.env.onprem`), then deploy again. With `install: systemd` you can also set it in the unit's environment.
+- **Deployed host**: put `ORDERS_DB_PASSWORD=<password>` in the env file named by `provider.options.env_file` (for example `.env.onprem`), then deploy again. With `install: systemd` you can also set it in the unit's environment.
 
 Keep only the variable's **name** in `connection`, never the password [docs/resource-guides/onprem/database.md#5-test]."""),
 
