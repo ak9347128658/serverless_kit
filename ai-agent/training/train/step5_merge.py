@@ -6,6 +6,7 @@ Env (optional):
   MODEL_ID  default Qwen/Qwen2.5-1.5B-Instruct (must match steps 2-4)
   ADAPTER   default ai-agent/training/train/work/stage1/adapter_final
   MERGED    default <ADAPTER>/../../hana-stage1-merged
+  STAGE     2 for the stage-2 merge (MODEL_ID=<stage-1 merge folder>); labels the README. Default 1
 Checks that the merged model predicts the same tokens as base + adapter, then saves model, tokenizer and a
 README to MERGED (about 3 GB). Stage 2 trains a new LoRA on top of this folder.
 """
@@ -29,6 +30,7 @@ from step2_prepare import clean, load  # noqa: E402
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")
 ADAPTER = Path(os.environ.get("ADAPTER", str(HERE / "work" / "stage1" / "adapter_final")))
 MERGED = Path(os.environ.get("MERGED", str(ADAPTER.parent.parent / "hana-stage1-merged")))
+STAGE = os.environ.get("STAGE", "1")  # 2 = merging the stage-2 adapter (MODEL_ID = the stage-1 merge)
 QUESTIONS = ("who are you?", "which flag of pskit deploy picks the stage?")
 
 
@@ -77,15 +79,17 @@ def main():
     MERGED.mkdir(parents=True, exist_ok=True)
     merged.save_pretrained(str(MERGED), safe_serialization=True)
     tok.save_pretrained(str(MERGED))
-    info = {"base_model": MODEL_ID, "adapter": str(ADAPTER), "stage": "stage-1 knowledge (checkpoint K)",
+    info = {"base_model": MODEL_ID, "adapter": str(ADAPTER), "stage": "stage-1 knowledge (checkpoint K)" if STAGE == "1" else "stage-2 tasks (final Hana model)",
             "dtype": str(dtype).replace("torch.", "")}
     (MERGED / "hana_stage.json").write_bytes(json.dumps(info, indent=2).encode("utf-8"))
-    (MERGED / "README.md").write_bytes((
-        "# Hana, stage-1 checkpoint K\n\n"
-        f"{MODEL_ID} with the stage-1 knowledge LoRA merged in. Created by Asif Khan "
-        "(https://www.linkedin.com/in/asif-khan-31b7a8187/).\n\n"
-        "Stage 2 (tasks) trains a new LoRA on top of this folder; export to GGUF / Ollama comes after stage 2.\n"
-    ).encode("utf-8"))
+    if STAGE == "1":
+        head = f"# Hana, stage-1 checkpoint K\n\n{MODEL_ID} with the stage-1 knowledge LoRA merged in. "
+        tail = "Stage 2 (tasks) trains a new LoRA on top of this folder; export to GGUF / Ollama comes after stage 2.\n"
+    else:
+        head = f"# Hana, stage 2 (final)\n\n{MODEL_ID} (the stage-1 merge) with the stage-2 task LoRA merged in. "
+        tail = "Next: export to GGUF / Ollama.\n"
+    (MERGED / "README.md").write_bytes(
+        (head + "Created by Asif Khan (https://www.linkedin.com/in/asif-khan-31b7a8187/).\n\n" + tail).encode("utf-8"))
     size = sum(p.stat().st_size for p in MERGED.rglob("*") if p.is_file()) / 2**30
     print(f"\nsaved merged model to {MERGED} ({size:.1f} GiB)")
     print("files:", ", ".join(sorted(p.name for p in MERGED.iterdir())))
