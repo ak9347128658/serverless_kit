@@ -233,6 +233,12 @@ After writing each card, re-open its sources and check every sentence. Remove an
 =====================================================================
 3. KNOWLEDGE CONVERSATIONS (ai-agent/training/data/raw/k_*.jsonl)
 =====================================================================
+Write each conversation yourself from its card(s). Do NOT generate them with a template script that glues
+prefixes, questions and card sentences together: that passes the checks but teaches the model filler
+("On aws, stage dev, page X.", id markers, repeated sections). Scripts may only check and assemble files.
+The answer must answer the question asked; a section (In studio / terminal / code) appears only if that way
+exists, and "In code" is never the CLI command repeated.
+
 Format (one JSON object per line, OpenAI chat format):
 
 {"id": "...", "messages": [
@@ -425,6 +431,50 @@ delete failing conversations and list them.
 ```text
 For every conversation in data/raw/k_nav.jsonl, check each "A > B > C" path against the labels in
 dashboard-ui/src/studio (App.tsx NAV, views/*.tsx, components/*.tsx). Fix wrong labels, report what changed.
+```
+
+**Rewrite pass (run this if the conversations were filled in from templates by a script):**
+```text
+The stage-1 conversations in data/raw/k_*.jsonl were assembled by a template script
+(tools/generate_conversations.py). They pass check_knowledge.py but are not fit to train on. Keep
+knowledge/cards.jsonl, cli.json, facts.json and the tool scripts. Rewrite the conversations; do not patch them.
+
+1. Fix the cards first: rejoin paragraphs that were split mid-sentence by the markdown extraction (e.g.
+   "files appear in a\n\nbucket"), and finish or remove sentences cut off mid-way. Re-run check_knowledge.py.
+2. Write every conversation yourself, one by one, from its card(s). No string templates, no
+   random prefix + question gluing. For each conversation:
+   - The user message is one natural question a real user would ask, matching the persona. It mentions
+     provider/stage only when it matters, and it must make sense with them (on-prem questions use
+     provider=onprem; no "Provider tencent" for an on-prem service).
+   - The answer actually answers the question asked. "Where in studio" questions start with In studio.
+     "Which flag" questions name the flag. Command questions give the purpose, the command with real flags
+     and one real example.
+   - In studio / In the terminal / In code sections appear only when that way really exists. "In code"
+     means a pskit.yml snippet and/or handler code, never the CLI command again. Leave out a section that
+     would only repeat another one.
+   - Do not start answers by repeating the environment ("On aws, stage dev, page X."). Use the environment
+     only to choose what to say.
+   - No id, marker or counter text anywhere in the content (no "Marker k_...", no "The catalog id is" filler).
+   - Only placeholder secrets via ${env:NAME} or --password-env NAME; no literal passwords, even from docs.
+   - For search conversations, the tool result must contain the passage that the answer relies on (a real
+     paragraph of 300-1500 characters from the cited doc), and the answer must not state facts missing from
+     it or from the card.
+   - Vary length and shape: one-liners for simple facts, numbered steps for how-to, short tables for
+     comparisons.
+3. Add these checks to check_knowledge.py as errors and make them pass on the whole set:
+   - /Marker k_\w+/ or any record id in the content
+   - assistant replies starting with "On <provider>, stage"
+   - "In code" block identical to, or only pskit/export lines from, the "In terminal" block
+   - user asks about studio but the reply has no In studio section
+   - a paragraph over 80 characters that ends without punctuation (cut-off text)
+   - a literal password value (PASSWORD='...', --password ..., password: "...")
+   - k_onprem conversation with a cloud provider in the environment
+   - search conversation whose tool result is under 300 characters
+   - more than 3 conversations sharing the same first 40 characters of the reply, or the same first 5
+     words of the user message
+4. Delete tools/generate_conversations.py's template output, keep the counts per category from 11.2, then
+   rebuild with build_knowledge.py. Report: 20 random conversations printed in full (5 per category group),
+   and the check counts.
 ```
 
 **After a pskit release:**
