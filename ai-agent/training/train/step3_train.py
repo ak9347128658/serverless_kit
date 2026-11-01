@@ -35,6 +35,19 @@ def _skip_old_torchao():
 
 _skip_old_torchao()
 
+
+def require_drive(*paths):
+    """Stop if a path is under /content/drive but Drive is not mounted.
+
+    Without the mount, /content/drive/MyDrive/... is an ordinary folder on the Colab disk and is deleted with the
+    runtime (this lost the first stage-1 v2 model).
+    """
+    for path in paths:
+        if str(path).startswith("/content/drive") and not os.path.ismount("/content/drive"):
+            raise SystemExit(f"{path} is on Google Drive, but Drive is not mounted. Run first:\n"
+                             "  from google.colab import drive\n  drive.mount('/content/drive')")
+
+
 HERE = Path(__file__).resolve().parent
 TRAIN = HERE.parent
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")
@@ -58,6 +71,7 @@ class Speed(TrainerCallback):
 
 
 def main():
+    require_drive(OUT)
     bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8  # T4 (7.5) -> fp16
     dtype = torch.bfloat16 if bf16 else torch.float16
     tok = AutoTokenizer.from_pretrained(MODEL_ID)

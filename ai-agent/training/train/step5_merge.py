@@ -20,7 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from step3_train import _skip_old_torchao  # noqa: E402  (Colab's old torchao breaks peft's import check)
+from step3_train import _skip_old_torchao, require_drive  # noqa: E402  (Colab's old torchao breaks peft)
 
 _skip_old_torchao()
 from peft import PeftModel  # noqa: E402
@@ -51,6 +51,7 @@ def answer(model, tok, text):
 
 
 def main():
+    require_drive(ADAPTER, MERGED)
     tok = AutoTokenizer.from_pretrained(str(ADAPTER))
     bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
     dtype = torch.bfloat16 if bf16 else torch.float16

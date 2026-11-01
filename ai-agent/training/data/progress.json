@@ -1,0 +1,75 @@
+{
+  "stage": 2,
+  "updated": "2026-11-01",
+  "scope": [
+    "aws",
+    "azure",
+    "gcp",
+    "onprem"
+  ],
+  "targets_in_scope": {
+    "a_qa": 900,
+    "b_build": 700,
+    "c_fix": 700,
+    "d_debug": 350,
+    "e_safety": 200,
+    "f_explain": 150,
+    "g_hana": 100
+  },
+  "in_scope": {
+    "a_qa": 72,
+    "b_build": 64,
+    "c_fix": 47,
+    "d_debug": 36,
+    "e_safety": 25,
+    "f_explain": 14,
+    "g_hana": 13
+  },
+  "all": {
+    "a_qa": 100,
+    "b_build": 100,
+    "c_fix": 80,
+    "d_debug": 80,
+    "e_safety": 40,
+    "f_explain": 20,
+    "g_hana": 20
+  },
+  "batches": {
+    "a_qa": [
+      "a_qa_01.py",
+      "a_qa_02.py",
+      "a_qa_03.py",
+      "a_qa_04.py",
+      "a_qa_05.py"
+    ],
+    "b_build": [
+      "b_build_01.py",
+      "b_build_02.py",
+      "b_build_03.py",
+      "b_build_04.py",
+      "b_build_05.py"
+    ],
+    "c_fix": [
+      "c_fix_01.py",
+      "c_fix_02.py",
+      "c_fix_03.py",
+      "c_fix_04.py"
+    ],
+    "d_debug": [
+      "d_debug_01.py",
+      "d_debug_02.py",
+      "d_debug_03.py",
+      "d_debug_04.py"
+    ],
+    "e_safety": [
+      "e_safety_01.py",
+      "e_safety_02.py"
+    ],
+    "f_explain": [
+      "f_explain_01.py"
+    ],
+    "g_hana": [
+      "g_hana_01.py"
+    ]
+  }
+}
