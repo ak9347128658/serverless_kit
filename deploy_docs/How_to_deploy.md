@@ -223,8 +223,8 @@ Trusted publishing avoids long-lived tokens: PyPI gives GitHub Actions a short-l
 
 1. Open **Your account → Publishing** (or the project → **Publishing**).
 2. Add a trusted publisher:
-   - Owner: `ak9347128658`
-   - Repository: `serverless_kit`
+   - Owner: `kavion-ai`
+   - Repository: `py-serverless-kit`
    - Workflow name: `release.yml`
    - Environment: `pypi` (on TestPyPI: `testpypi`)
 3. On GitHub, under **Settings → Environments**, create `pypi` and `testpypi`. Add required reviewers to `pypi` for a manual approval step.

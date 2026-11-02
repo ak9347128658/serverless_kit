@@ -54,4 +54,4 @@ Hana, the studio assistant, searches all of these pages before she answers. Afte
 
 Runnable examples for every scenario live in [`../examples`](../examples/README.md).
 
-Maintainers: see [`../deploy_docs/PUBLISHING_TO_PYPI.md`](../deploy_docs/PUBLISHING_TO_PYPI.md) and [`../deploy_docs/CONTRIBUTING.md`](../deploy_docs/CONTRIBUTING.md).
+Contributors: see [`../deploy_docs/CONTRIBUTING.md`](../deploy_docs/CONTRIBUTING.md).

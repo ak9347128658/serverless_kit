@@ -22,7 +22,7 @@ import yaml
 from ..config.loader import DEFAULT_FILES, ConfigError, LoadedConfig, build_raw
 from ..config.schema import PROVIDERS, ServiceConfig, is_generated_handler
 
-HEADER = "# Edited with pskit studio. https://github.com/ak9347128658/serverless_kit\n"
+HEADER = "# Edited with pskit studio. https://github.com/kavion-ai/py-serverless-kit\n"
 BACKUP_DIR = Path(".pskit") / "studio" / "backups"
 KEEP_BACKUPS = 20
 _HANDLER_RE = re.compile(r"^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)[.:]([A-Za-z_]\w*)$")

@@ -19,6 +19,11 @@ All notable changes to this project are documented here. The format follows [Kee
   say when the docs don't cover it. The search now covers every `docs/` section (`studio/hana/docs.jsonl.gz`, rebuilt
   with `python scripts/build_hana_docs_index.py`; a test fails when it is out of date).
 
+### Changed
+- The repository moved to https://github.com/kavion-ai/py-serverless-kit: project URLs, README links, the security
+  advisory link, the `pskit.yml` header studio writes and the PyPI trusted-publisher settings now use it.
+- The README and the docs index no longer link the PyPI release guides; they stay in `deploy_docs/`.
+
 ## [2.11.0] - 2026-11-02
 
 ### Added
@@ -953,7 +958,7 @@ No runtime behavior changes: functions deployed with 0.1.1 don't need to be rede
 
 ### Changed
 - Author and maintainer set to Asif Khan @ Kavion.ai (`py_serverless_kit.__author__`, package metadata, LICENSE).
-- Project URLs (homepage, docs, issues, changelog) now point to https://github.com/ak9347128658/serverless_kit.
+- Project URLs (homepage, docs, issues, changelog) now point to https://github.com/kavion-ai/py-serverless-kit.
 - README links are absolute so they work on the PyPI project page; added CI/PyPI/license badges.
 - `scripts/validate_all_providers.py` explains that Terraform is optional instead of printing a traceback when it isn't installed.
 

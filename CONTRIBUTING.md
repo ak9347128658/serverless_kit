@@ -2,8 +2,6 @@
 
 The full contributor guide lives in [deploy_docs/CONTRIBUTING.md](deploy_docs/CONTRIBUTING.md). It covers the project layout, dev setup, how to add providers and options, and how to verify Terraform.
 
-Maintainers releasing to PyPI: see [deploy_docs/PUBLISHING_TO_PYPI.md](deploy_docs/PUBLISHING_TO_PYPI.md).
-
 Quick start:
 
 ```bash
