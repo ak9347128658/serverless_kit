@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+- **Structured end-to-end documentation** (about 125 new pages, every task both in studio and as terminal commands):
+  `docs/guide/` (concepts and one full application built from the terminal, in studio, and on premises with a
+  cluster, load balancer and replicated database), `docs/studio-guide/` (every studio page, button and dialog),
+  `docs/functions/`, `docs/triggers/` (one page per trigger), `docs/deployment/` (deployment types, stages, deploy /
+  remove, workflows, logs, monitoring, settings), `docs/onprem/` (servers, software, every catalog service, resources,
+  cloud resources on premises, the AWS-compatible S3 and Secrets Manager servers in Python and Node.js, Swarm / k3s /
+  Nomad scaling, load balancers, database replication, network map, firewall, placement) and `docs/providers/<cloud>/`.
+- **Hana answers from the docs**: before the model answers, studio runs `search_docs` with the message and passes the
+  3 best sections; a new system-message line (also in the training data) tells her to answer from them, cite them and
+  say when the docs don't cover it. The search now covers every `docs/` section (`studio/hana/docs.jsonl.gz`, rebuilt
+  with `python scripts/build_hana_docs_index.py`; a test fails when it is out of date).
+
 ## [2.11.0] - 2026-11-02
 
 ### Added

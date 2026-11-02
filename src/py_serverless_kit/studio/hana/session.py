@@ -26,11 +26,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..project import StudioError
 from . import ailog
+from .knowledge import search, words
 from .model import Model, ModelError
 from .prompt import MODES, PAGES, PROVIDERS, TOOLS, system_message
 from .tools import CHANGE_TOOLS, ProjectTools
 
 MAX_STEPS = 14
+PRE_SEARCH_CARDS = 3  # docs sections studio puts in front of the model before it answers (~3,300 characters); 0: off
+_SHORT_QUERY = 3  # a reply this short ("yes", "do it", "step01, step02") is searched with the previous question
 MAX_TURN_EVENTS = 2000
 MAX_SESSIONS = 30
 # The image runs with an 8,192-token context: the tool schemas take ~1,100 tokens and an answer up to 900.
@@ -44,6 +47,16 @@ class Stopped(Exception):
 
 def _size(messages: List[Dict[str, Any]]) -> int:
     return len(json.dumps(messages, ensure_ascii=False))
+
+
+def docs_query(text: str, history: List[Dict[str, Any]]) -> str:
+    """What studio searches the docs for before the model answers: the user's message; a short reply is joined to
+    the user's previous message so "yes, do it" still finds the topic. Empty when there is nothing to search."""
+    query = " ".join(text.split())[:300]
+    if len(words(query)) < _SHORT_QUERY:
+        previous = next((str(m.get("content") or "") for m in reversed(history) if m.get("role") == "user"), "")
+        query = " ".join((" ".join(previous.split())[:200] + " " + query).split())
+    return query if words(query) else ""
 
 
 def fit(messages: List[Dict[str, Any]], limit: int = CONTEXT_CHARS, keep_from: int = 1) -> List[Dict[str, Any]]:
@@ -411,6 +424,11 @@ class Hana:
                 return
             ailog.log(tid, "model", "the model answers first" + (
                 "; studio has an action ready for after it" if action is not None else ""), None, "yellow")
+            query = docs_query(turn.text, session.messages[:start])
+            if PRE_SEARCH_CARDS and not ran and query:  # docs first: the model answers from them (DOCS_LINE)
+                ailog.log(tid, "studio", "searches the docs before the model answers", query, "magenta")
+                self._tool_step(turn, "search_docs", {"query": query}, "call_00",
+                                result=search()(query, k=PRE_SEARCH_CARDS)[0])
             for step in range(MAX_STEPS):
                 if turn.stopped:
                     raise Stopped()
@@ -505,8 +523,10 @@ class Hana:
         except Exception:  # noqa: BLE001 - a broken servers file must not break the chat
             return []
 
-    def _tool_step(self, turn: Turn, name: str, args: Dict[str, Any], cid: str, content: str = "") -> str:
-        """One tool call: recorded for the model and the chat, run (approvals included), its result recorded."""
+    def _tool_step(self, turn: Turn, name: str, args: Dict[str, Any], cid: str, content: str = "",
+                   result: Optional[str] = None) -> str:
+        """One tool call: recorded for the model and the chat, run (approvals included), its result recorded.
+        With ``result`` studio already has the answer (its own docs search) and nothing is run."""
         session = turn.session
         session.messages.append({"role": "assistant", "content": content, "tool_calls": [
             {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]})
@@ -515,7 +535,8 @@ class Hana:
         turn.emit("tool_call", name=name, args=args, text=content)
         ailog.log(turn.id, "tool call", name, args, "cyan")
         timer = ailog.Timer()
-        result = self._execute(turn, name, args)
+        if result is None:
+            result = self._execute(turn, name, args)
         ailog.log(turn.id, "tool result", f"{name} · {timer.ms()} ms · {len(result)} characters", result, "cyan")
         session.messages.append({"role": "tool", "tool_call_id": cid, "name": name, "content": result})
         session.display.append({"role": "tool", "name": name, "args": args, "result": result[:4000]})

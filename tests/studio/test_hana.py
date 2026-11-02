@@ -12,10 +12,11 @@ from typing import Any, Dict, List
 
 import pytest
 
-from py_serverless_kit.studio.hana import prompt
+from py_serverless_kit.studio.hana import docs_index, prompt
+from py_serverless_kit.studio.hana import session as hana_session
 from py_serverless_kit.studio.hana.knowledge import search
 from py_serverless_kit.studio.hana.model import parse_message
-from py_serverless_kit.studio.hana.session import Hana, fit
+from py_serverless_kit.studio.hana.session import Hana, docs_query, fit
 from py_serverless_kit.studio.hana.tools import ProjectTools, redact, set_dotted
 from py_serverless_kit.studio.server import make_server
 
@@ -35,6 +36,14 @@ functions:
     events:
       - http: GET /hello
 """
+
+
+@pytest.fixture(autouse=True)
+def _no_docs_first(request, monkeypatch):
+    """The chat-loop tests script exact steps; the docs search studio runs first is tested on its own
+    (tests named ``test_docs_first_*``)."""
+    if not request.node.name.startswith("test_docs_first"):
+        monkeypatch.setattr(hana_session, "PRE_SEARCH_CARDS", 0)
 
 
 class FakeModel:
@@ -89,6 +98,8 @@ def test_prompt_is_what_hana_was_trained_with():
     assert prompt.ENV_LINE == task_common.ENV_LINE
     assert prompt.TOOLS == task_common.TOOLS
     assert prompt.TERMINAL_LINE == task_common.TERMINAL_LINE
+    assert prompt.DOCS_LINE == task_common.DOCS_LINE
+    assert prompt.system_message("aws", "dev", "ask", "Functions", servers=[]).split("\n")[-2] == prompt.DOCS_LINE
     assert prompt.system_message("onprem", "dev", "ask", "Logs", servers=["app-1"]) == task_common.system_message(
         "onprem", "dev", "ask", "Logs", servers=["app-1"])
     assert prompt.system_message("onprem", "dev", "ask", "Logs").endswith(
@@ -99,6 +110,37 @@ def test_search_docs_returns_cited_excerpts():
     text, ids = search()("schedule trigger cron")
     assert len(ids) == 2
     assert text.startswith("[") and "]\n" in text
+
+
+def test_docs_index_is_up_to_date():
+    if not (REPO / "docs").is_dir():
+        pytest.skip("docs not in this checkout")
+    assert docs_index.INDEX.read_bytes() == docs_index.encode(docs_index.build(REPO)), (
+        "docs changed: run python scripts/build_hana_docs_index.py")
+
+
+def test_docs_index_cards_cite_sections_and_carry_search_terms():
+    text = "# Load balancers\n\nSearch terms: LB, nginx, round robin\n\nIntro.\n\n## Create a load balancer\n\n" \
+           "Steps.\n\n```bash\n## not a heading\n```\n\n## See also\n\n- x\n"
+    cards = docs_index.page_cards("docs/onprem/lb.md", text)
+    assert [c["sources"][0] for c in cards] == ["docs/onprem/lb.md", "docs/onprem/lb.md#create-a-load-balancer"]
+    assert cards[1]["text"].startswith("Load balancers > Create a load balancer\n\n")
+    assert "## not a heading" in cards[1]["text"]  # headings inside code fences do not split
+    assert all(c["tags"] == ["LB", "nginx", "round robin"] for c in cards)
+    assert docs_index.encode(cards) == docs_index.encode(cards)
+
+
+def test_search_finds_the_new_docs():
+    _, ids = search()("shared load balancer for several clusters", k=3)
+    assert any(i.startswith("docs/") for i in ids)
+
+
+def test_docs_query_joins_a_short_reply_to_the_previous_question():
+    history = [{"role": "user", "content": "how do I scale postgres with read replicas?"},
+               {"role": "assistant", "content": "..."}]
+    assert docs_query("yes", history) == "how do I scale postgres with read replicas? yes"
+    assert docs_query("how do I add a cron schedule", history) == "how do I add a cron schedule"
+    assert docs_query("?!", []) == ""
 
 
 # --------------------------------------------------------------------------- tools
@@ -175,6 +217,28 @@ def test_answer_without_tools(tmp_path):
                                                                                      servers=[])
     assert system["content"].endswith("Never say you cannot run commands. Saved servers: none.")
     assert model.sent[0][1] == {"role": "user", "content": "is redis supported on azure?"}
+
+
+def test_docs_first_studio_searches_before_the_model_answers(tmp_path):
+    model = FakeModel([("text", "Use a shared load balancer [docs/onprem/load-balancers.md#x].")])
+    snap = run_turn(Hana(tmp_path, lambda: model), "how do I put one load balancer in front of two clusters?")
+    assert snap["status"] == "done" and types_of(snap) == ["user", "tool_call", "tool_result", "answer", "end"]
+    call = next(e for e in snap["events"] if e["type"] == "tool_call")
+    assert call["name"] == "search_docs" and call["args"] == {
+        "query": "how do I put one load balancer in front of two clusters?"}
+    sent = model.sent[0]  # the model sees the search call and its excerpts before its first answer
+    assert sent[2]["tool_calls"][0]["function"]["name"] == "search_docs"
+    assert sent[3]["role"] == "tool" and sent[3]["content"].startswith("[")
+    assert sent[3]["content"].count("\n\n[") == hana_session.PRE_SEARCH_CARDS - 1
+
+
+def test_docs_first_short_reply_searches_with_the_previous_question(tmp_path):
+    model = FakeModel([("text", "first"), ("text", "second")])
+    hana = Hana(tmp_path, lambda: model)
+    first = run_turn(hana, "how do I scale postgres with read replicas?")
+    second = run_turn(hana, "ok", sid=first["session_id"])
+    call = next(e for e in second["events"] if e["type"] == "tool_call")
+    assert call["args"] == {"query": "how do I scale postgres with read replicas? ok"}
 
 
 def test_plan_approved_then_changes_run(make_project, tmp_path):

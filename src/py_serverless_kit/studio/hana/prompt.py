@@ -180,10 +180,18 @@ TERMINAL_LINE = ("Terminal: you can run shell commands yourself with run_command
                  "server: server=<its name>) and answer from its output. Never say you cannot run commands. "
                  "Saved servers: {servers}.")
 
+# Docs first, said before the terminal line. Added after stage 2: studio runs search_docs with the user's message
+# before every model answer (session.py), and the next training run teaches the model to answer from that result.
+DOCS_LINE = ("Docs: before you answer, studio runs search_docs with the user's message; its excerpts are the first "
+             "tool result of this turn. Answer from those excerpts and cite them as [path#anchor]. If they do not "
+             "cover the question, call search_docs again with other words. If the docs still do not say it, tell the "
+             "user you did not find it in the docs instead of guessing.")
+
 
 def system_message(provider: str, stage: str, mode: str, page: str, servers: Optional[List[str]] = None) -> str:
-    """The system prompt and the Environment line; with ``servers`` (studio always passes them) the terminal line."""
+    """The system prompt and the Environment line; with ``servers`` (studio always passes them) the docs and the
+    terminal lines (the terminal line last: a small model follows the end of the system message best)."""
     text = SYSTEM_PROMPT + "\n" + ENV_LINE.format(provider=provider, stage=stage, mode=mode, page=page)
     if servers is not None:
-        text += "\n" + TERMINAL_LINE.format(servers=", ".join(servers) or "none")
+        text += "\n" + DOCS_LINE + "\n" + TERMINAL_LINE.format(servers=", ".join(servers) or "none")
     return text

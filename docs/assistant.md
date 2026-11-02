@@ -45,6 +45,20 @@ two never make two different changes. A short answer to a question studio just a
 remove?" → "step01, step02") is read together with that question. When the model says it changed something
 ("Done", "I added ...") but no file was written in that answer, studio adds a note saying nothing changed.
 
+## Docs first: studio searches the docs before Hana answers
+
+Before Hana's model answers a message, studio searches the pskit docs with that message and hands the model the 3
+best matching sections (a `search_docs` step you see in the chat). The system message tells Hana to answer from those
+excerpts, cite them as `[docs/path.md#section]`, search again with other words when they don't cover the question, and
+say she did not find it in the docs instead of guessing. A short reply such as "yes" or "do it" is searched together
+with your previous message. Studio skips the search when it already ran a command for you in that turn.
+
+The search covers the knowledge cards Hana was trained on plus every section of every page under `docs/` (the
+guides, studio guide, functions, triggers, deployment, on-prem and provider pages), so new docs are found before the
+model is retrained. Maintainers: the docs index is `src/py_serverless_kit/studio/hana/docs.jsonl.gz`; rebuild it
+with `python scripts/build_hana_docs_index.py` after changing `docs/` (`--check` only checks, and a test fails when
+it is out of date).
+
 ## Creating functions: own app or an existing one, and names already taken
 
 "create step01 step02 step03 functions" opens a **Create functions** card, and Hana asks what you didn't say:
@@ -156,7 +170,7 @@ Hana's tools:
 
 | Tool | What it does |
 |---|---|
-| `search_docs` | searches the pskit docs, CLI and studio pages shipped with pskit |
+| `search_docs` | searches the pskit docs, CLI and studio pages shipped with pskit (studio also runs it once before every answer) |
 | `get_project`, `read_file` | reads `pskit.yml` (literal secrets are hidden) and project files (up to 200 lines) |
 | `get_validation`, `validate` | `pskit validate` for the current provider and stage |
 | `propose_plan`, `ask_user` | the Plan and Hana asks cards |

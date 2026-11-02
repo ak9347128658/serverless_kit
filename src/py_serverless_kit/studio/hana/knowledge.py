@@ -16,6 +16,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import docs_index
+
 INDEX = Path(__file__).with_name("knowledge.jsonl.gz")
 BUDGET = 1100  # excerpt characters per card, as in training
 _WORD = re.compile(r"[a-z0-9_][a-z0-9_.\-]*")
@@ -65,7 +67,8 @@ _search: Optional[Search] = None
 
 
 def search() -> Search:
-    """The shared index (loaded on first use, about 0.5 s)."""
+    """The shared index (loaded on first use, about 0.5 s): the trained knowledge cards plus every docs section
+    (``docs.jsonl.gz``, see ``docs_index.py``), so new docs are found before the model is retrained."""
     global _search
     with _lock:
         if _search is None:
@@ -73,5 +76,6 @@ def search() -> Search:
             if INDEX.is_file():
                 with gzip.open(INDEX, "rt", encoding="utf-8") as handle:
                     cards = [json.loads(line) for line in handle if line.strip()]
+            cards.extend(docs_index.load())
             _search = Search(cards)
         return _search

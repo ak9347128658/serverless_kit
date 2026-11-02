@@ -2,6 +2,26 @@
 
 Write a Python function once, describe its triggers in `pskit.yml`, and deploy it to any of 10 clouds or to an on-premises host with Terraform. Moving to another target means changing `provider.name`. The handler code stays the same.
 
+## Start here: guides by topic
+
+Every task in these folders is explained twice: click by click **in studio** and as **terminal** commands.
+
+| Folder | What it covers |
+|---|---|
+| [guide/](guide/README.md) | Learning path, [concepts](guide/concepts.md), and one full application built end to end: [from the terminal](guide/end-to-end-cli.md), [in studio](guide/end-to-end-studio.md), [on premises with a cluster, load balancer and replicated database](guide/end-to-end-onprem-cluster.md) |
+| [studio-guide/](studio-guide/README.md) | `pskit studio` page by page: navigation, every button and field, the function wizard, trigger forms, servers, services, cluster, load balancers, network map, deploy, test, logs, Hana |
+| [functions/](functions/README.md) | Create a function (one file or its own app folder), configure it, call and test it |
+| [triggers/](triggers/README.md) | One page per trigger: [http](triggers/http.md), [schedule](triggers/schedule.md), [queue](triggers/queue.md), [storage](triggers/storage.md), [topic](triggers/topic.md), [smtp](triggers/smtp.md); support per provider |
+| [deployment/](deployment/README.md) | Every deployment type, [stages](deployment/stages.md), [deploy / info / remove](deployment/deploy-remove-info.md), [workflows](deployment/workflows.md), [logs](deployment/logs.md), [monitoring and dashboard](deployment/monitoring-and-dashboard.md), [settings and variables](deployment/settings-and-config.md) |
+| [onprem/](onprem/README.md) | [Servers](onprem/servers.md), [software and terminal](onprem/terminal-and-software.md), [every on-prem service](onprem/services/README.md), [resources](onprem/resources.md), [resources from other clouds](onprem/cloud-resources.md), [AWS-compatible S3 and Secrets Manager (Python and Node.js)](onprem/aws-compatible/README.md) |
+| [onprem/scaling/](onprem/scaling/README.md) | [Docker Swarm](onprem/scaling/docker-swarm.md), [Kubernetes (k3s)](onprem/scaling/kubernetes-k3s.md), [Nomad](onprem/scaling/nomad.md), [replicas and alerts](onprem/scaling/replicas-and-alerts.md), [load balancers](onprem/load-balancers.md), [database scaling](onprem/database-scaling.md), [network map](onprem/network-map.md), [firewall](onprem/firewall.md), [function groups on several servers](onprem/placement.md) |
+| [providers/](providers/README.md) | One folder per provider: [AWS](providers/aws/README.md), [Azure](providers/azure/README.md), [GCP](providers/gcp/README.md), [Alibaba](providers/alibaba/README.md), [Tencent](providers/tencent/README.md), [Huawei](providers/huawei/README.md), [Oracle](providers/oracle/README.md), [IBM](providers/ibm/README.md), [DigitalOcean](providers/digitalocean/README.md), [Cloudflare](providers/cloudflare/README.md), [on premises](providers/onprem/README.md) |
+
+Hana, the studio assistant, searches all of these pages before she answers. After changing anything under `docs/`, run
+`python scripts/build_hana_docs_index.py` (a test fails when the index is out of date).
+
+## Reference pages
+
 | Page | What it covers |
 |---|---|
 | [Scenarios](scenarios.md) | Step-by-step guides by use case: HTTP API, queues, existing resources, Redis/MinIO on premises, databases, workflows, schedules, stages, logs, testing |
