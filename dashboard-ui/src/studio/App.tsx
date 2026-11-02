@@ -3,6 +3,8 @@ import { Drawer, Modal } from "../components/Drawer";
 import { ErrorBanner, Spinner } from "../components/Feedback";
 import { api, ApiError, errorMessage, MOCK } from "./api";
 import { ConfirmProvider, ToastProvider, useToast } from "./components/Feedback";
+import { HanaAvatar } from "./hana/HanaCards";
+import { HanaPanel } from "./hana/HanaPanel";
 import { IssueList } from "./components/Misc";
 import { href, navigate, routeForWhere, useRoute, type View } from "./route";
 import { flushHandlerStubs } from "./stubs";
@@ -159,6 +161,21 @@ function Shell() {
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [hanaOpen, setHanaOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem("pskit-hana-open") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("pskit-hana-open", hanaOpen ? "1" : "0");
+    } catch {
+      /* convenience only */
+    }
+  }, [hanaOpen]);
 
   const doSave = useCallback(
     async (force = false) => {
@@ -179,7 +196,10 @@ function Shell() {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       const key = e.key.toLowerCase();
-      if (key === "s" && route.view !== "code") {
+      if (key === "i" && !e.shiftKey && !e.altKey && !(e.target instanceof HTMLElement && e.target.closest(".cm-editor"))) {
+        e.preventDefault();
+        setHanaOpen((o) => !o);
+      } else if (key === "s" && route.view !== "code") {
         e.preventDefault();
         if (dirty && !state.saving) void doSave();
       } else if (key === "z" && !isEditable(e.target)) {
@@ -331,6 +351,18 @@ function Shell() {
           <ThemeToggle />
         </div>
       </header>
+      {hanaOpen && <HanaPanel onClose={() => setHanaOpen(false)} />}
+      <button
+        type="button"
+        className={`hana-fab${hanaOpen ? " open" : ""}`}
+        onClick={() => setHanaOpen((o) => !o)}
+        title={hanaOpen ? "Close Hana (Ctrl+I)" : "Ask Hana, the AI assistant (Ctrl+I)"}
+        aria-label={hanaOpen ? "Close Hana" : "Open Hana, the AI assistant"}
+        aria-expanded={hanaOpen}
+      >
+        {hanaOpen ? <span className="hana-fab-close">✕</span> : <HanaAvatar size={56} />}
+        {!hanaOpen && <span className="hana-fab-label">Ask Hana</span>}
+      </button>
       {settingsOpen && (
         <Drawer open title="Import / export settings and config" onClose={() => setSettingsOpen(false)}>
           <div className="settings-drawer">

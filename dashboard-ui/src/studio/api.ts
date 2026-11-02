@@ -42,6 +42,11 @@ import type {
   DevEnvStatus,
   GuideIndex,
   GuidePage,
+  HanaEnv,
+  HanaRuntime,
+  HanaSessionDetail,
+  HanaState,
+  HanaTurn,
   OnPremService,
   OnPremServicesState,
   ResourceCheck,
@@ -342,6 +347,65 @@ export const api = {
   guides: () => request<GuideIndex>("GET", "/api/resource-guides"),
   guide: (cloud: string, page: string) =>
     request<GuidePage>("GET", `/api/resource-guides/${encodeURIComponent(cloud)}/${encodeURIComponent(page)}`),
+  hana: () => request<HanaState>("GET", "/api/hana"),
+  hanaInstall: (target: "local" | "server" | "huggingface", opts: { server?: string; image?: string; file?: string } = {}) =>
+    request<{ job_id: string }>("POST", "/api/hana/install", { target, ...opts }),
+  hanaRemoveItem: (kind: string, name: string, deleteCode: boolean) =>
+    request<{ removed: string; changed: string[]; code: string }>("POST", "/api/hana/remove-item", { kind, name, delete_code: deleteCode }),
+  hanaDeleteAll: () => request<{ deleted: number }>("DELETE", "/api/hana/sessions"),
+  /** `placement`: "separate" (each function its own app with its own requirements.txt) or "module" (into `module`).
+   * `existing`: for names already in pskit.yml, "update" | "rename" | "skip". */
+  hanaFunctions: (
+    names: string[],
+    trigger: string,
+    schedule: string,
+    opts: { placement: "separate" | "module"; module?: string; existing?: Record<string, string> },
+  ) =>
+    request<{
+      created: string[];
+      updated: string[];
+      renamed: Record<string, string>;
+      skipped: string[];
+      code: { function: string; handler: string; file: string; written: boolean }[];
+      moved: { function: string; from: string; to: string }[];
+      move_errors: string[];
+      deleted: string[];
+      validate: string;
+    }>("POST", "/api/hana/functions", { names, trigger, schedule, ...opts }),
+  /** Existing functions into their own apps (functions/<name>/ with its own requirements.txt). */
+  hanaSeparate: (functions: string[]) =>
+    request<{ moved: { function: string; from: string; to: string; requirements: string[] }[]; already: string[]; errors: string[]; deleted: string[]; validate: string }>(
+      "POST",
+      "/api/hana/separate",
+      { functions },
+    ),
+  hanaResources: (items: JsonObject[]) =>
+    request<{ created: string[]; replaced?: string[]; validate: string }>("POST", "/api/hana/resources", { items }),
+  hanaCode: (functions: string[]) =>
+    request<{ written: { function: string; handler: string; file: string; written: boolean }[] }>("POST", "/api/hana/code", { functions }),
+  hanaWorkflow: (name: string, steps: string[], description = "", waitSeconds = 0, createFunctions: string[] = []) =>
+    request<{ created: string; states: string[]; functions: string[]; stubs: string[]; validate: string }>("POST", "/api/hana/workflow", {
+      name,
+      steps,
+      description,
+      wait_seconds: waitSeconds,
+      create_functions: createFunctions,
+    }),
+  hanaEndpoint: (url: string, apiKeyEnv?: string) =>
+    request<HanaRuntime>("POST", "/api/hana/endpoint", { url, api_key_env: apiKeyEnv }),
+  hanaStop: (removeData = false) => request<HanaRuntime & { removed?: string[] }>("POST", "/api/hana/stop", { remove_data: removeData }),
+  hanaEdit: (session: string, index: number, text: string, env: HanaEnv) =>
+    request<{ session_id: string; turn_id: string }>("POST", `/api/hana/sessions/${encodeURIComponent(session)}/edit`, { index, text, env }),
+  hanaSend: (session: string | null, text: string, env: HanaEnv) =>
+    request<{ session_id: string; turn_id: string }>("POST", "/api/hana/messages", { session, text, env }),
+  hanaSession: (id: string) => request<HanaSessionDetail>("GET", `/api/hana/sessions/${encodeURIComponent(id)}`),
+  hanaNote: (id: string, text: string) => request<{ ok: boolean }>("POST", `/api/hana/sessions/${encodeURIComponent(id)}/note`, { text }),
+  hanaDeleteSession: (id: string) => request<{ deleted: string }>("DELETE", `/api/hana/sessions/${encodeURIComponent(id)}`),
+  hanaTurn: (id: string, since: number) =>
+    request<HanaTurn>("GET", `/api/hana/turns/${encodeURIComponent(id)}`, undefined, { query: { since } }),
+  hanaAnswer: (turn: string, pendingId: string, decision: "approve" | "reject" | "answer", text = "") =>
+    request<{ ok: boolean }>("POST", `/api/hana/turns/${encodeURIComponent(turn)}/answer`, { pending_id: pendingId, decision, text }),
+  hanaStopTurn: (turn: string) => request<{ ok: boolean }>("POST", `/api/hana/turns/${encodeURIComponent(turn)}/stop`, {}),
 };
 
 export function errorMessage(exc: unknown): string {

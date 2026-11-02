@@ -350,6 +350,7 @@ on-prem drivers, provider options, code) and running validate / deploy / invoke.
 | `--port` | `8770` | port |
 | `--open` | | open in the browser |
 | `--vscode-image IMAGE` | `codercom/code-server:4.96.4` | image for Full VS Code (also `PSKIT_STUDIO_VSCODE_IMAGE`) |
+| `--ailogs[=true]` | off | print every step of Hana's chats in this terminal: messages, model requests and answers, tool calls and results, cards (also `PSKIT_HANA_AILOGS=1`; see [assistant.md](assistant.md)) |
 
 It prints `http://127.0.0.1:8770/#token=...`. The token is required on every API call, so open that exact URL.
 See [studio.md](studio.md).

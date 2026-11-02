@@ -725,3 +725,208 @@ details.advanced > summary { cursor: pointer; font-weight: 600; color: var(--mut
 .usage-table td { vertical-align: top; }
 .net-conn { list-style: none; margin: 0; padding: 0; }
 .net-conn li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+
+/* ---------------------------------------------------------------- Hana, the AI assistant */
+.hana-fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 60;
+  width: 62px;
+  height: 62px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  box-shadow: 0 10px 28px rgba(109, 93, 252, 0.45), 0 2px 6px rgba(16, 24, 40, 0.2);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  display: grid;
+  place-items: center;
+}
+.hana-fab:hover { transform: translateY(-2px) scale(1.05); box-shadow: 0 14px 34px rgba(163, 75, 240, 0.5), 0 2px 6px rgba(16, 24, 40, 0.2); }
+.hana-fab:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.hana-fab::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid rgba(163, 75, 240, 0.45);
+  animation: hana-pulse 2.6s ease-out infinite;
+}
+.hana-fab.open { background: linear-gradient(135deg, #6d5dfc, #a34bf0 55%, #f0569b); }
+.hana-fab.open::before { display: none; }
+.hana-fab-close { color: #fff; font-size: 22px; font-weight: 600; }
+.hana-fab-label {
+  position: absolute;
+  right: 72px;
+  white-space: nowrap;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translateX(6px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+.hana-fab:hover .hana-fab-label, .hana-fab:focus-visible .hana-fab-label { opacity: 1; transform: none; }
+@keyframes hana-pulse {
+  0% { transform: scale(0.92); opacity: 0.9; }
+  70%, 100% { transform: scale(1.25); opacity: 0; }
+}
+.hana-avatar { flex: none; display: block; }
+.hana-avatar .hana-antenna { transform-origin: 32px 8px; }
+.hana-avatar.thinking .hana-antenna { animation: hana-blink 0.9s ease-in-out infinite; }
+.hana-avatar .hana-eyes { transform-origin: 32px 29px; animation: hana-eyes 5s infinite; }
+@keyframes hana-blink { 50% { fill: #ffffff; transform: scale(1.3); } }
+@keyframes hana-eyes { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.12); } }
+@media (prefers-reduced-motion: reduce) {
+  .hana-fab::before, .hana-avatar .hana-eyes, .hana-avatar.thinking .hana-antenna { animation: none; }
+}
+
+.hana-panel {
+  position: fixed;
+  right: 22px;
+  bottom: 96px;
+  z-index: 59;
+  width: min(430px, calc(100vw - 24px));
+  height: min(660px, calc(100vh - 120px));
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: hana-in 0.18s ease-out;
+  transform-origin: bottom right;
+}
+@keyframes hana-in { from { opacity: 0; transform: translateY(10px) scale(0.97); } to { opacity: 1; transform: none; } }
+.hana-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 10px 12px;
+  color: #fff;
+  background: linear-gradient(120deg, #5b4ef0, #9445e8 55%, #e0508f);
+}
+.hana-head b { margin-right: 6px; font-size: 15px; }
+.hana-head .muted { color: rgba(255, 255, 255, 0.85); }
+.hana-head .btn-ghost { color: #fff; }
+.hana-head .select { background: rgba(255, 255, 255, 0.95); color: #171c26; }
+.hana-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #c9c9d6; vertical-align: middle; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5); }
+.hana-dot.ok { background: #5df08f; }
+.hana-dot.err { background: #ffb3b3; }
+.hana-sessions { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.hana-list { flex: 1; overflow: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+.hana-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; padding-top: 8px; }
+.hana-empty p { margin: 4px 0 6px; }
+.hana-suggest { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; justify-content: center; }
+.hana-bot-row { display: flex; gap: 8px; align-items: flex-start; }
+.hana-msg { max-width: 92%; padding: 8px 12px; border-radius: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.hana-msg > :first-child { margin-top: 0; }
+.hana-msg > :last-child { margin-bottom: 0; }
+.hana-user { align-self: flex-end; background: linear-gradient(135deg, #5b4ef0, #8a46e6); color: #fff; white-space: pre-wrap; border-bottom-right-radius: 4px; }
+.hana-bot { background: var(--panel-2); border: 1px solid var(--line); border-top-left-radius: 4px; min-width: 0; }
+.hana-bot .md-code, .hana-pre { max-height: 260px; overflow: auto; }
+.hana-pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hana-log { max-height: 200px; }
+.hana-tool { font-size: 13px; color: var(--muted); padding-left: 34px; }
+.hana-tool summary { cursor: pointer; list-style: none; }
+.hana-tool summary::-webkit-details-marker { display: none; }
+.hana-tool .hana-tool-icon { color: var(--ok); display: inline-block; width: 16px; }
+.hana-tool.bad .hana-tool-icon { color: var(--warn); }
+.hana-card { border: 1px solid var(--line-strong); border-left: 4px solid #8a46e6; border-radius: var(--radius-sm); padding: 8px 10px; margin-left: 34px; background: var(--panel); }
+.hana-card-title { font-weight: 600; display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.hana-steps { margin: 4px 0; padding-left: 20px; }
+.hana-steps li p { margin: 0; }
+.hana-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.hana-form { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; }
+.hana-form label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); min-width: 0; }
+.hana-form label.wide { grid-column: 1 / -1; }
+.hana-form .input, .hana-form .select { width: 100%; }
+.hana-note { font-size: 13px; padding: 6px 10px; border-radius: var(--radius-sm); background: var(--off-soft); margin: 0 12px; }
+.hana-note p { margin: 0; }
+.hana-list .hana-note { margin: 0 0 0 34px; }
+.hana-action .hana-note { margin: 6px 0 0; }
+.hana-note.err { background: var(--err-soft); color: var(--err); }
+.hana-note.ok { background: var(--ok-soft); color: var(--ok); }
+.hana-note.info { background: var(--info-soft); color: var(--info); }
+.hana-thinking { display: flex; gap: 6px; align-items: center; padding-left: 34px; }
+.hana-typing { display: inline-flex; gap: 3px; }
+.hana-typing i { width: 6px; height: 6px; border-radius: 50%; background: #8a46e6; animation: hana-dots 1.2s infinite ease-in-out; }
+.hana-typing i:nth-child(2) { animation-delay: 0.15s; }
+.hana-typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes hana-dots { 0%, 80%, 100% { opacity: 0.25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+.hana-input { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); align-items: flex-end; }
+.hana-input textarea { flex: 1; resize: none; min-height: 44px; max-height: 160px; font-family: var(--sans); border-radius: 12px; }
+.hana-foot { padding: 0 12px 8px; text-align: center; }
+.hana-setup { margin: 10px 12px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); display: flex; flex-direction: column; gap: 6px; overflow: auto; max-height: 60%; }
+.hana-setup p { margin: 0; }
+.hana-radio { display: flex; flex-direction: column; gap: 4px; }
+.hana-field { display: flex; flex-direction: column; gap: 2px; }
+@media (max-width: 600px) {
+  .hana-panel { right: 8px; left: 8px; width: auto; bottom: 88px; height: calc(100vh - 100px); }
+  .hana-fab { right: 14px; bottom: 14px; }
+}
+.hana-form label.focus span { color: #8a46e6; font-weight: 600; }
+.hana-form label.focus .input { border-color: #8a46e6; box-shadow: 0 0 0 2px rgba(138, 70, 230, 0.15); }
+.hana-form .wide-btn { grid-column: 1 / -1; text-align: left; }
+.hana-card.danger { border-left-color: var(--err); }
+.hana-check { display: flex; gap: 6px; align-items: center; font-size: 13px; margin: 6px 0; }
+.hana-seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.hana-seg button { border: 1px solid var(--line-strong); background: var(--panel); color: var(--text); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.hana-seg button.on { background: #8a46e6; border-color: #8a46e6; color: #fff; }
+.hana-err { color: var(--err); font-style: normal; font-size: 11.5px; }
+.hana-form .hana-check { grid-column: 1 / -1; color: var(--text); }
+.hana-check.focus { color: #8a46e6; font-weight: 600; }
+.hana-choices { display: flex; flex-direction: column; gap: 6px; }
+.hana-choice { display: flex; gap: 8px; align-items: flex-start; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); cursor: pointer; }
+.hana-choice.on { border-color: #8a46e6; box-shadow: 0 0 0 2px rgba(138, 70, 230, 0.15); }
+.hana-choice > span { display: flex; flex-direction: column; gap: 1px; }
+.hana-choice input { margin-top: 3px; }
+.hana-rec { margin-left: 6px; vertical-align: middle; }
+.hana-menu { position: relative; }
+.hana-menu-list { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 230px; display: flex; flex-direction: column; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: var(--shadow-lg); }
+.hana-menu-list button { text-align: left; background: none; border: none; padding: 7px 10px; border-radius: 6px; color: var(--text); cursor: pointer; font-size: 13px; }
+.hana-menu-list button:hover:not(:disabled) { background: var(--accent-soft); }
+.hana-menu-list button:disabled { color: var(--muted); cursor: default; }
+.hana-menu-list button.danger { color: var(--err); }
+.hana-panel.hana-size-large { width: min(760px, calc(100vw - 24px)); height: min(860px, calc(100vh - 110px)); }
+.hana-panel.hana-size-full { left: 12px; right: 12px; top: 12px; bottom: 88px; width: auto; height: auto; }
+.hana-progress { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.hana-progress-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.hana-bar { position: relative; height: 10px; border-radius: 999px; background: var(--off-soft); overflow: hidden; }
+.hana-bar > span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: linear-gradient(90deg, #6d5dfc, #a34bf0 55%, #f0569b); transition: width 0.3s ease; }
+.hana-bar.indeterminate > span { width: 35% !important; animation: hana-slide 1.3s ease-in-out infinite; }
+.hana-progress.failed .hana-bar > span { background: var(--err); }
+@keyframes hana-slide { 0% { left: -35%; } 100% { left: 100%; } }
+.hana-steps-done { margin: 0; padding-left: 18px; }
+.hana-steps-done li.ok::marker { color: var(--ok); }
+.hana-steps-done li.now { color: var(--text); font-weight: 600; }
+.hana-steps-done li.bad { color: var(--err); }
+.hana-setup { max-height: none; }
+.hana-panel .hana-setup { flex: none; max-height: 70%; }
+.hana-checks { display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: center; }
+.hana-checks > .muted { flex-basis: 100%; }
+.hana-form .wide { grid-column: 1 / -1; }
+.hana-user-row { display: flex; justify-content: flex-end; align-items: flex-start; gap: 4px; }
+.hana-edit-btn { border: none; background: none; color: var(--muted); cursor: pointer; padding: 6px 4px; opacity: 0; transition: opacity 0.15s; }
+.hana-user-row:hover .hana-edit-btn, .hana-edit-btn:focus-visible { opacity: 1; }
+.hana-edit { align-self: stretch; display: flex; flex-direction: column; gap: 4px; }
+.hana-edit textarea { width: 100%; font-family: var(--sans); }

@@ -199,6 +199,13 @@ docker run --rm -p 127.0.0.1:8770:8770 \
   python:3.12-slim sh -c "pip install py-serverless-kit && apt-get update && apt-get install -y docker.io && pskit studio --host 0.0.0.0"
 ```
 
+## Hana, the AI assistant
+
+Hana's avatar at the bottom right (Ctrl+I) opens a chat with Hana, studio's assistant. She answers pskit questions and can
+change the project after you approve her plan, checking every change with `validate`. The model runs on this
+machine or a saved server in Docker (studio installs it), or at any OpenAI-compatible URL. See
+[assistant.md](assistant.md).
+
 ## Security
 
 Studio can write files in the project and run deploys with your cloud credentials, so:

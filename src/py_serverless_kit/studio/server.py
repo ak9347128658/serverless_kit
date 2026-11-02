@@ -50,6 +50,17 @@ class Studio:
         self._meta: Optional[Dict[str, Any]] = None
         self._cluster_watch: Any = None
         self._service_watch: Any = None
+        self._hana: Any = None
+
+    def hana(self) -> Any:
+        """Hana, the studio's AI assistant: where the model runs (``runtime``) and the chats (``chat``)."""
+        if self._hana is None:
+            from .hana.runtime import Runtime
+            from .hana.session import Hana
+
+            runtime = Runtime(self.root)
+            self._hana = (runtime, Hana(self.root, runtime.model))
+        return self._hana
 
     def service_watch(self) -> Any:
         """Checks on-prem services whose alerts are on (database CPU / memory / disk / lag) while the studio runs."""
@@ -386,6 +397,8 @@ def make_handler(app: Studio) -> type:
                     return 200, guides.index()
                 if len(parts) == 3:
                     return 200, guides.page(parts[1], parts[2])
+            if parts and parts[0] == "hana":
+                return self._hana(method, parts[1:], params)
             if parts and parts[0] == "onprem-services":
                 return self._onprem_services(method, parts[1:], params)
             if parts and parts[0] in ("onprem-servers", "onprem-terminals"):
@@ -498,6 +511,140 @@ def make_handler(app: Studio) -> type:
                 state.update(stopped)
                 return 200, state
             raise StudioError(404 if method == "GET" else 405, "unknown API endpoint")
+
+        def _hana(self, method: str, rest: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
+            """Hana, the AI assistant: where the model runs, chats, turns and the user's answers to her."""
+            from .hana.runtime import DEFAULT_IMAGE, check_image
+
+            runtime, chat = app.hana()
+            if not rest and method == "GET":
+                return 200, {"runtime": runtime.status(), "sessions": chat.list()}
+            if rest == ["install"] and method == "POST":
+                body = _obj(self._body())
+                image = check_image(str(body.get("image") or DEFAULT_IMAGE))
+                target = str(body.get("target") or "local")
+                if target == "server":
+                    server = str(body.get("server") or "")
+                    if not server:
+                        raise StudioError(400, "server is required")
+                    job = app.jobs.run_callable("hana", lambda j: runtime.install_server(j, server, image),
+                                                label=f"Install Hana on {server}")
+                elif target == "local":
+                    job = app.jobs.run_callable("hana", lambda j: runtime.install_local(j, image),
+                                                label="Install Hana (Docker, this machine)")
+                elif target == "huggingface":
+                    from .hana.runtime import HF_FILES
+
+                    file = str(body.get("file") or HF_FILES[0]["file"])
+                    job = app.jobs.run_callable("hana", lambda j: runtime.install_hf(j, file),
+                                                label="Install Hana (Hugging Face, in studio)")
+                else:
+                    raise StudioError(400, "target must be local, server or huggingface")
+                return 202, {"job_id": job.id}
+            if rest == ["endpoint"] and method == "POST":
+                body = _obj(self._body())
+                return 200, runtime.use_endpoint(str(body.get("url") or ""), str(body.get("api_key_env") or ""))
+            if rest == ["stop"] and method == "POST":
+                body = _obj(self._body())
+                return 200, runtime.stop(remove_data=bool(body.get("remove_data")))
+            if rest == ["messages"] and method == "POST":
+                body = _obj(self._body())
+                env = _obj(body.get("env"))
+                turn = chat.send(str(body.get("session") or "") or None, str(body.get("text") or ""), env)
+                return 202, {"session_id": turn.session.id, "turn_id": turn.id}
+            if len(rest) == 2 and rest[0] == "sessions":
+                session = chat.get(rest[1])
+                if method == "GET":
+                    running = session.turn if session.turn and session.turn.status in ("running", "waiting") else None
+                    return 200, {**session.summary(), "display": session.display,
+                                 "turn_id": running.id if running else None}
+                if method == "DELETE":
+                    return 200, chat.delete(rest[1])
+            if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "edit" and method == "POST":
+                body = _obj(self._body())
+                index = body.get("index")
+                if not isinstance(index, int):
+                    raise StudioError(400, "index must be a number")
+                turn = chat.edit(rest[1], index, str(body.get("text") or ""), _obj(body.get("env")))
+                return 202, {"session_id": turn.session.id, "turn_id": turn.id}
+            if rest == ["sessions"] and method == "DELETE":
+                return 200, chat.delete_all()
+            if rest == ["functions"] and method == "POST":
+                from .hana.edits import create_functions
+
+                body = _obj(self._body())
+                fns = body.get("names")
+                if not isinstance(fns, list):
+                    raise StudioError(400, "names must be a list")
+                existing = body.get("existing") or {}
+                if not isinstance(existing, dict):
+                    raise StudioError(400, "existing must map a function name to update, rename or skip")
+                return 200, create_functions(app.root, [str(n) for n in fns], str(body.get("trigger") or "none"),
+                                             str(body.get("schedule") or "5 minutes"),
+                                             placement=str(body.get("placement") or "module"),
+                                             module=str(body.get("module") or ""),
+                                             existing={str(k): str(v) for k, v in existing.items()})
+            if rest == ["separate"] and method == "POST":
+                from .hana.edits import separate_functions
+
+                fns = _obj(self._body()).get("functions")
+                if not isinstance(fns, list) or not fns:
+                    raise StudioError(400, "functions must be a list of function names")
+                return 200, separate_functions(app.root, [str(n) for n in fns])
+            if rest == ["resources"] and method == "POST":
+                from .hana.edits import create_resources
+
+                body = _obj(self._body())
+                items = body.get("items")
+                if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+                    raise StudioError(400, "items must be a list of resources")
+                return 200, create_resources(app.root, items)
+            if rest == ["code"] and method == "POST":
+                from .hana.edits import write_code
+
+                body = _obj(self._body())
+                fns = body.get("functions")
+                if not isinstance(fns, list):
+                    raise StudioError(400, "functions must be a list")
+                return 200, write_code(app.root, [str(n) for n in fns])
+            if rest == ["workflow"] and method == "POST":
+                from .hana.edits import create_workflow
+
+                body = _obj(self._body())
+                steps = body.get("steps")
+                if not isinstance(steps, list):
+                    raise StudioError(400, "steps must be a list of function names")
+                create = body.get("create_functions") or []
+                try:
+                    wait = float(body.get("wait_seconds") or 0)
+                except (TypeError, ValueError):
+                    raise StudioError(400, "wait_seconds must be a number") from None
+                return 200, create_workflow(app.root, str(body.get("name") or ""), [str(s) for s in steps],
+                                            str(body.get("description") or ""), wait_seconds=wait,
+                                            create_functions=[str(f) for f in create] if isinstance(create, list) else [])
+            if rest == ["remove-item"] and method == "POST":
+                from .hana.edits import remove
+
+                body = _obj(self._body())
+                return 200, remove(app.root, str(body.get("kind") or ""), str(body.get("name") or ""),
+                                   delete_code=body.get("delete_code") is not False)
+            if len(rest) == 3 and rest[0] == "sessions" and rest[2] == "note" and method == "POST":
+                return 200, chat.note(rest[1], str(_obj(self._body()).get("text") or ""))
+            if len(rest) == 2 and rest[0] == "turns" and method == "GET":
+                return 200, chat.turn(rest[1]).snapshot(_int(params, "since", 0))
+            if len(rest) == 3 and rest[0] == "turns" and rest[2] == "answer" and method == "POST":
+                body = _obj(self._body())
+                decision = str(body.get("decision") or "")
+                if decision not in ("approve", "reject", "answer"):
+                    raise StudioError(400, "decision must be approve, reject or answer")
+                chat.turn(rest[1]).respond(str(body.get("pending_id") or ""),
+                                           {"decision": decision, "text": str(body.get("text") or "")[:2000]})
+                return 200, {"ok": True}
+            if len(rest) == 3 and rest[0] == "turns" and rest[2] == "stop" and method == "POST":
+                self._body()
+                chat.turn(rest[1]).stop()
+                return 200, {"ok": True}
+            raise StudioError(404 if method == "GET" else 405, "unknown Hana endpoint")
 
         def _onprem_services(self, method: str, rest: List[str], params: Dict[str, List[str]]) -> Tuple[int, Any]:
             """Docker services for on-prem functions: create, inspect, back up, remove (long steps as jobs)."""

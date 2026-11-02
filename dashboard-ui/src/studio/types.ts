@@ -1026,3 +1026,159 @@ export interface ResourceBinding {
   code: string[];
   used_by: string[];
 }
+
+// ---------------------------------------------------------------- Hana (AI assistant)
+
+export interface HanaRuntime {
+  configured: boolean;
+  target: "local" | "server" | "endpoint" | "huggingface" | null;
+  url: string | null;
+  server?: string | null;
+  image: string;
+  default_image: string;
+  hf_repo: string;
+  hf_file: string;
+  hf_files: { file: string; size_gb: number; label: string }[];
+  recommended?: "local" | "huggingface";
+  llama_cpp?: boolean;
+  ready: boolean;
+  model: string | null;
+  error: string | null;
+  docker?: { available: boolean; version?: string; error?: string };
+  container?: { running: boolean; image: string | null; port: number | null } | null;
+}
+
+export interface HanaSessionSummary {
+  id: string;
+  title: string;
+  updated_at: number;
+  messages: number;
+}
+
+export interface HanaState {
+  runtime: HanaRuntime;
+  sessions: HanaSessionSummary[];
+}
+
+export interface HanaEnv {
+  provider: string;
+  stage: string;
+  mode: "ask" | "auto";
+  page: string;
+  /** Who answers first: Hana's model (then studio actions), or studio's actions (then the model). */
+  first?: "model" | "studio";
+}
+
+export type HanaDisplay =
+  | { role: "user"; text: string; m?: number }
+  | { role: "assistant"; text: string }
+  | { role: "tool"; name: string; args: JsonObject; result: string }
+  | { role: "note"; text: string }
+  | { role: "action"; card: HanaCard };
+
+export type HanaCard =
+  | {
+      kind: "server";
+      mode?: "add" | "edit";
+      name: string;
+      host: string;
+      user: string;
+      port: number;
+      identity_file: string;
+      home?: string;
+      data_dir?: string;
+      bind?: string;
+      auth?: string;
+      sudo?: boolean;
+      description?: string;
+      has_password?: boolean;
+      focus?: string[];
+    }
+  | {
+      kind: "service";
+      service: string;
+      role: string;
+      key: string;
+      server: string;
+      servers: string[];
+      cluster?: string;
+      scaling?: "single" | "replicated";
+      primary?: string;
+      replicas?: string[];
+      sync?: "async" | "sync";
+      conflict?: string;
+    }
+  | { kind: "server-remove"; name: string; label: string }
+  | { kind: "service-remove"; key: string; service: string; where: string }
+  | { kind: "cluster"; name: string; orchestrator: string; master: string; workers: string[]; size: number; servers: string[]; conflict?: string }
+  | { kind: "deploy"; provider: string; stage: string; server: string; cluster: string; servers: string[]; clusters: string[] }
+  | { kind: "workflow"; name: string; steps: string[]; functions: string[]; create?: string[]; wait?: number }
+  | {
+      kind: "functions";
+      names: string[];
+      trigger: string;
+      schedule: string;
+      module: string;
+      /** shared code modules of the project (app.handlers ...), most used first */
+      modules?: string[];
+      /** "separate" | "module" | "" (not said: the user picks) */
+      placement?: string;
+      /** names already in pskit.yml, with the decision the user wrote (update | rename | skip) and a free name */
+      existing?: string[];
+      decisions?: Record<string, string>;
+      suggested?: Record<string, string>;
+    }
+  | { kind: "separate"; functions: string[]; plans: { function: string; from: string; to: string; requirements: string[] }[] }
+  | { kind: "code"; items: { function: string; handler: string; kind: string; file: string | null }[] }
+  | { kind: "resource"; key: string; type: string; provider: string; exists?: boolean; suggested?: string; existing_type?: string; conflict?: string }
+  | {
+      kind: "balancer";
+      name: string;
+      server: string;
+      port: number;
+      algorithm: string;
+      clusters: string[];
+      cluster_names: string[];
+      servers: string[];
+      algorithms: { name: string; label: string; summary: string }[];
+      conflict?: string;
+    }
+  | {
+      kind: "item-remove";
+      item_kind: "function" | "workflow" | "resource";
+      name: string;
+      yml: string;
+      code: { file: string; handler: string; action: "delete-file" | "delete-function" | "keep"; why?: string } | null;
+      warnings: string[];
+    };
+
+export interface HanaSessionDetail extends HanaSessionSummary {
+  display: HanaDisplay[];
+  turn_id: string | null;
+}
+
+export interface HanaPending {
+  id: string;
+  kind: "plan" | "question" | "step";
+  steps?: string[];
+  question?: string;
+  options?: string[];
+  tool?: string;
+  args?: JsonObject;
+}
+
+export interface HanaEvent {
+  seq: number;
+  type: "user" | "thinking" | "tool_call" | "tool_result" | "waiting" | "answered" | "plan" | "changed" | "answer" | "action" | "error" | "stopped" | "end";
+  [key: string]: unknown;
+}
+
+export interface HanaTurn {
+  turn_id: string;
+  session_id: string;
+  status: "running" | "waiting" | "done" | "error" | "stopped";
+  pending: HanaPending | null;
+  events: HanaEvent[];
+  next: number;
+  changed: string[];
+}

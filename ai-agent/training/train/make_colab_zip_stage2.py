@@ -17,6 +17,7 @@ TRAINING = [
     "train/step1_env_check.py", "train/step2_prepare.py", "train/step3_train.py", "train/step4_eval.py",
     "train/step5_merge.py", "train/step6_chat.py",
     "train/s2_prepare.py", "train/s2_train.py", "train/s2_eval.py", "train/s2_chat.py", "train/COLAB_STAGE2.md",
+    "train/s3_gguf.py", "train/s3_test_endpoint.py", "train/s3_publish_hf.py", "train/PUBLISH.md",
     "tools/run_tool.py", "tools/task_common.py",
     "data/final/task_train.jsonl", "data/final/task_val.jsonl", "data/final/TASK_README.md",
     "data/final_v2/knowledge_train.jsonl", "data/final_v2/identity_train.jsonl", "data/final_v2/knowledge_val.jsonl",

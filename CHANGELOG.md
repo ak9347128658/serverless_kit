@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-11-02
+
+### Added
+- **Hana asks before she creates**: new functions can each be **their own app** (`functions/<name>/` with its own
+  `requirements.txt`) or go into an existing module, and Hana asks which. A name that is already taken gets
+  update / another name / skip (functions), replace / another name (resources), or a free name and a note
+  (services, clusters, load balancers), instead of being skipped or renamed silently. "make step01 and step02
+  separate apps" moves existing functions into their own apps and deletes the shared file once nothing uses it.
+  Studio answers first when it has a card that changes the project, a short answer to studio's own question
+  ("Which function should I remove?" → "step01, step02") is understood, and a model answer that claims a change
+  with no file written is marked as such.
+- **Hana runs terminal commands** (`run_command`): in the project folder or on a saved server over SSH, after you
+  click **Run** on each command (also in Auto-approve); the output goes back to her and she answers from it.
+  Commands that wipe or stop a machine are refused. The tool and a system-prompt rule are in the runtime prompt and
+  the training data (`ai-agent/training/tools/task_common.py`); until the model is retrained, studio turns a
+  command she writes in a code block into the same **Run** card when you asked for a result. Studio's answers from
+  your real settings (servers, services, clusters, load balancers, functions) now come before the model's. The end
+  of the system message tells her she has a terminal and names the saved servers. Studio proposes the command
+  itself for "install docker on VM_01_2cpu" (any catalog runtime; part of a server's name is enough), "run
+  `docker ps` on app-2", "execute pskit validate" and "can you execute it", and the model answers from the output.
+- **Hana, the studio's AI assistant** (the avatar at the bottom right of every page, Ctrl+I): a floating chat.
+  Hana answers pskit questions with how-to steps for studio, the terminal and code, and changes the project: she
+  reads it, shows a plan to **Approve** / **Reject** (or runs it at once in *Auto-approve*), edits `pskit.yml`
+  (backed up first) and handler files, and checks the result with `pskit validate` and a local invoke. She never
+  deploys or removes. The model (1.5B, fine-tuned on pskit, by Asif Khan) runs locally: studio installs the
+  `ak2311581/hana-pskit` Docker image on this machine or on a saved server (through an SSH tunnel), or connects to
+  any OpenAI-compatible URL. Servers and on-prem services: from what you paste (IP, user, `.pem` path, `ssh`
+  command) the chat fills in an **Add server** or **Create on-prem service** card, and studio runs it when you click.
+  Chats are saved in `.pskit/studio/hana/`. See [docs/assistant.md](docs/assistant.md).
+- `pskit studio --ailogs[=true]` (or `PSKIT_HANA_AILOGS=1`) prints every step of Hana's chats in the terminal:
+  messages, model requests and answers, tool calls and results, plans and cards (passwords stay hidden).
+
 ## [2.10.0] - 2026-10-30
 
 ### Added

@@ -2764,7 +2764,18 @@ def dashboard(
 @click.option("--port", default=8770, show_default=True)
 @click.option("--open", "open_browser", is_flag=True, help="Open in the browser.")
 @click.option("--vscode-image", default=None, help="code-server image for the full VS Code view.")
-def studio(directory: str, bind_host: str, port: int, open_browser: bool, vscode_image: Optional[str]) -> None:
+@click.option(
+    "--ailogs",
+    type=click.BOOL,
+    default=False,
+    is_flag=False,
+    flag_value=True,
+    help="Print every step of Hana's chats in this terminal: messages, model requests and answers, tool calls "
+    "with arguments and results, plans, cards, errors (passwords stay hidden). --ailogs or --ailogs=true.",
+)
+def studio(
+    directory: str, bind_host: str, port: int, open_browser: bool, vscode_image: Optional[str], ailogs: bool
+) -> None:
     """Edit the project in the browser (writes pskit.yml).
 
     Build functions, triggers, workflows and resources with forms, edit code and deploy.
@@ -2773,9 +2784,13 @@ def studio(directory: str, bind_host: str, port: int, open_browser: bool, vscode
     Examples:
       pskit studio --open
       pskit studio -d path/to/project --port 8800
+      pskit studio --ailogs=true        # Hana's conversations, tool calls and results in this terminal
     """
+    from ..studio.hana import ailog
     from ..studio.server import is_loopback, make_server, studio_url
 
+    if ailogs:
+        ailog.enable()
     root = Path(directory).resolve()
     try:
         httpd = make_server(root, bind_host, port, vscode_image=vscode_image)
@@ -2789,6 +2804,8 @@ def studio(directory: str, bind_host: str, port: int, open_browser: bool, vscode
         )
     ok(f"pskit studio for {root}")
     echo(f"Open {url}  (Ctrl+C to stop)")
+    if ailog.enabled():
+        echo("Hana AI logs are on: every chat step is printed here (passwords stay hidden).")
     if open_browser:
         webbrowser.open(url)
     try:
